@@ -44,13 +44,13 @@ npm run dev -w web        # vite，热更新
 | `server/test/agents.test.ts` | JSON/TOML 补丁、备份、还原冲突、空壳文件清理 |
 | `server/test/security.test.ts` | 权限矩阵、租户隔离、凭据编解码、路由登记 |
 | `server/test/storage.test.ts` | 原子写、损坏隔离、未来版本隔离 |
-| `server/test/smoke.test.ts` | 端到端：登录、供应商、令牌、转发（含流式/回退/501）、Agent、越权、持久化 |
+| `server/test/smoke.test.ts` | 端到端：登录、供应商、令牌、转发（含流式/回退/501/4xx 透传）、Agent、越权、持久化 |
 | `web/test/pages.test.tsx` | 页面装配：登录、供应商、模型、Agent、概览（jsdom + 假 fetch） |
 
-`smoke.test.ts` 会起两个假上游（正常 200 与永远 500），用系统分配的随机端口（`port=0`），
+`smoke.test.ts` 会起三个假上游（正常 200、永远 500、固定 4xx），用系统分配的随机端口（`port=0`），
 所以并行跑测试不会撞端口。Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真实家目录**。
 
-当前基线：83 项（server 78 + web 5）。
+当前基线：84 项（server 79 + web 5）。
 
 ```bash
 npm test                                # 全部

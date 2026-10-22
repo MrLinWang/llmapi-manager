@@ -62,6 +62,12 @@ export interface ForwardOutcome {
   stream: boolean;
   latencyMs: number;
   error?: string;
+  /**
+   * 仅 `deferErrorWrite` 时填充：上游原始错误响应体与 content-type。
+   * 调用方决定"不回退"后必须用 `writeDeferredError` 补写，否则客户端会收到空响应。
+   */
+  upstreamBody?: string;
+  upstreamContentType?: string;
 }
 
 export interface ForwardOptions {
@@ -147,12 +153,15 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
         error: snippet || response.statusText,
       });
       if (options.deferErrorWrite) {
-        // 交给调用方决定是否回退；这里不碰 reply
+        // 交给调用方决定是否回退；这里不碰 reply，但要把原始响应带出去，
+        // 否则"不回退"时调用方无从补写，客户端会拿到空响应。
         return {
           status: response.status,
           stream,
           latencyMs,
           error: snippet || response.statusText,
+          upstreamBody: snippet || response.statusText,
+          upstreamContentType: response.headers.get('content-type') ?? 'application/json',
         };
       }
       reply.statusCode = response.status;
@@ -246,6 +255,31 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
   } finally {
     reply.off('close', onClientClose);
   }
+}
+
+/**
+ * 补写被延迟的上游错误响应。
+ *
+ * `deferErrorWrite` 让 `forwardOnce` 在失败时不碰 reply，好让调用方先判断能否回退；
+ * 一旦决定不回退（非 5xx、没有备选、或回退也失败），必须调用这里把错误发给客户端。
+ * 漏掉这一步的表现是：上游 4xx，客户端却收到 200 + 空 body。
+ */
+export function writeDeferredError(
+  reply: ServerResponse,
+  outcome: Pick<ForwardOutcome, 'status' | 'upstreamBody' | 'upstreamContentType' | 'error'>,
+): void {
+  if (reply.headersSent || reply.writableEnded) return;
+  reply.statusCode = outcome.status;
+  reply.setHeader('content-type', outcome.upstreamContentType ?? 'application/json');
+  reply.end(
+    outcome.upstreamBody ??
+      JSON.stringify({
+        error: {
+          code: 'upstream_error',
+          message: outcome.error ?? `上游返回 ${outcome.status}`,
+        },
+      }),
+  );
 }
 
 export function assertApiTypeMatch(

@@ -100,9 +100,9 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
   完整令牌只在"生成/重置"那一次响应里出现。
 - 口令只存 scrypt 哈希。日志器会按 key 名与正则打码，但不要依赖它 —— 不要主动把密钥放进日志。
 
-### 6. 网关转发的两个已知坑
+### 6. 网关转发的三个已知坑
 
-这两处都已被真实 bug 踩过，改动 `gateway/forward.ts` 时特别注意：
+这三处都已被真实 bug 踩过，改动 `gateway/forward.ts` 时特别注意：
 
 - **不要用 `request.raw` 的 `'close'` 事件去 abort 上游。** Node 在请求体读完后就会触发它，
   会把刚发出的上游请求立刻中止（表现为全部 502「请求被中止」）。现在监听的是响应流的
@@ -110,6 +110,10 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 - **无 body 的 POST 不能带 `Content-Type: application/json`。** Fastify 会抛
   `FST_ERR_CTP_EMPTY_JSON_BODY`。服务端已注册自定义 JSON 解析器把空 body 当 `{}`，
   前端 `web/src/lib/api.ts` 也只在确有 `body` 时才加 JSON 头。两侧都要保持。
+- **延迟写错误后必须补写。** `deferErrorWrite` 让 `forwardOnce` 失败时不碰 response，
+  好在回退前不把错误发给客户端。但一旦判定"不回退"（非 5xx / 无备选），
+  必须调用 `writeDeferredError` 补写 —— 漏掉这一步会表现为上游 4xx、客户端收到
+  `200` + 空 body。4xx 不换供应商，但状态码与错误体要原样透传。
 
 ### 7. 存储写入必须原子
 
@@ -126,12 +130,12 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 78 + web 5 = 83 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 79 + web 5 = 84 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
 - 修改存储 → 补 `server/test/storage.test.ts`（原子写、损坏隔离、未来版本隔离）。
-- 改到网关转发 → 跑 `server/test/smoke.test.ts`（假上游覆盖非流式、流式、501、回退、日志）。
+- 改到网关转发 → 跑 `server/test/smoke.test.ts`（假上游覆盖非流式、流式、501、回退、4xx 透传、日志）。
 - 改了品牌名 / 对外文案 → 同步 `README.md`、`web/index.html`、登录页与侧边栏。
 
 ## 明确不做的事

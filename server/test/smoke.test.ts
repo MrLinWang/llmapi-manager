@@ -10,10 +10,16 @@ import { createLogger } from '../src/logger';
 import { bootstrapIdentity } from '../src/bootstrap';
 import { loadConfig, type AppConfig } from '../src/config';
 import { resetWarnings } from '../src/resilience';
-import { portOf, startFailingUpstream, startMockUpstream } from './mockUpstream';
+import {
+  portOf,
+  startClientErrorUpstream,
+  startFailingUpstream,
+  startMockUpstream,
+} from './mockUpstream';
 
 let MOCK_PORT = 0;
 let FAIL_PORT = 0;
+let CLIENT_ERR_PORT = 0;
 const PASSWORD = 'smoke-test-password';
 
 let app: FastifyInstance;
@@ -45,9 +51,12 @@ beforeAll(async () => {
   agentHome = fs.mkdtempSync(path.join(os.tmpdir(), 'llmapi-smoke-home-'));
   const mock = await startMockUpstream();
   const failing = await startFailingUpstream();
-  servers = [mock, failing];
+  // 429 用于验证"非 5xx 不回退，但错误必须原样透传"，这是曾经返回 200 空 body 的回归点
+  const clientError = await startClientErrorUpstream(429);
+  servers = [mock, failing, clientError];
   MOCK_PORT = portOf(mock);
   FAIL_PORT = portOf(failing);
+  CLIENT_ERR_PORT = portOf(clientError);
 
   const config = testConfig(dataDir, agentHome);
   const logger = createLogger('error');
@@ -325,6 +334,64 @@ describe('冒烟：网关', () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers['x-llmapi-fallback']).toBe('1');
     expect(response.json().choices[0].message.content).toBe('mock reply');
+  });
+
+  it('上游 4xx 且存在备选时不回退，并把错误原样透传', async () => {
+    // 回归：主供应商那次转发是延迟写模式（为了给回退留出机会），
+    // 曾经在"非 5xx 不回退"分支直接 return，导致客户端收到 200 + 空 body。
+    const limited = await call(
+      'POST',
+      '/api/providers',
+      {
+        name: 'Rate Limited Upstream',
+        apiType: 'openai',
+        baseUrl: `http://127.0.0.1:${CLIENT_ERR_PORT}`,
+        apiKey: 'sk-limited',
+        models: ['gpt-x'],
+      },
+      { cookie },
+    );
+    expect(limited.statusCode).toBe(201);
+    const limitedId = limited.json().provider.id;
+
+    const list = await call('GET', '/api/providers', undefined, { cookie });
+    const ids = list.json().providers.map((item: { id: string }) => item.id);
+    await call(
+      'PUT',
+      '/api/providers/order',
+      { ids: [limitedId, ...ids.filter((id: string) => id !== limitedId)] },
+      { cookie },
+    );
+    await call(
+      'PUT',
+      '/api/settings/default',
+      { providerId: limitedId, model: 'gpt-x' },
+      { cookie },
+    );
+
+    const response = await call(
+      'POST',
+      '/v1/chat/completions',
+      { model: 'gpt-x', messages: [] },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    // 关键断言：状态码是 429，不是 200
+    expect(response.statusCode).toBe(429);
+    // 错误体来自上游，而不是空字符串
+    expect(response.body).not.toBe('');
+    expect(response.json().error.code).toBe('rate_limit_exceeded');
+    expect(response.json().error.message).toBe('upstream says 429');
+    // 4xx 不换供应商，因此不应有回退标记
+    expect(response.headers['x-llmapi-fallback']).toBeUndefined();
+
+    // 清理：删除该供应商并把默认供应商还原成上一个用例留下的那个
+    await call('DELETE', `/api/providers/${limitedId}`, undefined, { cookie });
+    const broken = (await call('GET', '/api/providers', undefined, { cookie }))
+      .json()
+      .providers.find((item: { name: string }) => item.name === 'Broken Upstream');
+    if (broken) {
+      await call('PUT', '/api/settings/default', { providerId: broken.id }, { cookie });
+    }
   });
 
   it('请求日志记录了租户、别名与回退', async () => {

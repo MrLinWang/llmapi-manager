@@ -99,6 +99,24 @@ export function startFailingUpstream(port = 0) {
   });
 }
 
+/**
+ * 永远返回指定 4xx 的假上游，用于验证"非 5xx 不回退、但错误必须透传给客户端"。
+ * 4xx 是请求本身的问题（模型名、参数、额度、鉴权），换供应商大概率同样失败。
+ */
+export function startClientErrorUpstream(status = 429, port = 0) {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        error: { code: 'rate_limit_exceeded', message: `upstream says ${status}` },
+      }),
+    );
+  });
+  return new Promise<http.Server>((resolve) => {
+    server.listen(port, '127.0.0.1', () => resolve(server));
+  });
+}
+
 /** 取服务实际监听的端口（传入 0 时由系统分配，避免与外部进程撞端口）。 */
 export function portOf(server: http.Server): number {
   const address = server.address();

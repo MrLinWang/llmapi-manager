@@ -7,6 +7,8 @@ import { badRequest, unauthorized } from '../http/errors';
 import {
   assertApiTypeMatch,
   forwardOnce,
+  writeDeferredError,
+  type ForwardOutcome,
   type GatewayPath,
 } from '../gateway/forward';
 import { RequestLogService } from '../services/requestLog';
@@ -175,7 +177,7 @@ export function registerGatewayRoutes(
         candidate: Candidate,
         fallback: boolean,
         deferError: boolean,
-      ): Promise<{ status: number }> =>
+      ): Promise<ForwardOutcome> =>
         forwardOnce({
           target: {
             provider: candidate.provider,
@@ -203,7 +205,16 @@ export function registerGatewayRoutes(
       const mayFallback = selection.fallbacks.length > 0;
       const primaryResult = await attempt(selection.primary, false, mayFallback);
 
-      if (!mayFallback || primaryResult.status < 500 || reply.raw.headersSent) return;
+      // 非 5xx 不换供应商：4xx 是请求本身的问题（模型名、参数、额度），
+      // 换一家大概率同样失败，还会掩盖真实原因。
+      if (!mayFallback || primaryResult.status < 500) {
+        // 主供应商那次是延迟写模式，错误尚未发给客户端，这里必须补写；
+        // 否则客户端会收到 200 + 空 body（曾被真实 bug 踩过）。
+        writeDeferredError(reply.raw, primaryResult);
+        return;
+      }
+
+      if (reply.raw.headersSent) return;
 
       const fallbackCandidate = selection.fallbacks[0];
       ctx.logger.warn('主供应商失败，尝试回退', {
@@ -211,7 +222,8 @@ export function registerGatewayRoutes(
         fallback: fallbackCandidate.provider.name,
         status: primaryResult.status,
       });
-      // 只回退一次：骨架期的策略是"换一家试一下"，不追求多层重试
+      // 只回退一次：骨架期的策略是"换一家试一下"，不追求多层重试。
+      // 这次不再延迟写：回退失败就直接把错误发给客户端。
       await attempt(fallbackCandidate, true, false);
     };
 
