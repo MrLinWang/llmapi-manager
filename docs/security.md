@@ -10,6 +10,11 @@
 两者解析出的都是 `Principal`，但 `role` 不同：会话取账号真实角色，网关令牌固定为 `member`。
 `member` 只有 `gateway:read`，走到任何 `/api/*` 写接口都会 403。
 
+> 注意"本服务令牌的两种写法"与"上游的鉴权形态"是两件事：客户端既可以用
+> `Authorization: Bearer <网关令牌>`，也可以用 `x-api-key: <网关令牌>`，两者都会被解析成本服务的
+> `Principal`；而转发给上游时，只有 `openai` / `responses` 供应商走 Bearer、`anthropic` 供应商走
+> `x-api-key` + `anthropic-version`，与客户端当初用哪种写法无关。
+
 ## 口令
 
 - 用 scrypt（N=16384 默认参数、16 字节随机盐、64 字节派生）哈希，存储格式 `scrypt$<salt>$<hash>`。
@@ -52,7 +57,7 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 
 ## 网关令牌
 
-- 格式 `lmm_<32 字节 base64url>`。
+- 格式 `lmm_<32 位 base64url>`（24 字节随机数编码而成）。
 - 只存 `sha256(token)`（`tokenHash`），比对用 `timingSafeEqual`。
 - 为了给 Agent 下发配置，另存一份 `tokenCipher`（`SecretCodec` 编码），**任何接口都不返回它**。
 - 查看接口只返回 `prefix`（前 8 位）+ `tail`（后 4 位）拼成的掩码；完整值只在"生成/重置"的那一次响应里出现。
@@ -93,6 +98,8 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 - 列表/详情接口返回 `apiKeyMasked`（首 3 位 + 8 星 + 尾 4 位）与 `apiKeyTail`，**不返回 `apiKey`**，
   并由 `toProviderView` 同时剔除 `tenantId`。
 - 客户端自带的 `Authorization` / `x-api-key` 不会被转发给上游 —— 网关头只用于校验本服务令牌。
+  上游鉴权头由网关重新生成：`openai` 与 `responses` 注入 `Authorization: Bearer <上游 Key>`，
+  `anthropic` 注入 `x-api-key` + `anthropic-version`。
 - 日志器按 key 名（`apikey` / `authorization` / `token` / `password` / `secret` 等）打码，
   并把 `sk-xxx`、`Bearer xxx` 形式的字符串截断。但这是兜底，不要主动把密钥写进日志。
 

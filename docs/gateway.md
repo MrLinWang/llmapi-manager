@@ -57,18 +57,37 @@ lmm-<providerKey>/<model>
 
 ### 3. 无可用供应商
 
-返回 400，例如 `没有启用的 openai 供应商，请先在控制台添加并启用`。
+返回 400，消息里带的是该路径要求的 `apiType`，例如 `/v1/responses` 下是
+`没有启用的 responses 供应商，请先在控制台添加并启用`，`/v1/chat/completions` 下是
+`没有启用的 openai 供应商，请先在控制台添加并启用`。
+
+注意这里只看"启用 + 协议匹配"的供应商：一家 `openai` 供应商再健康，也不会被算作
+`/v1/responses` 的可用候选。
 
 ## 协议匹配
 
 | 路径 | 要求的上游 `apiType` |
 | --- | --- |
-| `/v1/chat/completions` | `openai` |
-| `/v1/messages` | `anthropic` |
-| `/v1/responses` | 不限 |
+| `/v1/chat/completions` | `openai`（Chat Completions） |
+| `/v1/messages` | `anthropic`（Messages） |
+| `/v1/responses` | `responses`（OpenAI Responses API） |
 
-不匹配时返回 **501**，消息明确说明"骨架期不做协议转换"，不会静默转发到错误路径。
-`/v1/responses` 会原样转发到上游同名路径，由供应商自行决定支持与否。
+对应的前端文案统一为「<厂商> 兼容（<API 形态>）」：**OpenAI 兼容（Chat Completions）** /
+**OpenAI 兼容（Responses）** / **Anthropic 兼容（Messages）**。三段文案在
+`web/src/lib/labels.ts`（下拉、徽标）与 `server/src/domain/provider.ts`（报错）各有一份，
+口径必须一致；判断"接哪条路"看括号里的 API 形态，不要只看厂商名。
+
+三条路径都是**严格匹配**：不匹配时返回 **501**，消息明确说明"骨架期不做协议转换"，
+不会静默转发到错误路径。
+
+`/v1/responses` 早期是"不限协议"的直通路径，那会把 Responses 请求发给只支持 Chat
+的上游，表现为上游报参数错误。现在要求供应商协议就是 `responses`，
+双向都被拦住：`responses` 供应商也接不了 `/v1/chat/completions`。
+
+### 协议与鉴权头
+
+`openai` 与 `responses` 同属 OpenAI 体系，都用 `Authorization: Bearer <上游 Key>`；
+只有 `anthropic` 用 `x-api-key` 加 `anthropic-version`。
 
 ## 上游地址拼接
 
@@ -85,7 +104,11 @@ baseUrl = https://api.example.com/v1/    → https://api.example.com/v1/chat/com
 | 上游类型 | 注入 | 透传 |
 | --- | --- | --- |
 | `openai` | `Authorization: Bearer <上游 Key>` | `openai-organization`、`openai-project`、`accept` |
+| `responses` | `Authorization: Bearer <上游 Key>` | `openai-organization`、`openai-project`、`accept` |
 | `anthropic` | `x-api-key: <上游 Key>`、`anthropic-version`（默认 `2023-06-01`） | `anthropic-beta`、`accept` |
+
+实现上按"鉴权体系"分组而不是逐个协议罗列：`openai` 与 `responses` 共用 Bearer 分支，
+只有 `anthropic` 走 `x-api-key`。新增协议时不要复制一个 if 分支，否则很容易漏掉。
 
 客户端自带的鉴权头**不会**传给上游 —— 网关头只用于校验本服务令牌。
 
@@ -144,4 +167,14 @@ curl http://127.0.0.1:8787/v1/messages \
   -H "x-api-key: $LLMAPI_TOKEN" \
   -H 'content-type: application/json' \
   -d '{"model":"lmm-mock-anthropic/claude-x","max_tokens":16,"messages":[]}'
+
+# Responses 形态（必须打到 responses 供应商，请求体是 input 而不是 messages）
+curl http://127.0.0.1:8787/v1/responses \
+  -H "Authorization: Bearer $LLMAPI_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"model":"lmm-mock-responses/gpt-resp","input":"hi"}'
 ```
+
+注意最后两例的区别：`/v1/messages` 只能用 `anthropic` 供应商、`/v1/responses` 只能用
+`responses` 供应商。拿 `openai` 供应商的别名去打 `/v1/responses` 会得到 501，而不是被当成
+Chat 请求转发出去。

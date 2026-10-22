@@ -8,10 +8,10 @@
 
 ## 能力范围
 
-- **供应商管理**：OpenAI / Anthropic 兼容上游，API Key 加密落盘、列表脱敏、优先级排序、启用开关、连通性测试（请求上游 `/models`）。
+- **供应商管理**：三种协议 —— OpenAI 兼容（Chat Completions）/ OpenAI 兼容（Responses）/ Anthropic 兼容（Messages）；API Key 加密落盘、列表脱敏、优先级排序、启用开关、连通性测试（请求上游 `/models`）。
 - **模型聚合**：把启用供应商的模型发布为 `lmm-<供应商key>/<模型>` 别名；另可配置"默认供应商 + 默认模型"承接不带别名的请求。
 - **统一网关**：`/v1/models`、`/v1/chat/completions`、`/v1/messages`、`/v1/responses`；支持 SSE 流式透传；默认路径失败时按优先级回退一次。
-- **Agent 下发**：Codex CLI（`~/.codex/config.toml` + `auth.json`）与 Claude Code（`~/.claude/settings.json`）；支持预览、应用、还原，写前备份，只改自己拥有的键。
+- **Agent 下发**：Codex CLI（`~/.codex/config.toml` + `auth.json`，候选协议 `responses` → `openai`，`wire_api` 跟随所选供应商）与 Claude Code（`~/.claude/settings.json`，需要 `anthropic`）；支持预览、应用、还原，写前备份，只改自己拥有的键。
 - **可观测**：请求日志与今日统计（请求数、成功率、平均耗时）。
 
 ## 快速开始
@@ -77,10 +77,14 @@ npm start               # http://127.0.0.1:8787
 
 ```
 GET  /v1/models
-POST /v1/chat/completions    # 需要 apiType=openai 的上游
-POST /v1/messages            # 需要 apiType=anthropic 的上游
-POST /v1/responses
+POST /v1/chat/completions    # 需要 apiType=openai 的上游（OpenAI 兼容 · Chat Completions）
+POST /v1/messages            # 需要 apiType=anthropic 的上游（Anthropic 兼容 · Messages）
+POST /v1/responses           # 需要 apiType=responses 的上游（OpenAI 兼容 · Responses）
 ```
+
+三条 POST 路径都是**严格匹配**：协议不符返回 501，不会退化成正向直通。
+鉴权头按上游体系分组：`openai` 与 `responses` 用 `Authorization: Bearer`，
+`anthropic` 用 `x-api-key` + `anthropic-version`。
 
 示例（令牌在"模型聚合"页生成）：
 
@@ -102,7 +106,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `HOST` | `127.0.0.1` | 监听地址；对外暴露请配 HTTPS 反代 |
 | `PORT` | `8787` | 监听端口 |
 | `PUBLIC_BASE_URL` | 由 HOST:PORT 推导 | 写进 Agent 配置的网关地址，反代/容器部署必须显式设置 |
-| `DATA_DIR` | `data` | 数据目录 |
+| `DATA_DIR` | `data` | 数据目录；相对路径按进程 cwd 解析（npm 脚本下即 `server/data`），想固定在仓库根可设 `../data` |
 | `ADMIN_USERNAME` | `admin` | 初始管理员用户名，仅首次创建账号时使用 |
 | `ADMIN_PASSWORD` | 无 | 应急通道：设置后跳过网页初始化，直接以此口令建号（适合 Docker/systemd） |
 | `DATA_ENCRYPTION_KEY` | 无 | 供应商 Key 与网关令牌的落盘加密密钥；不设则为明文并告警 |
@@ -113,7 +117,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 ## 数据与安全边界
 
 ```
-data/
+data/                                  # 实际落点由 DATA_DIR 决定，npm 脚本下默认 server/data
 ├── identity.json                       # 租户与账号（口令只存 scrypt 哈希）
 ├── instance.json                       # 会话签名密钥（可重建）
 ├── setup.json                          # 首次初始化令牌（哈希），完成后清空
@@ -145,10 +149,13 @@ data/
 
 ## 已知限制
 
-- 不做协议转换：`/v1/messages` 打到 `openai` 供应商会明确返回 501，不会静默转发。
+- 不做协议转换：路径与供应商协议必须严格匹配（`/v1/chat/completions` 要 `openai`、
+  `/v1/messages` 要 `anthropic`、`/v1/responses` 要 `responses`），不匹配明确返回 501，
+  不会静默转发；`/v1/responses` 早期是不限协议的直通路径，现已收紧。
 - 不做计费、配额、多用户 UI、MCP/Skills/会话管理、桌面打包。
 - 存储是 JSON 文件 + 原子写，适合单机自托管；高并发或多实例需要换 SQLite/Postgres 与共享状态。
-- 上游能力以"OpenAI / Anthropic 兼容"为前提；非兼容的私有协议需要新增适配层。
+- 上游能力以"OpenAI / Anthropic 兼容"为前提（OpenAI 体系含 Chat Completions 与 Responses
+  两种 API 形态）；非兼容的私有协议需要新增适配层。
 
 ## 目录结构
 

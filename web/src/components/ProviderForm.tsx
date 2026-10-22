@@ -2,10 +2,11 @@ import { useState } from 'react';
 import { api, ApiError } from '../lib/api';
 import type { Provider } from '../lib/types';
 import { Badge, IconButton, Notice } from './ui';
+import { API_TYPE_META } from '../lib/labels';
 
 export interface ProviderFormValues {
   name: string;
-  apiType: 'openai' | 'anthropic';
+  apiType: 'openai' | 'anthropic' | 'responses';
   baseUrl: string;
   apiKey: string;
   modelsText: string;
@@ -46,6 +47,9 @@ export function ProviderForm({
   const [values, setValues] = useState<ProviderFormValues>(toFormValues(provider));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const selectedMeta =
+    API_TYPE_META.find((item) => item.value === values.apiType) ?? API_TYPE_META[0];
 
   const update = <K extends keyof ProviderFormValues>(
     key: K,
@@ -123,12 +127,19 @@ export function ProviderForm({
                 className="input"
                 value={values.apiType}
                 onChange={(event) =>
-                  update('apiType', event.target.value as 'openai' | 'anthropic')
+                  update('apiType', event.target.value as 'openai' | 'anthropic' | 'responses')
                 }
               >
-                <option value="openai">OpenAI 兼容</option>
-                <option value="anthropic">Anthropic 兼容</option>
+                {API_TYPE_META.map((meta) => (
+                  <option key={meta.value} value={meta.value}>
+                    {meta.label}
+                  </option>
+                ))}
               </select>
+              <p className="field-hint">
+                该协议走 <code className="font-mono">{selectedMeta.path}</code>；
+                与上游真实支持的接口必须一致，不匹配时网关返回 501，不做协议转换。
+              </p>
             </div>
           </div>
         </section>

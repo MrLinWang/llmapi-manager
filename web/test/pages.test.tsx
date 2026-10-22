@@ -276,4 +276,20 @@ describe('前端页面装配', () => {
     expect(document.body.textContent ?? '').toContain('data/setup.json');
     setOverrides({});
   });
+  it('协议类型三个选项句式一致，且都能在表格里显示可读短名', async () => {
+    const { API_TYPE_META } = await import('../src/lib/labels');
+    expect(API_TYPE_META).toHaveLength(3);
+    for (const meta of API_TYPE_META) {
+      // 统一句式：<厂商> 兼容（<API 形态>）
+      expect(meta.label).toMatch(/兼容（.+）$/);
+      // 短名不能是原始枚举值
+      expect(meta.short).not.toBe(meta.value);
+      expect(meta.path.startsWith('/v1/')).toBe(true);
+    }
+    expect(API_TYPE_META.map((item) => item.value)).toEqual([
+      'openai',
+      'responses',
+      'anthropic',
+    ]);
+  });
 });

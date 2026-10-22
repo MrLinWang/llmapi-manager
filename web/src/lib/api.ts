@@ -146,7 +146,7 @@ export const api = {
 
 export interface ProviderInput {
   name: string;
-  apiType: 'openai' | 'anthropic';
+  apiType: 'openai' | 'anthropic' | 'responses';
   baseUrl: string;
   apiKey?: string;
   models: string[];

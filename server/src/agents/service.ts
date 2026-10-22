@@ -19,7 +19,7 @@ import {
   revertAgentWrites,
   type DesiredWrites,
 } from './patch';
-import type { ProviderRecord } from '../domain/provider';
+import { apiTypeLabel, type ProviderRecord } from '../domain/provider';
 import { badRequest, notFound } from '../http/errors';
 import { revealGatewayToken } from '../gateway/token';
 import type { TenantSettings } from '../domain/settings';
@@ -149,8 +149,13 @@ export class AgentService {
   private buildPlan(principal: Principal, agentId: AgentId): AgentPlan {
     const settings = this.repos.settings.read();
     const providers = this.providerService.listRecords();
-    const requiredApiType = agentId === 'claude-code' ? 'anthropic' : 'openai';
-    const provider = pickProvider(providers, settings, requiredApiType);
+    // Codex 两种协议都能说：优先原生 Responses 上游，没有才回落 openai（此时 wire_api 必须写
+    // chat，见下方 wire_api 的注释）。顺序不能反——先挑 openai 会把本可原生走的 Responses
+    // 降级成 Chat 兼容形态。
+    const provider =
+      agentId === 'claude-code'
+        ? pickProvider(providers, settings, ['anthropic'])
+        : pickProvider(providers, settings, ['responses', 'openai']);
     const token = revealGatewayToken(settings.gatewayToken, this.ctx.secrets);
     if (!token) {
       throw badRequest('尚未生成网关令牌，请先在"模型聚合"页生成');
@@ -186,7 +191,15 @@ export class AgentService {
               { path: 'model', value: clientModel },
               { path: 'name', value: 'LLM API Manager', table: 'model_providers.llmapi' },
               { path: 'base_url', value: `${gatewayBaseUrl}/v1`, table: 'model_providers.llmapi' },
-              { path: 'wire_api', value: 'responses', table: 'model_providers.llmapi' },
+              // wire_api 必须与所选供应商的 apiType 一致：Codex 按它决定打 /v1/responses 还是
+              // /v1/chat/completions，两条路径都严格匹配协议。写成 responses 却选中 openai 供应商
+              // （或反之）时，请求会被网关卡在 501，而 Codex 侧只表现为"模型不可用"。
+              // openai 上游写 chat：省掉该键 Codex 也默认 chat，但显式写出来便于排查配置。
+              {
+                path: 'wire_api',
+                value: provider.apiType === 'responses' ? 'responses' : 'chat',
+                table: 'model_providers.llmapi',
+              },
               {
                 path: 'requires_openai_auth',
                 value: 'true',
@@ -217,29 +230,33 @@ export class AgentService {
 }
 
 /**
- * 为 Agent 选择供应商：
- * 1. 默认供应商协议匹配则优先；
- * 2. 否则取第一个启用且协议匹配的供应商（按优先级）；
- * 3. 都没有时报错，而不是硬塞一个协议不匹配的供应商。
+ * 为 Agent 选择供应商。`apiTypes` 是有序的"可接受协议链"，靠前优先：
+ * 1. 默认供应商协议在链里则优先命中；
+ * 2. 否则按链的顺序，取每种协议里第一个启用的供应商（按 priority）；
+ * 3. 链上一种都找不到就报错。
+ *
+ * 宁可报错也不要硬塞一个协议不匹配的供应商：Agent 会按供应商协议写 wire_api，
+ * 塞错的直接后果是客户端发出的请求被网关 501，而用户只看到"模型不可用"。
  */
 function pickProvider(
   providers: readonly ProviderRecord[],
   settings: TenantSettings,
-  apiType: ProviderRecord['apiType'],
+  apiTypes: readonly ProviderRecord['apiType'][],
 ): ProviderRecord {
-  const defaultProvider = providers.find((item) => item.id === settings.defaultProviderId);
-  if (defaultProvider && defaultProvider.enabled && defaultProvider.apiType === apiType) {
-    return defaultProvider;
+  // 外层按协议顺序、内层才看 priority：协议优先级高于优先级排序，
+  // 否则一家 openai 供应商 priority 更小就能把 responses 供应商顶掉。
+  for (const apiType of apiTypes) {
+    const defaultProvider = providers.find((item) => item.id === settings.defaultProviderId);
+    if (defaultProvider && defaultProvider.enabled && defaultProvider.apiType === apiType) {
+      return defaultProvider;
+    }
+    const candidate = providers
+      .filter((item) => item.enabled && item.apiType === apiType)
+      .sort((a, b) => a.priority - b.priority)[0];
+    if (candidate) return candidate;
   }
-  const candidate = providers
-    .filter((item) => item.enabled && item.apiType === apiType)
-    .sort((a, b) => a.priority - b.priority)[0];
-  if (!candidate) {
-    throw badRequest(
-      `没有可用的 ${apiType === 'openai' ? 'OpenAI 兼容' : 'Anthropic 兼容'}供应商，请先添加并启用`,
-    );
-  }
-  return candidate;
+  const labels = apiTypes.map((item) => apiTypeLabel(item)).join(' 或 ');
+  throw badRequest(`没有可用的 ${labels} 供应商，请先添加并启用`);
 }
 
 /** 供路由层展示备份目录，便于用户自己找历史文件。 */

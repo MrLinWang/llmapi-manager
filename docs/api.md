@@ -137,8 +137,20 @@
 }
 ```
 
-约束：`name` 非空；`apiType` ∈ `openai | anthropic`；`baseUrl` 必须是 http/https；
+约束：`name` 非空；`apiType` ∈ `openai | anthropic | responses`（非法值返回
+400 `apiType 只能是 openai / anthropic / responses`）；`baseUrl` 必须是 http/https；
 `models` 去重后保持输入顺序；`priority` 越小越靠前。
+
+`apiType` 不是展示字段，它决定这条上游只接哪条网关路径：
+
+| `apiType` | 前端文案 | 只接 |
+| --- | --- | --- |
+| `openai` | OpenAI 兼容（Chat Completions） | `/v1/chat/completions` |
+| `responses` | OpenAI 兼容（Responses） | `/v1/responses` |
+| `anthropic` | Anthropic 兼容（Messages） | `/v1/messages` |
+
+协议不符的请求由网关返回 501，供应商本身不会被调用。前端下拉顺序是
+`openai` → `responses` → `anthropic`（`web/src/lib/labels.ts` 的 `API_TYPE_META`）。
 
 连通性测试返回：
 
@@ -218,6 +230,10 @@
 
 `:id` 取 `codex` 或 `claude-code`。无 body。
 
+供应商按 Agent 的候选协议顺序挑选（`codex`：`responses` → `openai`；`claude-code`：`anthropic`），
+所以 Codex 的预览里 `wire_api` 会是 `responses` 或 `chat`，取决于最后选中哪家供应商 ——
+两者不一致会让 Codex 的请求被网关 501。没有匹配协议的启用供应商时预览返回 400。
+
 预览响应：
 
 ```json
@@ -233,6 +249,8 @@
       "exists": true,
       "entries": [
         { "key": "model_provider", "next": "llmapi", "current": "openai", "differs": true },
+        { "key": "[model_providers.llmapi] wire_api", "next": "responses",
+          "current": null, "differs": false },
         { "key": "[model_providers.llmapi] base_url", "next": "http://127.0.0.1:8787/v1",
           "current": null, "differs": false }
       ]
@@ -303,14 +321,19 @@ API Key、网关令牌等凭据类键的 `next` 与 `current` 只返回前 8 位
 
 ## 网关
 
-鉴权用 `Authorization: Bearer <token>` 或 `x-api-key: <token>`，缺失/错误返回 401 且不产生上游请求。
+鉴权用 `Authorization: Bearer <token>` 或 `x-api-key: <token>`（本服务令牌，两种写法等价），
+缺失/错误返回 401 且不产生上游请求。
 
-| 方法 | 路径 | 上游要求 |
+| 方法 | 路径 | 要求的上游 `apiType` |
 | --- | --- | --- |
-| GET | `/v1/models` | — |
-| POST | `/v1/chat/completions` | `apiType=openai` |
-| POST | `/v1/messages` | `apiType=anthropic` |
-| POST | `/v1/responses` | 不限制 |
+| GET | `/v1/models` | 不要求（不限协议） |
+| POST | `/v1/chat/completions` | `openai` |
+| POST | `/v1/messages` | `anthropic` |
+| POST | `/v1/responses` | `responses` |
+
+三条 POST 路径都是严格匹配：供应商协议与路径不符时返回 501（`not_implemented`），
+不会退化成直通。比如 `/v1/responses` 打到 `openai` 供应商会被拦下 —— 早期它确实是不限协议的
+直通路径，结果把 Responses 请求发给了只支持 Chat 的上游。
 
 请求体必须有 `model` 字段。流式由 `"stream": true` 触发。详见 [gateway.md](./gateway.md)。
 

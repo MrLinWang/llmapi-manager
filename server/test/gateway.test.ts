@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { resolveModel } from '../src/domain/aliases';
-import { requiredApiType, upstreamUrl } from '../src/gateway/forward';
+import { GATEWAY_PATHS, requiredApiType, upstreamUrl } from '../src/gateway/forward';
+import { API_TYPES, apiTypeLabel } from '../src/domain/provider';
 import { hashGatewayToken, tokenMatches } from '../src/gateway/token';
 import type { ProviderRecord } from '../src/domain/provider';
 
@@ -34,11 +35,29 @@ describe('上游地址拼接', () => {
   });
 });
 
+describe('协议类型文案', () => {
+  it('三个 label 用同一句式：<厂商> 兼容（<API 形态>）', () => {
+    for (const apiType of API_TYPES) {
+      expect(apiTypeLabel(apiType)).toMatch(/兼容（.+）$/);
+    }
+    // 不含第三种"OpenAI Responses"这种句式不一致的旧写法
+    expect(apiTypeLabel('responses')).toBe('OpenAI 兼容（Responses）');
+  });
+});
+
 describe('协议匹配', () => {
-  it('chat/completions 要求 openai', () => {
+  it('三条路径各自要求匹配的协议，均不做转换', () => {
     expect(requiredApiType('/chat/completions')).toBe('openai');
     expect(requiredApiType('/messages')).toBe('anthropic');
-    expect(requiredApiType('/responses')).toBeNull();
+    // responses 从"不限制"改为严格匹配：openai 上游不再被当成 responses 直通
+    expect(requiredApiType('/responses')).toBe('responses');
+  });
+
+  it('路径清单与协议要求同源，不会只改一处', () => {
+    for (const path of GATEWAY_PATHS) {
+      expect(requiredApiType(path)).not.toBeUndefined();
+    }
+    expect(GATEWAY_PATHS).toContain('/responses');
   });
 });
 

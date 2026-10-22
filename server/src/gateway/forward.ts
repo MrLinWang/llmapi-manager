@@ -13,16 +13,31 @@ export interface ForwardTarget {
   modelRewritten: boolean;
 }
 
+/**
+ * 网关暴露的路径清单。清单与"哪条路径要哪种协议"只在这里定义一次，
+ * routes/gateway.ts 必须 import 复用 —— 两处各维护一份时，加 /v1/responses 就只注册了路由、
+ * 没补协议要求，该路径于是成了"不限协议"的直通。
+ */
 export const GATEWAY_PATHS: GatewayPath[] = [
   '/chat/completions',
   '/messages',
   '/responses',
 ];
 
-/** /v1/chat/completions 只允许 openai 上游；/v1/messages 只允许 anthropic 上游。 */
+/**
+ * 每条网关路径要求的上游协议：三条路径都严格匹配，不做任何协议转换。
+ * - /v1/chat/completions → openai
+ * - /v1/messages          → anthropic
+ * - /v1/responses         → responses（OpenAI Responses API）
+ *
+ * 返回 null 只表示"该路径不限制协议"，现在没有任何路径用它；
+ * 之所以保留，是因为 /v1/responses 曾经就是靠 null 走直通，结果把 Responses 请求
+ * 发给了只支持 Chat 的上游。将来真要为某条路径放宽，必须能说清为什么不会踩同一个坑。
+ */
 export function requiredApiType(path: GatewayPath): ProviderRecord['apiType'] | null {
   if (path === '/chat/completions') return 'openai';
   if (path === '/messages') return 'anthropic';
+  if (path === '/responses') return 'responses';
   return null;
 }
 
@@ -48,6 +63,8 @@ export function buildUpstreamHeaders(
     const beta = incoming['anthropic-beta'];
     if (beta) headers['anthropic-beta'] = beta.toString();
   } else {
+    // 按鉴权体系分组而不是逐个协议罗列：openai 与 responses 同属 OpenAI 体系，共用 Bearer，
+    // 只有 anthropic 走 x-api-key + anthropic-version。逐协议写分支时新协议很容易被漏掉。
     headers.authorization = `Bearer ${apiKey}`;
     const org = incoming['openai-organization'];
     if (org) headers['openai-organization'] = org.toString();
@@ -282,6 +299,10 @@ export function writeDeferredError(
   );
 }
 
+/**
+ * 路径与上游协议不匹配就拒绝。必须在真正发上游请求之前调用（见 routes/gateway.ts）：
+ * 一旦请求已经打出去，客户端拿到的会是上游的参数错误，而看不出是本服务选错了协议。
+ */
 export function assertApiTypeMatch(
   provider: ProviderRecord,
   path: GatewayPath,

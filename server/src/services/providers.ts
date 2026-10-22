@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { TenantRepos } from '../store/tenantScope';
 import type { SecretCodec } from '../crypto/secretCodec';
 import {
+  API_TYPES,
   allocateProviderKey,
   toProviderView,
   type ApiType,
@@ -22,8 +23,6 @@ export interface ProviderInput {
   notes?: string;
   websiteUrl?: string;
 }
-
-const API_TYPES: ApiType[] = ['openai', 'anthropic'];
 
 function normalizeBaseUrl(input: string): string {
   const trimmed = input.trim().replace(/\/+$/, '');
@@ -66,7 +65,10 @@ export class ProviderService {
     return records.map((record) => this.toView(record));
   }
 
-  /** 内部使用：含明文 key，仅供网关转发与连通性测试。 */
+  /**
+   * 返回落盘形态（apiKey 是 SecretCodec 编码后的值），只给网关转发、连通性测试这类
+   * 内部调用方用；任何接口输出都必须走 `toView`，否则密文/tenantId 会漏出去。
+   */
   listRecords(): ProviderRecord[] {
     return [...this.repos.providers.list()].sort(
       (a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt),
@@ -250,6 +252,8 @@ export class ProviderService {
 
   private validateInput(input: ProviderInput): void {
     if (!input.name || !input.name.trim()) throw badRequest('供应商名称不能为空');
+    // 不信任调用方已校验过：值一旦落盘，接错协议的请求会被网关卡在 501，
+    // 而现场只留下一家"看起来正常"的供应商，很难回溯是写入了非法 apiType。
     if (!API_TYPES.includes(input.apiType)) {
       throw badRequest(`不支持的协议类型：${input.apiType}`);
     }

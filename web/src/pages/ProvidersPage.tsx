@@ -13,6 +13,7 @@ import {
   Spinner,
 } from '../components/ui';
 import { ProviderForm, TestResultLine } from '../components/ProviderForm';
+import { apiTypeShort } from '../lib/labels';
 
 export default function ProvidersPage(): JSX.Element {
   const { data, loading, error, reload } = useAsync(() => api.providers());
@@ -169,7 +170,7 @@ export default function ProvidersPage(): JSX.Element {
                       </div>
                     </td>
                     <td>
-                      <Badge tone="accent">{provider.apiType}</Badge>
+                      <Badge tone="accent">{apiTypeShort(provider.apiType)}</Badge>
                     </td>
                     <td
                       className="max-w-[16rem] truncate font-mono text-xs text-muted"

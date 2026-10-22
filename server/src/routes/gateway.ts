@@ -5,8 +5,10 @@ import { ProviderService } from '../services/providers';
 import { listAliases, resolveModel } from '../domain/aliases';
 import { badRequest, unauthorized } from '../http/errors';
 import {
+  GATEWAY_PATHS as GATEWAY_PATHS_ALL,
   assertApiTypeMatch,
   forwardOnce,
+  requiredApiType,
   writeDeferredError,
   type ForwardOutcome,
   type GatewayPath,
@@ -16,13 +18,10 @@ import type { ProviderRecord } from '../domain/provider';
 import type { Principal } from '../domain/identity';
 import type { TenantSettings } from '../domain/settings';
 
-const GATEWAY_PATHS: GatewayPath[] = ['/chat/completions', '/messages', '/responses'];
-
-function requiredApiType(path: GatewayPath): ProviderRecord['apiType'] | null {
-  if (path === '/chat/completions') return 'openai';
-  if (path === '/messages') return 'anthropic';
-  return null;
-}
+// 只在这里展开一份拷贝供注册路由使用，来源必须是 gateway/forward.ts 的清单：
+// 本地再硬编码一份路径+协议的副本，加 /v1/responses 时就出现了"路由已注册、
+// 协议要求没跟上"的直通漏洞。
+const GATEWAY_PATHS: GatewayPath[] = [...GATEWAY_PATHS_ALL];
 
 interface Candidate {
   provider: ProviderRecord;
@@ -58,6 +57,8 @@ function selectCandidates(
     };
   }
 
+  // 候选池在选路阶段就按协议过滤，而不是等到发送前才拦：
+  // 否则回退列表里会混进别的协议，主供应商失败后换一家必然 501，白白多打一次上游。
   const required = requiredApiType(path);
   const usable = providers
     .filter((item) => item.enabled && (required === null || item.apiType === required))
@@ -170,7 +171,8 @@ export function registerGatewayRoutes(
         throw badRequest(selection.reason);
       }
 
-      // 协议不匹配要在发起上游请求前拒绝，避免打到错误路径
+      // 兜底再校验一次：别名模式是直接按 providerId 取供应商，不走上面的协议过滤，
+      // 所以必须在发请求前拒绝，否则 Responses 请求会被发到 Chat 上游。
       assertApiTypeMatch(selection.primary.provider, path);
 
       const attempt = async (

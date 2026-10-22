@@ -60,6 +60,27 @@ export function startMockUpstream(port = 0) {
         return;
       }
 
+      if (url.includes('/responses')) {
+        // OpenAI Responses API 形态：与 chat completions 明显不同的响应结构，
+        // 便于断言请求确实打到了 responses 上游而非被当成 chat 处理。
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            id: 'resp_mock',
+            object: 'response',
+            model: body.model,
+            output: [
+              {
+                type: 'message',
+                role: 'assistant',
+                content: [{ type: 'output_text', text: 'mock responses reply' }],
+              },
+            ],
+          }),
+        );
+        return;
+      }
+
       if (url.includes('/messages')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(

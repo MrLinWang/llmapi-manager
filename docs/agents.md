@@ -6,7 +6,7 @@
 
 | id | 名称 | 文件 | 需要的上游协议 |
 | --- | --- | --- | --- |
-| `codex` | Codex CLI | `~/.codex/config.toml`、`~/.codex/auth.json` | `openai` |
+| `codex` | Codex CLI | `~/.codex/config.toml`、`~/.codex/auth.json` | `responses`（回落 `openai`） |
 | `claude-code` | Claude Code | `~/.claude/settings.json` | `anthropic` |
 
 路径由 `AgentPathResolver` 解析：优先取 `AGENT_HOME_DIR`，否则用服务进程所属 OS 用户的家目录。
@@ -14,11 +14,26 @@
 
 ## 选哪个供应商
 
-Agent 只能用与自己协议匹配的供应商（Codex 需要 openai，Claude Code 需要 anthropic）。选择顺序：
+Agent 只能用与自己协议匹配的供应商。协议按优先级列表依次尝试：
+
+| Agent | 候选协议（按顺序） |
+| --- | --- |
+| `codex` | `responses` → `openai` |
+| `claude-code` | `anthropic` |
+
+Codex 优先用原生 Responses 上游（`wire_api = "responses"`）；没有则回落到 `openai` 供应商，
+此时 `wire_api` 写 `chat`。**两者必须一起变**：Codex 发 Responses 请求时，
+`/v1/responses` 严格要求 `responses` 上游，若配置写 `responses` 却选了 `openai` 供应商，
+请求会被网关 501 拦下。
+
+对每种候选协议，选择顺序是：
 
 1. 默认供应商协议匹配 → 用它；
 2. 否则取第一个启用的、协议匹配的供应商（按 `priority`）；
-3. 都没有 → 400，例如 `没有可用的 Anthropic 兼容供应商，请先添加并启用`。
+3. 所有候选协议都没有 → 400，例如 Codex 是
+   `没有可用的 OpenAI 兼容（Responses） 或 OpenAI 兼容（Chat Completions） 供应商，请先添加并启用`，
+   Claude Code 是 `没有可用的 Anthropic 兼容（Messages） 供应商，请先添加并启用`
+   （`apiTypeLabel` 统一拼出「<厂商> 兼容（<API 形态>）」，与前端下拉文案同源）。
 
 模型优先用"默认供应商 + 默认模型"的组合，否则取该供应商声明的第一个模型。
 最终写入客户端的模型是**聚合别名** `lmm-<providerKey>/<model>`，这样 Agent 的每次请求都会明确打到这一家。
@@ -31,14 +46,17 @@ Agent 只能用与自己协议匹配的供应商（Codex 需要 openai，Claude 
 
 ```toml
 model_provider = "llmapi"
-model = "lmm-mock-openai/gpt-x"
+model = "lmm-mock-responses/gpt-resp"
 
 [model_providers.llmapi]
 name = "LLM API Manager"
 base_url = "http://127.0.0.1:8787/v1"
-wire_api = "responses"
+wire_api = "responses"        # 选到 responses 供应商时
 requires_openai_auth = true
 ```
+
+若没有 `responses` 供应商、回落到 `openai` 供应商，则 `wire_api` 写 `chat`
+（Codex 省略该键时默认也是 chat），模型指向那家 openai 供应商的别名。
 
 `auth.json`：
 
@@ -107,7 +125,11 @@ data/tenants/<tenantId>/backups/<agentId>/<ISO 时间戳>-<文件名>
           "path": "/home/user/.codex/config.toml",
           "values": {
             "model_provider": "llmapi",
-            "model": "lmm-mock-openai/gpt-x"
+            "model": "lmm-mock-responses/gpt-resp",
+            "[model_providers.llmapi] name": "LLM API Manager",
+            "[model_providers.llmapi] base_url": "http://127.0.0.1:8787/v1",
+            "[model_providers.llmapi] wire_api": "responses",
+            "[model_providers.llmapi] requires_openai_auth": "true"
           },
           "created": false
         }
@@ -135,7 +157,8 @@ data/tenants/<tenantId>/backups/<agentId>/<ISO 时间戳>-<文件名>
 1. 在 `server/src/agents/registry.ts` 的 `AGENT_DEFINITIONS` 登记：`homeDirName`、文件列表
    （`role` / `relativePath` / `format`）。
 2. 在 `server/src/agents/service.ts` 的 `buildPlan` 里补 `writes`，并按需要扩展
-   `buildPlan` 的协议选择（当前写死 `codex → openai`、`claude-code → anthropic`）。
+   `buildPlan` 的协议选择（`codex → responses|openai`、`claude-code → anthropic`），
+   以及 Codex 的 `wire_api` 必须跟着所选供应商协议走。
 3. 补测试：`server/test/agents.test.ts` 覆盖"保留无关配置"与"还原冲突"；
    若是新格式，同时扩展 `agents/patch.ts`（而不是在路由里做字符串替换）。
 4. 更新本文档与 `docs/api.md` 的 Agent 章节。
@@ -145,8 +168,9 @@ data/tenants/<tenantId>/backups/<agentId>/<ISO 时间戳>-<文件名>
 | 现象 | 原因 |
 | --- | --- |
 | 预览返回 400「尚未生成网关令牌」 | 先去"模型聚合"页生成令牌 |
-| 预览返回 400「没有可用的 X 兼容供应商」 | 该协议没有启用的供应商 |
+| 预览返回 400「没有可用的 OpenAI 兼容（Responses） 或 OpenAI 兼容（Chat Completions） 供应商」/「没有可用的 Anthropic 兼容（Messages） 供应商」 | 该 Agent 的候选协议都没有启用的供应商（Codex 会先试 `responses`、再试 `openai`，都没有才报错） |
 | 预览返回 400「未声明任何模型」 | 供应商的 `models` 为空 |
+| Codex 请求网关返回 501 | `wire_api` 与所选供应商协议不一致：`responses` 供应商要写 `responses`，`openai` 供应商要写 `chat`。重新应用配置即可（`wire_api` 由所选供应商协议决定） |
 | 应用后 Agent 仍走旧配置 | Agent 进程需要重启 |
 | 还原时出现 conflicts | 被写入的键后来被手动改过，按提示自行处理 |
 | 预览报「字段 xxx 不是对象」 | 目标 JSON 里该路径是标量，无法下钻；需手动整理 |

@@ -280,6 +280,58 @@ describe('冒烟：网关', () => {
     expect(response.json().error.message).toContain('协议转换');
   });
 
+  it('/v1/responses 命中 openai 供应商时返回 501（不再无脑直通）', async () => {
+    // responses 从"不限制协议"改为严格匹配后，openai 上游必须被拦住，
+    // 否则会把 Responses 请求当成 Chat 请求发给上游，症状是上游报参数错误。
+    const response = await call(
+      'POST',
+      '/v1/responses',
+      { model: 'lmm-mock-openai/gpt-x', input: 'hi' },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(response.statusCode).toBe(501);
+    expect(response.json().error.message).toContain('协议转换');
+  });
+
+  it('responses 供应商可接收 /v1/responses 并返回上游原始结构', async () => {
+    const created = await call(
+      'POST',
+      '/api/providers',
+      {
+        name: 'Mock Responses',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-responses',
+        models: ['gpt-resp'],
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+
+    const response = await call(
+      'POST',
+      '/v1/responses',
+      { model: 'lmm-mock-responses/gpt-resp', input: 'hi' },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    // 断言打到的是 responses 形态的上游，且模型名被改写
+    expect(body.object).toBe('response');
+    expect(body.model).toBe('gpt-resp');
+    expect(body.output[0].content[0].text).toBe('mock responses reply');
+  });
+
+  it('responses 供应商不能接 /v1/chat/completions', async () => {
+    const response = await call(
+      'POST',
+      '/v1/chat/completions',
+      { model: 'lmm-mock-responses/gpt-resp', messages: [] },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(response.statusCode).toBe(501);
+  });
+
   it('/v1/models 返回 OpenAI 兼容结构', async () => {
     const response = await call('GET', '/v1/models', undefined, {
       authorization: `Bearer ${gatewayToken}`,
@@ -422,6 +474,48 @@ describe('冒烟：Agent 下发', () => {
     expect(fs.existsSync(body.files[0].path)).toBe(false);
   });
 
+  it('没有可用 responses 供应商时 Codex 回落 chat，wire_api 与所选协议一致', async () => {
+    // 若仍硬写 wire_api=responses，而 /v1/responses 又严格要求 responses 上游，
+    // 配置与网关就会互相矛盾（Codex 发 responses 请求却被 501）。
+    // 这里临时禁用 responses 供应商来模拟"只有 openai"的环境。
+    const list = await call('GET', '/api/providers', undefined, { cookie });
+    const responsesProvider = list
+      .json()
+      .providers.find((item: { apiType: string }) => item.apiType === 'responses');
+    expect(responsesProvider).toBeTruthy();
+
+    await call(
+      'PATCH',
+      `/api/providers/${responsesProvider.id}/enabled`,
+      { enabled: false },
+      { cookie },
+    );
+    try {
+      const preview = await call('POST', '/api/agents/codex/preview', undefined, { cookie });
+      expect(preview.statusCode).toBe(200);
+      const entries = preview
+        .json()
+        .files.flatMap((file: { entries: Array<{ key: string; next: string }> }) => file.entries);
+      const wire = entries.find(
+        (item: { key: string }) => item.key === '[model_providers.llmapi] wire_api',
+      );
+      expect(wire.next).toBe('chat');
+      // 模型应指向某个 openai 供应商（不绑定具体是哪家——优先级会随其他用例变化），
+      // 关键是不能指向 responses 供应商。
+      const model = entries.find((item: { key: string }) => item.key === 'model');
+      expect(model.next).toMatch(/^lmm-/);
+      expect(model.next).not.toContain('lmm-mock-responses/');
+    } finally {
+      // 恢复，避免影响后续用例对 responses 供应商的假设
+      await call(
+        'PATCH',
+        `/api/providers/${responsesProvider.id}/enabled`,
+        { enabled: true },
+        { cookie },
+      );
+    }
+  });
+
   it('应用会备份并保留用户内容，还原只撤销自己的键', async () => {
     const preview = await call('POST', '/api/agents/codex/preview', undefined, { cookie });
     const configPath = preview.json().files[0].path as string;
@@ -471,6 +565,22 @@ describe('冒烟：Agent 下发', () => {
     // 目前只有 openai 供应商，Claude Code 需要 Anthropic 上游
     expect(preview.statusCode).toBe(400);
     expect(preview.json().error.message).toContain('Anthropic');
+  });
+
+  it('Codex 优先选 responses 供应商，wire_api 写 responses', async () => {
+    // 此时同时存在 openai 与 responses 供应商（responses 在那条网关用例里创建）。
+    const preview = await call('POST', '/api/agents/codex/preview', undefined, { cookie });
+    expect(preview.statusCode).toBe(200);
+    const entries = preview
+      .json()
+      .files.flatMap((file: { entries: Array<{ key: string; next: string }> }) => file.entries);
+    const wire = entries.find(
+      (item: { key: string }) => item.key === '[model_providers.llmapi] wire_api',
+    );
+    expect(wire.next).toBe('responses');
+    // 模型必须指向 responses 供应商的别名
+    const model = entries.find((item: { key: string }) => item.key === 'model');
+    expect(model.next).toContain('lmm-mock-responses/');
   });
 
   it('Claude Code 写入 env 段且保留其他设置', async () => {

@@ -13,7 +13,7 @@
 | `HOST` | `127.0.0.1` | 监听地址。对外暴露请改 `0.0.0.0` 并配 HTTPS 反向代理 |
 | `PORT` | `8787` | 监听端口 |
 | `PUBLIC_BASE_URL` | 由 `HOST:PORT` 推导 | **写进 Agent 配置**的网关地址（不带 `/v1`）。反向代理或容器部署必须显式设置 |
-| `DATA_DIR` | `data` | 数据目录（相对仓库根或绝对路径） |
+| `DATA_DIR` | `data` | 数据目录。相对路径按**进程 cwd** 解析：`npm start` / `npm run dev` 经 workspaces 切换后 cwd 是 `server/`，所以默认落在 `server/data`；想固定在仓库根可设 `../data` 或绝对路径 |
 | `ADMIN_USERNAME` | `admin` | 初始管理员用户名，仅首次创建账号时使用 |
 | `ADMIN_PASSWORD` | 无 | 应急通道：设置后跳过网页初始化，直接以此口令创建 `ADMIN_USERNAME` 账号 |
 | `SESSION_SECRET` | 自动生成 | 会话签名密钥；未设置时生成并存入 `data/instance.json` |
@@ -76,7 +76,7 @@ Docker / systemd 部署如果希望把日志挂到宿主机，把 `LOG_DIR` 指�
 ## 数据目录
 
 ```
-data/
+data/                                # 默认即 server/data，见上表 DATA_DIR 说明
 ├── identity.json                     租户与账号
 ├── instance.json                     会话签名密钥
 ├── setup.json                        首次初始化状态（一次性令牌哈希，完成后清空）

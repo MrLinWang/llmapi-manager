@@ -5,7 +5,8 @@
 LLM API Manager 是一个单进程自托管服务，同时承担三件事：
 
 1. **管理面**：`/api/*`，网页控制台用它维护供应商、聚合配置与 Agent 下发。
-2. **数据面**：`/v1/*`，OpenAI / Anthropic 兼容网关，把请求转发到聚合后的上游。
+2. **数据面**：`/v1/*`，OpenAI / Anthropic 兼容网关（三种上游协议：`openai`、`responses`、
+   `anthropic`），把请求转发到聚合后的上游。
 3. **静态资源**：生产模式下托管 `web/dist`，非接口路径回落到 `index.html`（SPA）。
 
 它解决的问题是：一个人有多家 LLM API，想让不同 Agent（Codex、Claude Code）都用上"聚合后的模型列表"，
@@ -82,7 +83,11 @@ POST /v1/chat/completions
   ├─ domain/aliases.ts      解析 model：
   │                            lmm-<key>/<model> → 明确供应商（失败即 400，不回落）
   │                            其它              → 默认供应商 + 默认模型
+  ├─ gateway/forward.ts     先校验协议：requiredApiType(path) 与供应商 apiType 不符即 501
+  │                         （必须在发上游请求前拒绝，否则客户端只会看到上游的参数错误）
   ├─ gateway/forward.ts     拼上游 URL、注入上游 Key、转发 body
+  │                            openai / responses → Authorization: Bearer
+  │                            anthropic         → x-api-key + anthropic-version
   │                            非流式：原样回传响应体
   │                            流式  ：逐块透传 SSE，客户端断开即 abort 上游
   ├─ 失败处理               未带别名且主供应商 5xx → 按优先级回退 1 次（响应头 x-llmapi-fallback: 1）
@@ -97,9 +102,11 @@ POST /v1/chat/completions
 POST /api/agents/codex/apply
   │
   ├─ registerApiGuard       会话鉴权 + 权限 agents:apply
-  ├─ agents/service.ts      选供应商（协议必须匹配该 Agent）
+  ├─ agents/service.ts      选供应商（按 Agent 的候选协议顺序：codex → responses|openai，
+  │                         claude-code → anthropic；协议不符的不会被选中）
   │                         取网关令牌明文（从密文解密，仅进程内使用）
   │                         生成目标键值：model_provider / model / [model_providers.llmapi] ...
+  │                         Codex 的 wire_api 跟随所选供应商（responses → "responses"，openai → "chat"）
   ├─ agents/registry.ts     AgentPathResolver 解析物理路径（本期落到 OS 家目录）
   ├─ agents/patch.ts        读现有文件 → 备份（若存在）→ 就地改写 → 原子替换
   └─ agents.json            记录快照：写入的键值 + appliedBy + created 标记
@@ -110,7 +117,7 @@ POST /api/agents/codex/apply
 ## 存储布局
 
 ```
-data/
+data/                                # 实际落点由 DATA_DIR 决定，默认 server/data
 ├── identity.json                     租户与账号（口令 scrypt 哈希）
 ├── instance.json                     会话签名密钥（自动生成，可重建）
 ├── setup.json                        首次初始化状态（init token 哈希，完成后清空）
@@ -143,7 +150,7 @@ log/                                 仓库根，已 gitignore（LOG_DIR 可改�
 | JSON 文件而非数据库 | 单机自托管、零外部依赖；Repository 接口隔离，替换成本可控 |
 | 别名严格失败不回落 | 回落会用别家额度、答错模型，且调用方无感知 |
 | 单进程同时托管前端 | 部署简单；开发期 Vite 代理保持热更新 |
-| 不做协议转换 | 骨架期只做直通；`/v1/messages` 打到 openai 供应商明确 501，不静默转发 |
+| 不做协议转换 | 三条路径与上游协议严格一一对应；不匹配明确 501，不静默转发、也不放宽成直通 |
 | 只回退一次 | 优先保证可预测性；多层重试需要熔断与配额才能安全 |
 | 权限声明与路由注册绑定 | 漏声明会启动失败，避免"新路由默认放开"这类事故 |
 | Agent 路径可解析 | 现在写家目录，将来可切到每租户工作区而不动上层 |

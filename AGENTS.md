@@ -139,9 +139,24 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 - `POST /api/setup` 与 `GET /api/setup/status` 是 `public` 路由（此时还没有账号可用），
   门禁是令牌本身；新增此类接口要同样想清楚"凭什么只有部署者能调用"。
 
+### 10. 三种上游协议严格匹配，不做转换
+
+- `ApiType` 有三值：`openai`（Chat Completions）、`anthropic`（Messages）、`responses`（Responses API）。
+- 路径与协议一一对应：`/v1/chat/completions → openai`、`/v1/messages → anthropic`、
+  `/v1/responses → responses`。**不匹配一律 501**，不要为了"能跑通"而放宽成直通。
+  `/v1/responses` 早期是"不限协议"的直通，会把 Responses 请求发给只支持 Chat 的上游，
+  症状是上游报参数错误——这条已被真实问题踩过。
+- 路径清单与协议要求只在 `gateway/forward.ts` 定义一次（`GATEWAY_PATHS` / `requiredApiType`），
+  `routes/gateway.ts` 必须 import 复用，不要复制一份。
+- `openai` 与 `responses` 共用 Bearer 鉴权，只有 `anthropic` 用 `x-api-key` +
+  `anthropic-version`。鉴权分支按这个分组写，不要逐个协议罗列。
+- 改 Agent 的供应商选择时要连带检查 `wire_api`：Codex 选到 `responses` 供应商写
+  `responses`，选到 `openai` 供应商必须写 `chat`。两者不一致会导致 Codex 发
+  Responses 请求却被网关 501。
+
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 111 + web 6 = 117 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 118 + web 7 = 125 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
@@ -150,11 +165,13 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 - 改到日志器 → 补 `server/test/logger.test.ts`（落盘、级别阈值、打码、滚动与保留个数）。
 - 改到配置默认值 → 补 `server/test/config.test.ts`（当前 `ADMIN_USERNAME` 默认 `admin`）。
 - 改到首次初始化 → 补 `server/test/setup.test.ts`（令牌校验、一次性、重放拒绝、重启幂等）。
+- 改到协议匹配 → 补 `server/test/gateway.test.ts` 的 `requiredApiType` 断言 + smoke 的双向 501 用例。
 - 改了品牌名 / 对外文案 → 同步 `README.md`、`web/index.html`、登录页与侧边栏。
 
 ## 明确不做的事
 
-- 不做协议转换：`/v1/messages` 命中 `apiType=openai` 供应商时返回 501，别偷偷转发到错误路径。
+- 不做协议转换：路径与供应商协议不匹配时返回 501（如 `/v1/messages` 命中 `openai` 供应商、
+  `/v1/responses` 命中非 `responses` 供应商），别偷偷转发到错误路径。
 - 不做计费、配额、多用户 UI、MCP/Skills/会话管理、桌面打包。
 - 不把 JSON 文件存储换成数据库，除非任务明确要求；Repository 接口已就位，替换时不要改路由契约。
 - 不要引入第二套状态管理或数据请求库来"重写"现有 `useAsync`；当前页面刻意保持零额外依赖。

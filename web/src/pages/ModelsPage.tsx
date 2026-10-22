@@ -11,6 +11,7 @@ import {
   Spinner,
 } from '../components/ui';
 import { CopyButton } from '../components/CopyButton';
+import { apiTypeShort } from '../lib/labels';
 
 export default function ModelsPage(): JSX.Element {
   const models = useAsync(() => api.models());
@@ -149,7 +150,7 @@ export default function ModelsPage(): JSX.Element {
                 <option value="">（不设置）</option>
                 {providerList.map((item) => (
                   <option key={item.id} value={item.id}>
-                    {item.name} · {item.apiType}
+                    {item.name} · {apiTypeShort(item.apiType)}
                     {item.enabled ? '' : '（已停用）'}
                   </option>
                 ))}
@@ -215,7 +216,7 @@ export default function ModelsPage(): JSX.Element {
                     </td>
                     <td className="text-xs text-ink">{alias.providerName}</td>
                     <td>
-                      <Badge tone="accent">{alias.apiType}</Badge>
+                      <Badge tone="accent">{apiTypeShort(alias.apiType)}</Badge>
                     </td>
                     <td className="font-mono text-xs text-muted">{alias.upstreamModel}</td>
                     <td className="text-right">

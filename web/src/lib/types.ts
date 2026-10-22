@@ -1,4 +1,4 @@
-export type ApiType = 'openai' | 'anthropic';
+export type ApiType = 'openai' | 'anthropic' | 'responses';
 
 export interface Provider {
   id: string;

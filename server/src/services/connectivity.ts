@@ -29,6 +29,8 @@ function authHeaders(provider: ProviderRecord, apiKey: string): Record<string, s
       'anthropic-version': '2023-06-01',
     };
   }
+  // 按鉴权体系分组：openai 与 responses 都是 OpenAI 体系的 Bearer，
+  // 只有 anthropic 用 x-api-key + anthropic-version。逐个协议罗列时新协议容易漏。
   return { authorization: `Bearer ${apiKey}` };
 }
 

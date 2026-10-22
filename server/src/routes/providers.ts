@@ -10,13 +10,15 @@ import {
 } from '../services/providers';
 import { testProviderConnectivity } from '../services/connectivity';
 import { badRequest } from '../http/errors';
-import type { ApiType } from '../domain/provider';
+import { API_TYPES, type ApiType } from '../domain/provider';
 
 function asProviderInput(body: unknown): ProviderInput {
   const raw = (body ?? {}) as Partial<ProviderInput>;
   if (typeof raw.name !== 'string') throw badRequest('name 必须是字符串');
-  if (raw.apiType !== 'openai' && raw.apiType !== 'anthropic') {
-    throw badRequest('apiType 只能是 openai 或 anthropic');
+  // 用 API_TYPES 而不是逐个字面量比较：加 responses 时这里曾漏改，
+  // 表现为前端能选新协议、提交却被自己的路由校验挡回。
+  if (!API_TYPES.includes(raw.apiType as ApiType)) {
+    throw badRequest(`apiType 只能是 ${API_TYPES.join(' / ')}`);
   }
   if (typeof raw.baseUrl !== 'string') throw badRequest('baseUrl 必须是字符串');
   if (raw.models !== undefined && !Array.isArray(raw.models)) {
