@@ -22,7 +22,8 @@ cp .env.example .env    # 按需修改
 npm run dev             # 服务端 :8787 + 前端 :5173
 ```
 
-打开 http://localhost:5173 ，用控制台打印的初始口令登录。
+打开 http://localhost:5173 ，首次启动会引导你**自己设置**管理员用户名与口令：
+把控制台打印的一次性初始化令牌填进设置页即可。
 
 生产模式（单进程托管前端）：
 
@@ -103,8 +104,10 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `PUBLIC_BASE_URL` | 由 HOST:PORT 推导 | 写进 Agent 配置的网关地址，反代/容器部署必须显式设置 |
 | `DATA_DIR` | `data` | 数据目录 |
 | `ADMIN_USERNAME` | `admin` | 初始管理员用户名，仅首次创建账号时使用 |
-| `ADMIN_PASSWORD` | 随机 | 初始管理员口令，仅首次创建账号时使用 |
+| `ADMIN_PASSWORD` | 无 | 应急通道：设置后跳过网页初始化，直接以此口令建号（适合 Docker/systemd） |
 | `DATA_ENCRYPTION_KEY` | 无 | 供应商 Key 与网关令牌的落盘加密密钥；不设则为明文并告警 |
+| `LOG_DIR` | 仓库根 `log/` | 运行日志目录；设为 `off` 只输出到控制台 |
+| `LOG_MAX_BYTES` / `LOG_MAX_FILES` | `5242880` / `5` | 单文件滚动阈值与保留的历史文件个数 |
 | `AGENT_HOME_DIR` | OS 家目录 | Agent 配置根目录（其下 `.codex` / `.claude`） |
 
 ## 数据与安全边界
@@ -113,6 +116,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 data/
 ├── identity.json                       # 租户与账号（口令只存 scrypt 哈希）
 ├── instance.json                       # 会话签名密钥（可重建）
+├── setup.json                          # 首次初始化令牌（哈希），完成后清空
 └── tenants/<tenantId>/
     ├── providers.json                  # 供应商（API Key 经 AES-256-GCM 加密）
     ├── settings.json                   # 默认模型、网关令牌（只存哈希 + 密文）
@@ -164,7 +168,7 @@ server/
     routes/               auth、providers、models、logs、agents、gateway
   test/                   单元测试 + 端到端冒烟（含假上游）
 web/
-  src/pages/              Login / Layout / Overview / Providers / Models / Agents / Settings
+  src/pages/              Login / Setup / Layout / Overview / Providers / Models / Agents / Settings
   src/components/         ui、ProviderForm、CopyButton
   src/lib/                api、auth、useAsync、types
   test/                   页面装配测试（jsdom）

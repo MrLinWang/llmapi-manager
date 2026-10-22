@@ -19,6 +19,44 @@
 
 失败一律返回 401 `用户名或口令不正确`，不区分"用户不存在"与"口令错误"。
 
+## 首次初始化
+
+未初始化时还没有任何账号，无法用会话鉴权，因此这两个接口都是 `public`；
+真正的门禁是启动时打印的一次性初始化令牌。初始化完成后 `POST /api/setup` 一律返回 409。
+
+### GET /api/setup/status
+
+免鉴权。前端据此决定是否强制跳转设置页。
+
+```json
+{
+  "needsSetup": true,
+  "defaultUsername": "admin",
+  "rules": { "minUsernameLength": 3, "maxUsernameLength": 32, "minPasswordLength": 8 },
+  "failedAttempts": 0
+}
+```
+
+`failedAttempts` 只在 `needsSetup: true` 时返回，用于发现令牌试探。
+响应中**不含**令牌、令牌哈希或任何口令材料。
+
+### POST /api/setup
+
+免鉴权。成功返回 `201` 并创建 `role=owner` 的管理员账号，令牌立即作废。
+
+```json
+{ "token": "setup_…", "username": "alice", "password": "至少 8 位" }
+```
+
+| 情况 | 状态码 | 说明 |
+| --- | --- | --- |
+| 成功 | 201 | 返回 `{ user }`，不含口令 |
+| 令牌错误 | 403 | `初始化令牌不正确`，并累加 `failedAttempts` |
+| 已初始化 | 409 | 绝不覆盖已有管理员 |
+| 口令过短 / 用户名非法 | 400 | 规则见 `setup/status` |
+
+初始化成功后可以用新账号直接调 `POST /api/auth/login`。
+
 ### POST /api/auth/logout
 
 免鉴权，清除 Cookie，返回 `{ "ok": true }`。
@@ -295,4 +333,4 @@ API Key、网关令牌等凭据类键的 `next` 与 `current` 只返回前 8 位
 ```
 
 可能的 `code`：`corrupt_file`、`plaintext_credentials`、`credential_decrypt_failed`、
-`initial_password_printed`。
+`setup_pending`。

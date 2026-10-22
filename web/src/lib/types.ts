@@ -126,3 +126,15 @@ export interface Me {
   permissions: string[];
   allPermissions: string[];
 }
+
+/** 首次初始化状态（GET /api/setup/status，免鉴权） */
+export interface SetupStatus {
+  needsSetup: boolean;
+  defaultUsername: string;
+  rules: {
+    minUsernameLength: number;
+    maxUsernameLength: number;
+    minPasswordLength: number;
+  };
+  failedAttempts?: number;
+}

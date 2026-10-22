@@ -49,6 +49,11 @@ const routes: RouteMap = {
     allPermissions: ['providers:read', 'providers:write'],
   },
   '/api/health': { ok: true, warnings: [], gatewayBaseUrl: 'http://127.0.0.1:8787/v1' },
+  '/api/setup/status': {
+    needsSetup: false,
+    defaultUsername: 'admin',
+    rules: { minUsernameLength: 3, maxUsernameLength: 32, minPasswordLength: 8 },
+  },
   '/api/providers': { providers },
   '/api/models': {
     prefix: 'lmm-',
@@ -113,11 +118,21 @@ const routes: RouteMap = {
   },
 };
 
+/**
+ * 默认按 routes 返回；个别用例可以用 overrides 临时改某条路径的响应，
+ * 例如"服务尚未初始化"的场景。
+ */
+let overrides: RouteMap = {};
+
+function setOverrides(next: RouteMap): void {
+  overrides = next;
+}
+
 function installFetch(): void {
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();
     const path = url.split('?')[0];
-    const body = routes[path];
+    const body = path in overrides ? overrides[path] : routes[path];
     return {
       ok: body !== undefined,
       status: body === undefined ? 404 : 200,
@@ -226,5 +241,39 @@ describe('前端页面装配', () => {
     expect(screen.getAllByText('lmm-mock-openai/gpt-x').length).toBeGreaterThan(0);
     // 供应商名同时出现在筛选下拉与日志行里
     expect(screen.getAllByText('Mock OpenAI').length).toBeGreaterThan(1);
+  });
+  it('设置页渲染初始化令牌、用户名与两次口令输入', async () => {
+    // 未初始化场景：/api/setup/status 返回 needsSetup: true
+    setOverrides({
+      '/api/setup/status': {
+        needsSetup: true,
+        defaultUsername: 'admin',
+        rules: { minUsernameLength: 3, maxUsernameLength: 32, minPasswordLength: 8 },
+      },
+    });
+    const { render, screen } = await import('@testing-library/react');
+    const { MemoryRouter, Route, Routes } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const SetupPage = (await import('../src/pages/SetupPage')).default;
+
+    render(
+      <MemoryRouter initialEntries={['/setup']}>
+        <AuthProvider>
+          <Routes>
+            <Route path="/setup" element={<SetupPage />} />
+          </Routes>
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('设置管理员账号')).toBeTruthy();
+    expect(screen.getByLabelText('初始化令牌')).toBeTruthy();
+    expect(screen.getByLabelText('用户名')).toBeTruthy();
+    expect(screen.getByLabelText('口令')).toBeTruthy();
+    expect(screen.getByLabelText('确认口令')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '创建管理员并登录' })).toBeTruthy();
+    // 页面必须提示令牌从哪里来，否则用户会卡住
+    expect(document.body.textContent ?? '').toContain('data/setup.json');
+    setOverrides({});
   });
 });

@@ -20,11 +20,12 @@ async function main(): Promise<void> {
   const logger = createLogger(config.logLevel, { file: logOptions });
   const ctx = createContext(config, logger);
 
-  const { initialPassword } = await bootstrapIdentity(
+  const { needsSetup, setupToken } = await bootstrapIdentity(
     config,
     ctx.paths,
     ctx.identity,
     logger,
+    ctx.setup,
   );
 
   const app = await buildApp({ ctx });
@@ -38,16 +39,25 @@ async function main(): Promise<void> {
     logFile: logOptions ? logFilePath(logOptions) : '(仅控制台)',
   });
 
-  if (initialPassword) {
-    // 只在首次创建账号时打印一次，且不写日志文件
+  if (needsSetup && setupToken) {
+    // 一次性初始化令牌：只在"首次生成"的那次启动打印，且不写进日志文件
     console.log('');
     console.log('============================================================');
-    console.log('  初始管理员账号');
-    console.log(`  用户名: ${config.adminUsername}`);
-    console.log(`  口  令: ${initialPassword}`);
-    console.log('  该口令只显示这一次，请立即保存并在登录后修改。');
+    console.log('  首次启动：请设置管理员账号');
+    console.log(`  打开 ${config.publicBaseUrl} 完成设置。`);
+    console.log('');
+    console.log('  初始化令牌（本次唯一一次显示，请勿外传）：');
+    console.log(`  ${setupToken}`);
+    console.log('');
+    console.log('  令牌只用于认领管理员账号，设置完成后立即失效。');
+    console.log('  若没有看到本提示，说明已有账号或令牌已生成过；');
+    console.log('  忘记令牌可删除 data/setup.json 后重启重新生成。');
     console.log('============================================================');
     console.log('');
+  } else if (needsSetup) {
+    logger.warn(
+      '尚未设置管理员账号，但初始化令牌已在之前的启动中生成；如需重新获取请删除 data/setup.json 后重启。',
+    );
   }
 
   if (config.sessionSecretGenerated) {

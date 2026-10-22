@@ -7,7 +7,7 @@ import { Icon, Notice } from '../components/ui';
 export default function LoginPage(): JSX.Element {
   const { login } = useAuth();
   const navigate = useNavigate();
-  const [username, setUsername] = useState('owner');
+  const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -69,7 +69,7 @@ export default function LoginPage(): JSX.Element {
           </button>
           <div className="flex items-center justify-center gap-1.5 text-[11px] text-muted">
             <Icon name="shield" className="size-3.5" />
-            首次启动的初始口令打印在服务端控制台
+            管理员账号在首次启动时由你自己设置
           </div>
         </form>
 

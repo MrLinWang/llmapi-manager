@@ -11,6 +11,7 @@ import {
 import { badRequest, unauthorized } from '../http/errors';
 import { PERMISSIONS } from '../domain/permissions';
 import { ROLE_PERMISSIONS } from '../domain/permissions';
+import { SetupService } from '../services/setup';
 
 interface LoginBody {
   username?: string;
@@ -128,6 +129,58 @@ export function registerAuthRoutes(
       user.authVersion += 1;
       ctx.identity.write(identity);
       return { ok: true, message: '口令已更新，请重新登录' };
+    },
+  );
+
+  /**
+   * 首次初始化的两个接口都是 public：
+   * 此时还没有任何账号，无法用会话鉴权；真正的门禁是启动时打印的一次性 setup token。
+   */
+  const setupService = new SetupService(
+    ctx.config,
+    ctx.paths,
+    ctx.identity,
+    ctx.setup,
+    ctx.logger,
+  );
+
+  defineRoute(
+    app,
+    registry,
+    { method: 'GET', url: '/api/setup/status', access: 'public' },
+    async () => setupService.status(),
+  );
+
+  defineRoute(
+    app,
+    registry,
+    { method: 'POST', url: '/api/setup', access: 'public' },
+    async (request, reply) => {
+      const body = (request.body ?? {}) as {
+        token?: unknown;
+        username?: unknown;
+        password?: unknown;
+      };
+      if (typeof body.token !== 'string' || body.token.trim() === '') {
+        throw badRequest('初始化令牌不能为空');
+      }
+      if (typeof body.username !== 'string') throw badRequest('用户名必须是字符串');
+      if (typeof body.password !== 'string') throw badRequest('口令必须是字符串');
+
+      const { user } = await setupService.complete({
+        token: body.token.trim(),
+        username: body.username,
+        password: body.password,
+      });
+      reply.code(201);
+      return {
+        user: {
+          id: user.id,
+          username: user.username,
+          role: user.role,
+          tenantId: user.tenantId,
+        },
+      };
     },
   );
 }

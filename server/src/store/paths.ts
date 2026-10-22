@@ -15,6 +15,14 @@ export class StorePaths {
     return path.join(this.dataDir, 'instance.json');
   }
 
+  /**
+   * 首次初始化的状态文件。放在 data 根目录而不是某个租户下：
+   * 它描述的是"整个实例是否已开设管理员账号"，此时还没有任何租户上下文。
+   */
+  get setupFile(): string {
+    return path.join(this.dataDir, 'setup.json');
+  }
+
   tenantDir(tenantId: string): string {
     return path.join(this.dataDir, 'tenants', tenantId);
   }

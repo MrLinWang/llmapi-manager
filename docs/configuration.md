@@ -79,6 +79,7 @@ Docker / systemd 部署如果希望把日志挂到宿主机，把 `LOG_DIR` 指�
 data/
 ├── identity.json                     租户与账号
 ├── instance.json                     会话签名密钥
+├── setup.json                        首次初始化状态（一次性令牌哈希，完成后清空）
 └── tenants/<tenantId>/
     ├── providers.json                供应商
     ├── settings.json                 默认供应商/模型、网关令牌

@@ -61,7 +61,7 @@ beforeAll(async () => {
   const config = testConfig(dataDir, agentHome);
   const logger = createLogger('error');
   const ctx = createContext(config, logger);
-  await bootstrapIdentity(config, ctx.paths, ctx.identity, logger);
+  await bootstrapIdentity(config, ctx.paths, ctx.identity, logger, ctx.setup);
   app = await buildApp({ ctx });
   await app.ready();
 });

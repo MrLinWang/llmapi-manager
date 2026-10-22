@@ -24,14 +24,14 @@ server/               Fastify + TypeScript
   src/auth/           口令哈希、会话签名、Principal 解析、权限裁决、路由守卫
   src/crypto/         凭据编解码（AES-256-GCM）
   src/gateway/        网关令牌、令牌鉴权、上游转发
-  src/services/       业务编排（供应商、连通性测试、请求日志）
+  src/services/       业务编排（供应商、连通性测试、请求日志、首次初始化）
   src/agents/         Agent 注册表、路径解析、JSON/TOML 保值补丁、预览/应用/还原
   src/routes/         路由薄壳，只做参数校验与调用服务
   test/               单元测试 + 端到端冒烟（含假上游）
 log/                  运行日志（app.log + 滚动文件），已 gitignore
 web/                  React 18 + Vite + Tailwind
   src/lib/            api 封装、鉴权上下文、useAsync、类型
-  src/pages/          Login / Layout / Overview / Providers / Models / Agents / Settings
+  src/pages/          Login / Setup / Layout / Overview / Providers / Models / Agents / Settings
   src/components/     ui 基础件、ProviderForm、CopyButton
   test/               页面装配测试（jsdom + testing-library）
 ```
@@ -129,9 +129,19 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 - 判断权限用 `useAuth().can(permission)`，不要在前端复刻一套角色规则。
 - 界面上除"编辑态输入框"外不得出现明文 API Key 或完整网关令牌。
 
+### 9. 首次初始化的判据与令牌
+
+- **"是否已初始化"只看默认租户里有没有账号**，不要用"用户名是否等于 `ADMIN_USERNAME`"来判断。
+  首次初始化时用户名由用户自填，可能不等于默认值；按用户名判断会导致重启后误判为未初始化、
+  重新发放令牌（等于开后门）。这一点被测试 `server/test/setup.test.ts` 固定住。
+- 初始化令牌只打印到控制台，**不要写进日志文件**；落盘只存 `sha256(token)`。
+- 完成后令牌必须作废，`POST /api/setup` 对已初始化的实例一律 409，绝不覆盖已有管理员。
+- `POST /api/setup` 与 `GET /api/setup/status` 是 `public` 路由（此时还没有账号可用），
+  门禁是令牌本身；新增此类接口要同样想清楚"凭什么只有部署者能调用"。
+
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 96 + web 5 = 101 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 111 + web 6 = 117 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
@@ -139,6 +149,7 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 - 改到网关转发 → 跑 `server/test/smoke.test.ts`（假上游覆盖非流式、流式、501、回退、4xx 透传、日志）。
 - 改到日志器 → 补 `server/test/logger.test.ts`（落盘、级别阈值、打码、滚动与保留个数）。
 - 改到配置默认值 → 补 `server/test/config.test.ts`（当前 `ADMIN_USERNAME` 默认 `admin`）。
+- 改到首次初始化 → 补 `server/test/setup.test.ts`（令牌校验、一次性、重放拒绝、重启幂等）。
 - 改了品牌名 / 对外文案 → 同步 `README.md`、`web/index.html`、登录页与侧边栏。
 
 ## 明确不做的事

@@ -6,6 +6,7 @@ import type {
   Provider,
   RequestLog,
   RequestStats,
+  SetupStatus,
   TestResult,
   TokenView,
 } from './types';
@@ -66,6 +67,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const json = (body: unknown): RequestInit => ({ method: 'POST', body: JSON.stringify(body) });
 
 export const api = {
+  /** 首次初始化状态：免鉴权，用于判断是否强制跳转设置页 */
+  setupStatus: () => request<SetupStatus>('/api/setup/status'),
+  /** 提交首次初始化：token 来自服务端控制台，明码只在这一次请求里传递 */
+  completeSetup: (token: string, username: string, password: string) =>
+    request<{ user: Me['user'] }>('/api/setup', json({ token, username, password })),
+
   login: (username: string, password: string) =>
     request<{ user: Me['user'] }>('/api/auth/login', json({ username, password })),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),

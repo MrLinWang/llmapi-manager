@@ -15,7 +15,8 @@ cp .env.example .env
 npm run dev
 ```
 
-打开 http://localhost:5173 ，用控制台打印的初始口令登录。
+打开 http://localhost:5173 ，首次启动会进入设置页：
+把控制台打印的一次性初始化令牌填进去，自己设管理员用户名与口令。
 Vite 把 `/api`、`/v1` 代理到 `http://127.0.0.1:8787`（可用 `SERVER_ORIGIN` 覆盖）。
 
 只跑一侧：
@@ -41,19 +42,20 @@ npm run dev -w web        # vite，热更新
 | --- | --- |
 | `server/test/aliases.test.ts` | providerKey 派生、脱敏、别名生成/解析的边界 |
 | `server/test/config.test.ts` | 配置默认值（`ADMIN_USERNAME=admin`、日志目录与滚动参数）与非法值回落 |
+| `server/test/setup.test.ts` | 首次初始化：令牌校验、一次性、重放拒绝、重启幂等、`ADMIN_PASSWORD` 应急通道 |
 | `server/test/gateway.test.ts` | 上游 URL 拼接、协议匹配、令牌哈希比对 |
 | `server/test/agents.test.ts` | JSON/TOML 补丁、备份、还原冲突、空壳文件清理 |
 | `server/test/security.test.ts` | 权限矩阵、租户隔离、凭据编解码、路由登记 |
 | `server/test/storage.test.ts` | 原子写、损坏隔离、未来版本隔离 |
 | `server/test/logger.test.ts` | 运行日志落盘、级别阈值、打码、按大小滚动与保留个数 |
 | `server/test/smoke.test.ts` | 端到端：登录、供应商、令牌、转发（含流式/回退/501/4xx 透传）、Agent、越权、持久化 |
-| `web/test/pages.test.tsx` | 页面装配：登录、供应商、模型、Agent、概览（jsdom + 假 fetch） |
+| `web/test/pages.test.tsx` | 页面装配：登录、首次设置、供应商、模型、Agent、概览（jsdom + 假 fetch） |
 
 `smoke.test.ts` 会起三个假上游（正常 200、永远 500、固定 4xx），用系统分配的随机端口（`port=0`），
 所以并行跑测试不会撞端口。Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真实家目录**。
 日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**。
 
-当前基线：101 项（server 96 + web 5）。
+当前基线：117 项（server 111 + web 6）。
 
 ```bash
 npm test                                # 全部
