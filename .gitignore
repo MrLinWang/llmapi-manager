@@ -1,0 +1,63 @@
+# ── 参考实现（同级克隆，不纳入本仓库）─────────────────────────────
+/ref/
+
+# ── 依赖 ────────────────────────────────────────────────────────────
+node_modules/
+.npm/
+.pnp
+.pnp.*
+
+# ── 构建产物与缓存 ──────────────────────────────────────────────────
+dist/
+build/
+out/
+*.tsbuildinfo
+.vite/
+.cache/
+
+# ── 测试与覆盖率 ────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+
+# ── 日志与临时文件 ──────────────────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.pid
+*.pid.lock
+*.tmp
+*.swp
+*~
+tmp/
+.tmp/
+.eslintcache
+.stylelintcache
+
+# ── 环境变量（保留模板）─────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.local
+
+# ── 运行时数据 ──────────────────────────────────────────────────────
+# 默认 DATA_DIR=data；npm workspaces 脚本的 cwd 是 server/，实际落在 server/data。
+# 也可通过 DATA_DIR 指向别处，请自行确认不要提交。
+/data/
+/server/data/
+/server/identity.json
+/server/instance.json
+/server/tenants/
+# 损坏数据被隔离后的文件名形如 providers.json.corrupt-<时间戳>
+*.corrupt-*
+
+# ── 编辑器与操作系统 ────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/

@@ -1,0 +1,212 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+
+  /* 画布与层次 */
+  --surface: 247 248 250;
+  --elevated: 255 255 255;
+  --subtle: 244 246 249;
+  --line: 229 233 239;
+
+  /* 文本 */
+  --ink: 24 28 36;
+  --muted: 100 108 122;
+
+  /* 主色：new-api 风格的清爽蓝 */
+  --accent: 47 107 237;
+  --accent-strong: 37 86 205;
+  --accent-soft: 235 241 255;
+
+  /* 语义色 */
+  --ok: 16 145 105;
+  --warn: 202 138 4;
+  --danger: 220 38 38;
+  --info: 14 116 144;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --surface: 17 19 23;
+    --elevated: 25 28 34;
+    --subtle: 33 37 45;
+    --line: 45 50 60;
+
+    --ink: 238 241 246;
+    --muted: 148 156 170;
+
+    --accent: 96 145 255;
+    --accent-strong: 132 170 255;
+    --accent-soft: 28 43 74;
+
+    --ok: 52 199 143;
+    --warn: 250 204 21;
+    --danger: 248 113 113;
+    --info: 56 189 248;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: rgb(var(--surface));
+  color: rgb(var(--ink));
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgb(var(--accent) / 0.18);
+}
+
+@layer base {
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  :focus-visible {
+    outline: none;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 9999px;
+    background-clip: content-box;
+    background-color: rgb(var(--muted) / 0.35);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: rgb(var(--muted) / 0.55);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border border-line bg-elevated shadow-card;
+  }
+
+  .card-header {
+    @apply flex items-start justify-between gap-3 border-b border-line px-5 py-4;
+  }
+
+  .card-body {
+    @apply p-5;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg border border-line px-3.5 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-accent/30;
+  }
+
+  .btn-primary {
+    @apply btn border-transparent bg-accent text-white shadow-sm hover:bg-accent-strong;
+  }
+
+  .btn-ghost {
+    @apply btn border-transparent bg-transparent text-muted hover:bg-subtle hover:text-ink;
+  }
+
+  .btn-outline {
+    @apply btn bg-elevated text-ink hover:bg-subtle;
+  }
+
+  .btn-danger {
+    @apply btn border-transparent bg-danger text-white hover:opacity-90;
+  }
+
+  .btn-sm {
+    @apply px-2.5 py-1.5 text-xs;
+  }
+
+  .btn-icon {
+    @apply inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted transition-colors hover:bg-subtle hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-accent/30;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-line bg-elevated px-3 py-2 text-sm text-ink outline-none transition placeholder:text-muted/70 hover:border-muted/40 focus:border-accent focus:ring-2 focus:ring-accent/15;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-medium text-muted;
+  }
+
+  .field-hint {
+    @apply mt-1 text-[11px] leading-5 text-muted;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium leading-5;
+  }
+
+  .code-chip {
+    @apply inline-flex max-w-full items-center rounded-md border border-line bg-subtle px-1.5 py-0.5 font-mono text-[11px] text-ink;
+  }
+
+  .table-base {
+    @apply w-full border-collapse text-sm;
+  }
+
+  .table-base thead th {
+    @apply whitespace-nowrap border-b border-line bg-subtle/70 px-4 py-2.5 text-left text-[11px] font-semibold tracking-wide text-muted;
+  }
+
+  .table-base tbody td {
+    @apply border-t border-line/70 px-4 py-3 align-middle;
+  }
+
+  .table-base tbody tr {
+    @apply transition-colors hover:bg-subtle/50;
+  }
+
+  .table-compact thead th {
+    @apply px-3;
+  }
+
+  .table-compact tbody td {
+    @apply px-3;
+  }
+
+  .stat-strip {
+    @apply grid overflow-hidden rounded-2xl border border-line bg-elevated shadow-card sm:grid-cols-3 sm:divide-x sm:divide-line;
+  }
+
+  .auth-canvas {
+    background-color: rgb(var(--surface));
+    background-image:
+      radial-gradient(60rem 32rem at 12% -10%, rgb(var(--accent) / 0.14), transparent 60%),
+      radial-gradient(46rem 26rem at 92% 8%, rgb(var(--accent) / 0.09), transparent 60%);
+  }
+
+  .page-enter {
+    animation: page-enter 220ms ease-out both;
+  }
+}
+
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

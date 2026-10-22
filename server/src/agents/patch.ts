@@ -1,0 +1,343 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import type { AgentDefinition, AgentId, AgentFileRole, PreviewEntry } from '../domain/agent';
+import { AGENT_DEFINITIONS } from './registry';
+import { applyTomlEdits, readTableScalars, readTomlScalar, removeTomlKeyIfValue } from './toml';
+
+/** 我们写入某个 Agent 文件的目标键值集合。 */
+export interface DesiredWrites {
+  /** JSON 文件的点号路径，或 TOML 的读取键 */
+  path: string;
+  value: string;
+  /** TOML 专属：所在表 */
+  table?: string;
+}
+
+export function readJsonPath(content: string, dotted: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return null;
+  }
+  let cursor: unknown = parsed;
+  for (const segment of dotted.split('.')) {
+    if (!cursor || typeof cursor !== 'object') return null;
+    cursor = (cursor as Record<string, unknown>)[segment];
+  }
+  if (cursor === undefined || cursor === null) return null;
+  return typeof cursor === 'string' ? cursor : JSON.stringify(cursor);
+}
+
+export function applyJsonWrites(content: string, writes: DesiredWrites[]): string {
+  let parsed: Record<string, unknown> = {};
+  if (content.trim() !== '') {
+    const candidate: unknown = JSON.parse(content);
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new Error('目标 JSON 顶层不是对象，拒绝覆盖');
+    }
+    parsed = candidate as Record<string, unknown>;
+  }
+
+  for (const write of writes) {
+    const segments = write.path.split('.');
+    let cursor: Record<string, unknown> = parsed;
+    for (let i = 0; i < segments.length - 1; i += 1) {
+      const segment = segments[i];
+      const next = cursor[segment];
+      if (next === undefined) {
+        const created: Record<string, unknown> = {};
+        cursor[segment] = created;
+        cursor = created;
+        continue;
+      }
+      if (!next || typeof next !== 'object' || Array.isArray(next)) {
+        // 已有同名的非对象值：不擅自覆盖用户结构，直接报错让用户处理
+        throw new Error(`字段 ${segments.slice(0, i + 1).join('.')} 不是对象，无法写入`);
+      }
+      cursor = next as Record<string, unknown>;
+    }
+    cursor[segments[segments.length - 1]] = write.value;
+  }
+
+  return `${JSON.stringify(parsed, null, 2)}\n`;
+}
+
+export function removeJsonPathIfValue(
+  content: string,
+  dotted: string,
+  expected: string,
+): { content: string; removed: boolean; currentValue: string | null } {
+  const currentValue = readJsonPath(content, dotted);
+  if (currentValue === null) return { content, removed: false, currentValue: null };
+  if (currentValue !== expected) return { content, removed: false, currentValue };
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return { content, removed: false, currentValue };
+  }
+  const segments = dotted.split('.');
+  const stack: Array<Record<string, unknown>> = [parsed];
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const next = stack[stack.length - 1][segments[i]];
+    if (!next || typeof next !== 'object' || Array.isArray(next)) {
+      return { content, removed: false, currentValue };
+    }
+    stack.push(next as Record<string, unknown>);
+  }
+  const leafOwner = stack[stack.length - 1];
+  delete leafOwner[segments[segments.length - 1]];
+
+  // 清理因此变空的父级对象，避免留下一串 {} 噪音
+  for (let i = segments.length - 2; i >= 0; i -= 1) {
+    const container = stack[i];
+    const key = segments[i];
+    const child = container[key];
+    if (child && typeof child === 'object' && Object.keys(child as object).length === 0) {
+      delete container[key];
+    } else {
+      break;
+    }
+  }
+
+  return { content: `${JSON.stringify(parsed, null, 2)}\n`, removed: true, currentValue };
+}
+
+function readCurrentValue(
+  definition: AgentDefinition,
+  role: AgentFileRole,
+  content: string | null,
+  write: DesiredWrites,
+): string | null {
+  if (content === null) return null;
+  const spec = definition.files.find((item) => item.role === role);
+  if (!spec) return null;
+  return spec.format === 'toml'
+    ? readTomlScalar(content, write.path, write.table)
+    : readJsonPath(content, write.path);
+}
+
+export function buildPreviewEntries(
+  definition: AgentDefinition,
+  role: AgentFileRole,
+  content: string | null,
+  writes: DesiredWrites[],
+): PreviewEntry[] {
+  return writes.map((write) => {
+    const current = readCurrentValue(definition, role, content, write);
+    // 预览接口不能回传完整凭据：令牌/API Key 只显示前后片段
+    const sensitive = isSensitivePreviewKey(write);
+    return {
+      key: write.table ? `[${write.table}] ${write.path}` : write.path,
+      next: sensitive ? maskPreviewSecret(write.value) : write.value,
+      current: current !== null && sensitive ? maskPreviewSecret(current) : current,
+      differs: current !== null && current !== write.value,
+    };
+  });
+}
+
+/** 预览用脱敏：保留前 8 位与后 4 位，其余打码。 */
+export function maskPreviewSecret(value: string): string {
+  if (value === '') return value;
+  if (value.length <= 12) return '*'.repeat(value.length);
+  return `${value.slice(0, 8)}${'*'.repeat(8)}${value.slice(-4)}`;
+}
+
+const SENSITIVE_PREVIEW_KEY = /(api[_-]?key|auth[_-]?token|access[_-]?token|secret|password)/i;
+
+function isSensitivePreviewKey(write: DesiredWrites): boolean {
+  return (
+    SENSITIVE_PREVIEW_KEY.test(write.path) ||
+    (write.table !== undefined && SENSITIVE_PREVIEW_KEY.test(write.table))
+  );
+}
+
+export function readFileSafe(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+export interface WriteResult {
+  filePath: string;
+  role: AgentFileRole;
+  created: boolean;
+  backupPath: string | null;
+  values: Record<string, string>;
+}
+
+export interface ApplyFilesOptions {
+  agentId: AgentId;
+  definition: AgentDefinition;
+  /** role → 目标文件绝对路径 */
+  paths: Record<AgentFileRole, string | undefined>;
+  /** role → 目标键值 */
+  writes: Partial<Record<AgentFileRole, DesiredWrites[]>>;
+  backupsDir: string;
+}
+
+function timestamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+/**
+ * 写入前先备份；只改我们拥有的键；格式解析失败即停，绝不退回"写空文件"。
+ */
+export function applyAgentWrites(options: ApplyFilesOptions): WriteResult[] {
+  const results: WriteResult[] = [];
+
+  for (const [role, writes] of Object.entries(options.writes) as Array<
+    [AgentFileRole, DesiredWrites[] | undefined]
+  >) {
+    if (!writes || writes.length === 0) continue;
+    const filePath = options.paths[role];
+    if (!filePath) continue;
+
+    const spec = options.definition.files.find((item) => item.role === role);
+    if (!spec) continue;
+
+    const existing = readFileSafe(filePath);
+    const created = existing === null;
+
+    let nextContent: string;
+    if (spec.format === 'toml') {
+      const edits = writes.map((write) => ({
+        key: write.path,
+        value: write.value,
+        table: write.table,
+      }));
+      nextContent = applyTomlEdits(existing ?? '', edits);
+    } else {
+      nextContent = applyJsonWrites(existing ?? '', writes);
+    }
+
+    let backupPath: string | null = null;
+    if (existing !== null) {
+      fs.mkdirSync(options.backupsDir, { recursive: true });
+      const backupName = `${timestamp()}-${path.basename(filePath)}`;
+      backupPath = path.join(options.backupsDir, backupName);
+      fs.writeFileSync(backupPath, existing, { mode: 0o600 });
+    }
+
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const tmp = `${filePath}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, nextContent, { mode: 0o600 });
+    fs.renameSync(tmp, filePath);
+
+    const values: Record<string, string> = {};
+    for (const write of writes) {
+      values[write.table ? `[${write.table}] ${write.path}` : write.path] = write.value;
+    }
+    results.push({ filePath, role, created, backupPath, values });
+  }
+
+  return results;
+}
+
+export interface RevertConflict {
+  key: string;
+  expected: string;
+  current: string | null;
+}
+
+export interface RevertResult {
+  restored: string[];
+  conflicts: RevertConflict[];
+}
+
+/**
+ * 还原：仅当"当前值仍然等于我们当初写入的值"时才移除该键。
+ * 用户改过的值保留并作为冲突返回，避免抹掉用户手改的配置。
+ */
+export function revertAgentWrites(
+  definition: AgentDefinition,
+  files: Array<{
+    role: AgentFileRole;
+    path: string;
+    values: Record<string, string>;
+    created?: boolean;
+  }>,
+): RevertResult {
+  const restored: string[] = [];
+  const conflicts: RevertConflict[] = [];
+
+  for (const file of files) {
+    const spec = definition.files.find((item) => item.role === file.role);
+    if (!spec) continue;
+    const content = readFileSafe(file.path);
+    if (content === null) continue;
+
+    let working = content;
+    let changed = false;
+
+    for (const [key, expected] of Object.entries(file.values)) {
+      const tableMatch = /^\[(.+)\]\s+(.+)$/.exec(key);
+      const table = tableMatch?.[1];
+      const keyPath = tableMatch ? tableMatch[2] : key;
+
+      if (spec.format === 'toml') {
+        const outcome = removeTomlKeyIfValue(working, keyPath, expected, table);
+        if (outcome.removed) {
+          working = outcome.content;
+          changed = true;
+          restored.push(key);
+        } else if (outcome.currentValue !== null && outcome.currentValue !== expected) {
+          conflicts.push({ key, expected, current: outcome.currentValue });
+        }
+        continue;
+      }
+
+      const outcome = removeJsonPathIfValue(working, keyPath, expected);
+      if (outcome.removed) {
+        working = outcome.content;
+        changed = true;
+        restored.push(key);
+      } else if (outcome.currentValue !== null && outcome.currentValue !== expected) {
+        conflicts.push({ key, expected, current: outcome.currentValue });
+      }
+    }
+
+    if (!changed) continue;
+
+    // 文件是本次应用时创建的，且还原后已无任何有效内容：直接删掉，别在家目录留空壳
+    if (file.created && isEmptyDocument(working, spec.format)) {
+      fs.rmSync(file.path, { force: true });
+      continue;
+    }
+
+    const tmp = `${file.path}.${process.pid}.revert.tmp`;
+    fs.writeFileSync(tmp, working, { mode: 0o600 });
+    fs.renameSync(tmp, file.path);
+  }
+
+  return { restored, conflicts };
+}
+
+/** 判断文档在移除我们的键之后是否已无内容（TOML 忽略空行/注释，JSON 看是否有键）。 */
+export function isEmptyDocument(content: string, format: 'json' | 'toml'): boolean {
+  if (format === 'toml') {
+    return content
+      .split('\n')
+      .every((line) => {
+        const trimmed = line.trim();
+        return trimmed === '' || trimmed.startsWith('#');
+      });
+  }
+  try {
+    const parsed: unknown = JSON.parse(content);
+    return (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      Object.keys(parsed as object).length === 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+export { AGENT_DEFINITIONS, readTableScalars };
