@@ -21,7 +21,8 @@ export interface BootstrapResult {
 }
 
 /**
- * 幂等初始化：创建默认租户与 owner 账号。
+ * 幂等初始化：创建默认租户与管理员账号。
+ * 用户名取 ADMIN_USERNAME（默认 admin），角色固定为 owner —— 两者是不同概念，别混淆。
  * 已存在时完全不动 —— 尤其不能覆盖用户已改过的口令。
  */
 export async function bootstrapIdentity(

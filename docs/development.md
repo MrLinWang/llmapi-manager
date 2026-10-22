@@ -40,6 +40,7 @@ npm run dev -w web        # vite，热更新
 | 文件 | 覆盖 |
 | --- | --- |
 | `server/test/aliases.test.ts` | providerKey 派生、脱敏、别名生成/解析的边界 |
+| `server/test/config.test.ts` | 配置默认值（`ADMIN_USERNAME=admin`、日志目录与滚动参数）与非法值回落 |
 | `server/test/gateway.test.ts` | 上游 URL 拼接、协议匹配、令牌哈希比对 |
 | `server/test/agents.test.ts` | JSON/TOML 补丁、备份、还原冲突、空壳文件清理 |
 | `server/test/security.test.ts` | 权限矩阵、租户隔离、凭据编解码、路由登记 |
@@ -52,7 +53,7 @@ npm run dev -w web        # vite，热更新
 所以并行跑测试不会撞端口。Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真实家目录**。
 日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**。
 
-当前基线：94 项（server 89 + web 5）。
+当前基线：101 项（server 96 + web 5）。
 
 ```bash
 npm test                                # 全部

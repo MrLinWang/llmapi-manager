@@ -36,7 +36,7 @@ function testConfig(dir: string, home: string): AppConfig {
     dataDir: dir,
     agentHomeDir: home,
     publicBaseUrl: `http://127.0.0.1:${MOCK_PORT}`,
-    adminUsername: 'owner',
+    adminUsername: 'admin',
     adminPassword: PASSWORD,
     encryptionKey: 'smoke-encryption-key',
     sessionSecret: 'smoke-session-secret-0123456789abcdef',
@@ -96,7 +96,7 @@ describe('冒烟：鉴权', () => {
 
   it('错误口令登录失败且不回显口令', async () => {
     const response = await call('POST', '/api/auth/login', {
-      username: 'owner',
+      username: 'admin',
       password: 'wrong-password',
     });
     expect(response.statusCode).toBe(401);
@@ -105,7 +105,7 @@ describe('冒烟：鉴权', () => {
 
   it('正确口令登录成功并下发 HttpOnly Cookie', async () => {
     const response = await call('POST', '/api/auth/login', {
-      username: 'owner',
+      username: 'admin',
       password: PASSWORD,
     });
     expect(response.statusCode).toBe(200);
@@ -706,7 +706,7 @@ describe('冒烟：持久化与隔离', () => {
     expect(stale.statusCode).toBe(401);
 
     const relogin = await call('POST', '/api/auth/login', {
-      username: 'owner',
+      username: 'admin',
       password: 'brand-new-password',
     });
     expect(relogin.statusCode).toBe(200);

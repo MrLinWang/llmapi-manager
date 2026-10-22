@@ -14,7 +14,7 @@
 免鉴权。成功时下发 `llmapi_session` Cookie（HttpOnly、SameSite=Lax、7 天）。
 
 ```json
-{ "username": "owner", "password": "..." }
+{ "username": "admin", "password": "..." }
 ```
 
 失败一律返回 401 `用户名或口令不正确`，不区分"用户不存在"与"口令错误"。
@@ -29,7 +29,7 @@
 
 ```json
 {
-  "user": { "id": "u_owner", "tenantId": "t_default", "role": "owner", "username": "owner" },
+  "user": { "id": "u_owner", "tenantId": "t_default", "role": "owner", "username": "admin" },
   "permissions": ["providers:read", "..."],
   "allPermissions": ["providers:read", "..."]
 }

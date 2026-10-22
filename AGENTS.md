@@ -131,13 +131,14 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 89 + web 5 = 94 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 96 + web 5 = 101 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
 - 修改存储 → 补 `server/test/storage.test.ts`（原子写、损坏隔离、未来版本隔离）。
 - 改到网关转发 → 跑 `server/test/smoke.test.ts`（假上游覆盖非流式、流式、501、回退、4xx 透传、日志）。
 - 改到日志器 → 补 `server/test/logger.test.ts`（落盘、级别阈值、打码、滚动与保留个数）。
+- 改到配置默认值 → 补 `server/test/config.test.ts`（当前 `ADMIN_USERNAME` 默认 `admin`）。
 - 改了品牌名 / 对外文案 → 同步 `README.md`、`web/index.html`、登录页与侧边栏。
 
 ## 明确不做的事

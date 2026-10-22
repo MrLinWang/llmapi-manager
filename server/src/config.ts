@@ -155,7 +155,7 @@ export function loadConfig(): AppConfig {
     publicBaseUrl,
     dataDir,
     webDistDir: path.resolve(repoRoot, 'web', 'dist'),
-    adminUsername: optionalEnv('ADMIN_USERNAME') ?? 'owner',
+    adminUsername: optionalEnv('ADMIN_USERNAME') ?? 'admin',
     adminPassword: optionalEnv('ADMIN_PASSWORD'),
     sessionSecret: secret,
     sessionSecretGenerated: generated,

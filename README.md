@@ -102,6 +102,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `PORT` | `8787` | 监听端口 |
 | `PUBLIC_BASE_URL` | 由 HOST:PORT 推导 | 写进 Agent 配置的网关地址，反代/容器部署必须显式设置 |
 | `DATA_DIR` | `data` | 数据目录 |
+| `ADMIN_USERNAME` | `admin` | 初始管理员用户名，仅首次创建账号时使用 |
 | `ADMIN_PASSWORD` | 随机 | 初始管理员口令，仅首次创建账号时使用 |
 | `DATA_ENCRYPTION_KEY` | 无 | 供应商 Key 与网关令牌的落盘加密密钥；不设则为明文并告警 |
 | `AGENT_HOME_DIR` | OS 家目录 | Agent 配置根目录（其下 `.codex` / `.claude`） |
@@ -128,7 +129,7 @@ data/
 
 ## 为多用户预留的设计
 
-当前是单人使用（一个 `t_default` 租户、一个 `owner` 账号），但结构上已经为多用户/租户隔离与权限控制留好接口：
+当前是单人使用（一个 `t_default` 租户、一个 `admin` 账号），但结构上已经为多用户/租户隔离与权限控制留好接口：
 
 - **身份三层**：`Tenant` / `User(role)` / `Principal`（请求上下文）。会话与网关令牌都解析成 `Principal`，没有"匿名默认租户"的兜底。
 - **数据分区**：所有租户数据在 `data/tenants/<tenantId>/`，仓储只能通过 `forTenant(principal)` 获取，路由层不拼路径。
