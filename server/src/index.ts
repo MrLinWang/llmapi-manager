@@ -1,13 +1,23 @@
-import { loadConfig } from './config';
-import { createLogger } from './logger';
+import { loadConfig, type AppConfig } from './config';
+import { createLogger, logFilePath, type FileLogOptions, type Logger } from './logger';
 import { createContext } from './context';
 import { bootstrapIdentity } from './bootstrap';
 import { buildApp } from './app';
 import { getWarnings } from './resilience';
 
+function fileLogOptions(config: AppConfig): FileLogOptions | undefined {
+  if (!config.logDir) return undefined;
+  return {
+    dir: config.logDir,
+    maxBytes: config.logMaxBytes,
+    maxFiles: config.logMaxFiles,
+  };
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
-  const logger = createLogger(config.logLevel);
+  const logOptions = fileLogOptions(config);
+  const logger = createLogger(config.logLevel, { file: logOptions });
   const ctx = createContext(config, logger);
 
   const { initialPassword } = await bootstrapIdentity(
@@ -25,6 +35,7 @@ async function main(): Promise<void> {
     console: `http://${config.host}:${config.port}`,
     gateway: `${address}/v1`,
     dataDir: config.dataDir,
+    logFile: logOptions ? logFilePath(logOptions) : '(仅控制台)',
   });
 
   if (initialPassword) {
@@ -55,13 +66,34 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`收到 ${signal}，正在关闭服务`);
     await app.close();
+    logger.close?.();
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
-main().catch((error) => {
+/**
+ * 启动失败时也要落日志：此时 logger 可能还没建好（loadConfig 就可能抛），
+ * 因此尽力构造一个文件日志；失败则退回 console.error。
+ */
+function reportFatal(error: unknown): void {
+  let logger: Logger | undefined;
+  try {
+    const config = loadConfig();
+    logger = createLogger('error', { file: fileLogOptions(config) });
+  } catch {
+    logger = undefined;
+  }
+  if (logger) {
+    logger.error('启动失败', error);
+    logger.close?.();
+    return;
+  }
   console.error('启动失败：', error);
+}
+
+main().catch((error) => {
+  reportFatal(error);
   process.exit(1);
 });

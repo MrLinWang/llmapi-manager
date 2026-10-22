@@ -18,6 +18,16 @@ export interface AppConfig {
   encryptionKey: string | undefined;
   logLevel: LogLevel;
   /**
+   * 运行日志目录。为 undefined 时不落盘，只输出到控制台。
+   * 默认是仓库根的 log/ —— 注意它刻意不放在 DATA_DIR 下：
+   * 日志属于运行产物而非租户业务数据，数据目录整体迁移时不该被一起带走。
+   */
+  logDir: string | undefined;
+  /** 单个日志文件的滚动阈值（字节） */
+  logMaxBytes: number;
+  /** 保留的滚动文件个数（不含当前写入的 app.log） */
+  logMaxFiles: number;
+  /**
    * Agent 配置文件的根目录（其下是 .codex/.claude）。
    * 默认取当前 OS 用户家目录；测试或多租户场景可覆盖。
    */
@@ -100,6 +110,24 @@ function resolveSessionSecret(dataDir: string): {
   return { secret, generated: true };
 }
 
+/**
+ * 解析日志目录。
+ * 默认落在仓库根的 log/（与 web/dist 用同一套 __dirname 推导，server/src 与 server/dist 都成立），
+ * 这样 npm workspaces 把 cwd 切到 server/ 后，日志仍然只在一个固定位置。
+ * `LOG_DIR=off`（或 none/空串的显式写法）可关闭落盘，只保留控制台输出。
+ */
+function resolveLogDir(repoRoot: string): string | undefined {
+  const raw = optionalEnv('LOG_DIR');
+  if (raw && ['off', 'none', 'false', '0'].includes(raw.toLowerCase())) return undefined;
+  return path.resolve(repoRoot, raw ?? 'log');
+}
+
+function positiveInt(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export function loadConfig(): AppConfig {
   readEnvFile();
 
@@ -115,6 +143,7 @@ export function loadConfig(): AppConfig {
   const port = Number.parseInt(optionalEnv('PORT') ?? '8787', 10);
   const host = optionalEnv('HOST') ?? '127.0.0.1';
   const resolvedPort = Number.isFinite(port) ? port : 8787;
+  const repoRoot = path.resolve(__dirname, '..', '..');
   // 下发给 Agent 的地址：优先显式配置，否则按监听地址推导（0.0.0.0 对客户端无意义，回落本机）
   const publicBaseUrl =
     optionalEnv('PUBLIC_BASE_URL')?.replace(/\/+$/, '') ??
@@ -125,13 +154,16 @@ export function loadConfig(): AppConfig {
     port: resolvedPort,
     publicBaseUrl,
     dataDir,
-    webDistDir: path.resolve(__dirname, '..', '..', 'web', 'dist'),
+    webDistDir: path.resolve(repoRoot, 'web', 'dist'),
     adminUsername: optionalEnv('ADMIN_USERNAME') ?? 'owner',
     adminPassword: optionalEnv('ADMIN_PASSWORD'),
     sessionSecret: secret,
     sessionSecretGenerated: generated,
     encryptionKey: optionalEnv('DATA_ENCRYPTION_KEY'),
     logLevel: LOG_LEVELS.includes(level) ? level : 'info',
+    logDir: resolveLogDir(repoRoot),
+    logMaxBytes: positiveInt(optionalEnv('LOG_MAX_BYTES'), 5 * 1024 * 1024),
+    logMaxFiles: positiveInt(optionalEnv('LOG_MAX_FILES'), 5),
     agentHomeDir: optionalEnv('AGENT_HOME_DIR'),
   };
 }

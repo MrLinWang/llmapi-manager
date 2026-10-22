@@ -40,7 +40,7 @@ Agent ──HTTP──┘      │
 2. `createContext()` 装配上述容器。
 3. `bootstrapIdentity()` 幂等创建 `t_default` 租户与 `u_owner`，并补齐租户数据文件。
 4. `buildApp()` 注册插件、鉴权钩子、路由、静态资源。
-5. `listen()`，打印控制台地址、网关地址与首次生成的初始口令。
+5. `listen()`，打印控制台地址、网关地址；首次启动时额外打印一次性初始化令牌。
 
 ## 分层约定
 
@@ -113,6 +113,7 @@ POST /api/agents/codex/apply
 data/
 ├── identity.json                     租户与账号（口令 scrypt 哈希）
 ├── instance.json                     会话签名密钥（自动生成，可重建）
+├── setup.json                        首次初始化状态（init token 哈希，完成后清空）
 └── tenants/<tenantId>/
     ├── providers.json                供应商（apiKey 为密文）
     ├── settings.json                 默认供应商/模型、网关令牌（哈希 + 密文）
@@ -123,6 +124,17 @@ data/
 
 所有 JSON 写入都是"临时文件 + rename"，文件权限 0600，外层信封为 `{ schemaVersion, data }`。
 读到损坏或版本更高的文件时，改名为 `*.corrupt-<时间戳>` 并以默认值启动，同时把告警挂到 `/api/health`。
+
+运行日志是另一条独立的落盘路径，**不在 `DATA_DIR` 下**：
+
+```
+log/                                 仓库根，已 gitignore（LOG_DIR 可改）
+├── app.log                          当前写入（0600）
+└── app.<n>.log                      按大小滚动的历史，最多 LOG_MAX_FILES 个
+```
+
+区分的理由：`data/` 是租户业务数据，可以整体迁移/备份；`log/` 是运行产物，
+迁移数据目录时不该被一起带走。日志器与业务存储也不共用代码（同步追加写 vs 原子写）。
 
 ## 关键设计取舍
 
