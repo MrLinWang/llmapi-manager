@@ -30,7 +30,6 @@ export function registerApiInfoRoutes(
     { method: 'GET', url: '/api/info', access: 'public' },
     async () => ({
       name: 'llmapi-manager',
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
       version: readVersion(),
       startedAt: new Date(startedAt).toISOString(),
       uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
@@ -84,12 +83,7 @@ export function registerApiInfoRoutes(
   );
 }
 
-/**
- * 版本号从仓库根的 package.json 读，避免两处手写容易漂移。
- *
- * 用 createRequire 而不是裸 `require`：这个文件在 dist 与 src 下的相对层级一致，
- * 但 createRequire 不依赖"当前文件是 CJS 还是 ESM"，将来切模块系统也不会坏。
- */
+/** 版本号从 `server/package.json` 读，避免手写常量与包版本漂移。 */
 function readVersion(): string {
   try {
     const { createRequire } = require('node:module') as typeof import('node:module');

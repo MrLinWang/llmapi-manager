@@ -1873,6 +1873,97 @@ describe('冒烟：诊断接口', () => {
       expect(names).toContain('审批模型映射的生效条件');
     });
 
+    it('只有 openai 供应商时，诊断必须与网关一样预测到"会自动开启转换"', async () => {
+      // 真实缺陷：诊断原先不模拟网关的自动开启逻辑，于是回答"直发 /responses、
+      // 不需要转换"，而实际网关会自动开开关并改走 /chat/completions——
+      // 结论方向完全相反，比没有诊断更误导。
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llmapi-diag2-'));
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'llmapi-diag2h-'));
+      const config = { ...testConfig(dir, home), enableDiagnostics: true };
+      const logger = createLogger('error');
+      const ctx = createContext(config, logger);
+      await bootstrapIdentity(config, ctx.paths, ctx.identity, logger, ctx.setup);
+      const isolated = await buildApp({ ctx });
+      await isolated.ready();
+      try {
+        const login = await isolated.inject({ method: 'POST', url: '/api/auth/login',
+          payload: { username: 'admin', password: PASSWORD } });
+        const c = { cookie: String(login.headers['set-cookie']).split(';')[0] };
+        // 只有 openai 供应商，且开关关闭
+        await isolated.inject({ method: 'POST', url: '/api/providers', headers: c,
+          payload: { name: 'OnlyChat', apiType: 'openai', baseUrl: 'http://127.0.0.1:65530',
+            apiKey: 'sk-x', models: ['chat-m'] } });
+
+        const r = await isolated.inject({ method: 'POST', url: '/api/diagnostics/route',
+          headers: c, payload: { model: 'chat-m', path: '/responses' } });
+        expect(r.statusCode).toBe(200);
+        const body = r.json();
+        // 关键断言：必须预测到自动开启，且预测转换后走 chat/completions
+        expect(body.wouldAutoEnableConversion).toBe(true);
+        expect(body.primary.convertResponsesToChat).toBe(true);
+        expect(body.primary.wouldUseUpstreamUrl).toContain('/chat/completions');
+      } finally {
+        await isolated.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it('流式请求不会被诊断误报成 JSON 解析失败', async () => {
+      // 真实缺陷：诊断直接 JSON.parse 上游响应，遇到 SSE 必然失败并报错，
+      // 而真实链路是好的。Codex 永远发 stream:true，所以这个假错必然撞上。
+      const r = await diagCall('POST', '/api/diagnostics/forward', {
+        model: 'stream-test',
+        path: '/responses',
+        body: { model: 'stream-test', input: 'hi', stream: true },
+      });
+      // 上游不存在 → 链路会失败，但**不能因为"流式"而报 JSON 解析错**
+      const body = r.json();
+      const conv = (body.steps ?? []).find(
+        (item: { step: string }) => item.step === 'convert-response',
+      );
+      if (conv && conv.ok === false) {
+        expect(conv.error).not.toContain('JSON');
+      }
+    });
+
+    it('check 不会在"responses + openai 并存且开关关闭"时误报目录有问题', async () => {
+      // 真实缺陷：check 原先用 buildModelCatalog 无过滤重建目录，把 openai 别名
+      // 也算进来，于是在这个最常见的配置下稳定误报，并让用户反复做无效的 apply。
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llmapi-diag3-'));
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), 'llmapi-diag3h-'));
+      const config = { ...testConfig(dir, home), enableDiagnostics: true };
+      const logger = createLogger('error');
+      const ctx = createContext(config, logger);
+      await bootstrapIdentity(config, ctx.paths, ctx.identity, logger, ctx.setup);
+      const isolated = await buildApp({ ctx });
+      await isolated.ready();
+      try {
+        const login = await isolated.inject({ method: 'POST', url: '/api/auth/login',
+          payload: { username: 'admin', password: PASSWORD } });
+        const c = { cookie: String(login.headers['set-cookie']).split(';')[0] };
+        await isolated.inject({ method: 'POST', url: '/api/providers', headers: c,
+          payload: { name: 'Resp', apiType: 'responses', baseUrl: 'http://127.0.0.1:65530',
+            apiKey: 'sk-r', models: ['resp-m'] } });
+        await isolated.inject({ method: 'POST', url: '/api/providers', headers: c,
+          payload: { name: 'Chat', apiType: 'openai', baseUrl: 'http://127.0.0.1:65531',
+            apiKey: 'sk-c', models: ['chat-m'] } });
+        // apply 一次，生成真实目录（此时开关关闭，openai 别名不该进目录）
+        await isolated.inject({ method: 'POST', url: '/api/agents/codex/apply', headers: c });
+
+        const r = await isolated.inject({ method: 'GET', url: '/api/diagnostics/check', headers: c });
+        const body = r.json();
+        const catalogCheck = body.checks.find(
+          (item: { name: string }) => item.name.includes('目录'),
+        );
+        expect(catalogCheck.ok).toBe(true);
+      } finally {
+        await isolated.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
+
     it('诊断接口需要 settings:write，只读令牌被拒', async () => {
       const created = await call(
         'POST', '/api/tokens',

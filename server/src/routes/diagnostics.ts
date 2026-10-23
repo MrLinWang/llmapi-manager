@@ -6,7 +6,6 @@ import type { RouteRegistry } from '../http/routeRegistry';
 import { badRequest, notFound } from '../http/errors';
 import { ProviderService } from '../services/providers';
 import { listAliases } from '../domain/aliases';
-import { buildModelCatalog } from '../domain/modelCatalog';
 import {
   GATEWAY_PATHS,
   requiredApiType,
@@ -15,10 +14,34 @@ import {
   buildUpstreamHeaders,
   type GatewayPath,
 } from '../gateway/forward';
-import { isApprovalReviewRequest, selectCandidates } from '../gateway/selection';
+import {
+  isApprovalReviewRequest,
+  selectCandidates,
+  wouldAutoEnableConversion,
+} from '../gateway/selection';
 import { responsesToChatRequest, ConversionError } from '../gateway/convert/responsesToChat';
 import { chatToResponsesResponse } from '../gateway/convert/chatToResponses';
-import { AGENT_DEFINITIONS } from '../agents/registry';
+import { AGENT_DEFINITIONS, AgentPathResolver } from '../agents/registry';
+import { DEFAULT_TENANT_ID } from '../domain/identity';
+import fs from 'node:fs';
+
+/**
+ * 读磁盘上真实的 Codex 目录文件，返回其中的 slug 列表。
+ * 文件不存在或解析失败返回 null —— 调用方据此区分"没 apply 过"与"目录为空"。
+ */
+function readCatalogSlugs(filePath: string): string[] | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as {
+      models?: Array<{ slug?: unknown }>;
+    };
+    if (!Array.isArray(parsed.models)) return null;
+    return parsed.models
+      .map((item) => item.slug)
+      .filter((slug): slug is string => typeof slug === 'string');
+  } catch {
+    return null;
+  }
+}
 
 /**
  * 诊断接口：回答"某个功能到底有没有生效"。
@@ -36,7 +59,14 @@ import { AGENT_DEFINITIONS } from '../agents/registry';
  * 2. **默认关闭**（ENABLE_DIAGNOSTICS=1），因为它会回显 prompt 片段并真的打上游。
  */
 
-/** 诊断接口统一先过这道门：未开启时 404，避免暴露"这里有个功能" */
+/**
+ * 诊断接口统一先过这道门：未开启时返回 404。
+ *
+ * 注意 404 **并不能**真正隐藏"这里有个功能"：返回体里的 message 会写明
+ * "诊断接口未启用，请设置 ENABLE_DIAGNOSTICS=1 后重启"，探测者照样能知道开关存在。
+ * 用 404 而不是 403 的实际收益只是"未启用"不该算权限问题——未登录/无权限才该 403，
+ * 这里拒绝的理由是功能没开，与调用者身份无关。
+ */
 function assertEnabled(ctx: AppContext): void {
   if (!ctx.config.enableDiagnostics) {
     throw notFound('诊断接口未启用，请设置 ENABLE_DIAGNOSTICS=1 后重启');
@@ -61,7 +91,7 @@ export function registerDiagnosticsRoutes(
   /**
    * 路由预演：不发送任何请求，只回答"这次会走哪里、要不要转换、会不会 501"。
    *
-   * 这是最常用的诊断：用户说"我的 wllapi 在 Codex 里选不到"，用它就能看出
+   * 这是最常用的诊断：用户说"我在 Codex 里选不到某个模型"，用它就能看出
    * 是协议没匹配、还是目录没生成。
    */
   defineRoute(
@@ -78,16 +108,36 @@ export function registerDiagnosticsRoutes(
 
       const providerService = new ProviderService(repos, ctx.secrets);
       const records = providerService.listRecords();
-      const settings = repos.settings.read();
+      let settings = repos.settings.read();
 
       // 用与网关完全相同的函数，保证诊断结果与实际行为一致
-      const selection = selectCandidates(
+      let selection = selectCandidates(
         body.model,
         records,
         settings,
         path,
         isApprovalReviewRequest(request.headers),
       );
+
+      // 必须模拟网关的"自动开启跨协议转发"。
+      //
+      // 真实网关在选路之后会判断是否该自动开启，开了再**重选一次**。
+      // 诊断若漏掉这段，就会在"只有 openai 供应商 + 开关关闭"时回答
+      // "直发 /responses、不需要转换"，而实际网关已经自动开了开关并改走
+      // /chat/completions —— 结论方向完全相反，比没有诊断更误导。
+      const wouldAutoEnable = wouldAutoEnableConversion(records, settings, path);
+      if (wouldAutoEnable) {
+        // 注意：诊断**不写设置**。它只回答"如果我发这个请求会发生什么"，
+        // 真正改设置的是真实请求。这里用内存副本模拟开启后的状态。
+        settings = { ...settings, protocolConversion: true };
+        selection = selectCandidates(
+          body.model,
+          records,
+          settings,
+          path,
+          isApprovalReviewRequest(request.headers),
+        );
+      }
 
       const required = requiredApiType(path);
       const describe = (item: { provider: typeof records[number]; upstreamModel: string; modelRewritten: boolean; convertResponsesToChat: boolean; reason?: string }) => ({
@@ -125,11 +175,25 @@ export function registerDiagnosticsRoutes(
         };
       }
 
+      // 真实网关会在发请求前再做一次协议兜底校验，不匹配就 501。
+      // 诊断必须复现这个结论，否则用户会以为"诊断说能走"就一定能走。
+      const primaryMatches = required === null || selection.primary.provider.apiType === required;
+      const allowedByConversion =
+        selection.primary.convertResponsesToChat ||
+        // 自动开启后网关会按"开关已打开"重新校验，这里用同一个口径
+        false;
+
       return {
-        ok: true,
+        ok: primaryMatches || allowedByConversion,
         path,
         requiredApiType: required,
         protocolConversion: settings.protocolConversion,
+        // 让调用方知道"这次请求会改动你的设置"
+        wouldAutoEnableConversion: wouldAutoEnable,
+        wouldBeRejected:
+          !primaryMatches && !allowedByConversion
+            ? `真实网关会返回 501：路径需要 ${required}，主供应商是 ${selection.primary.provider.apiType}`
+            : null,
         mode: selection.mode,
         primary: describe(selection.primary),
         fallbacks: selection.fallbacks.map(describe),
@@ -160,12 +224,22 @@ export function registerDiagnosticsRoutes(
       if (typeof body.model !== 'string' || body.model.trim() === '') {
         throw badRequest('model 不能为空');
       }
-      const requestBody = (body.body ?? { model: body.model }) as Record<string, unknown>;
+      // 校验 body 必须是对象：数组或字符串会让下面的展开静默丢掉所有字段，
+      // 接口照样 200 并继续打上游——用户以为自己传了 prompt，其实传的是空请求。
+      const rawBody = body.body ?? { model: body.model };
+      if (typeof rawBody !== 'object' || rawBody === null || Array.isArray(rawBody)) {
+        throw badRequest('body 必须是 JSON 对象');
+      }
+      const requestBody = rawBody as Record<string, unknown>;
 
       const providerService = new ProviderService(repos, ctx.secrets);
       const records = providerService.listRecords();
-      const settings = repos.settings.read();
+      let settings = repos.settings.read();
       const approvalReview = isApprovalReviewRequest(request.headers);
+
+      // 与真实网关一致：自动开启后按"开关已打开"重新选路
+      const wouldAutoEnable = wouldAutoEnableConversion(records, settings, path);
+      if (wouldAutoEnable) settings = { ...settings, protocolConversion: true };
 
       const selection = selectCandidates(
         body.model,
@@ -193,6 +267,24 @@ export function registerDiagnosticsRoutes(
         modelRewritten: candidate.modelRewritten,
         reason: candidate.reason ?? null,
       });
+
+      // 与真实转发一致地收集 custom 工具名：响应方向要靠它把 function_call 还原成
+      // custom_tool_call。漏了它，Codex 会按 function 语义构造历史，调用链断掉，
+      // 而诊断会显示"转换正常"——正是最该被诊断抓出来的假阴性。
+      const customToolNames = new Set<string>();
+      const declaredTools = (requestBody as { tools?: unknown }).tools;
+      if (Array.isArray(declaredTools)) {
+        for (const tool of declaredTools) {
+          if (
+            tool !== null &&
+            typeof tool === 'object' &&
+            (tool as { type?: unknown }).type === 'custom' &&
+            typeof (tool as { name?: unknown }).name === 'string'
+          ) {
+            customToolNames.add((tool as { name: string }).name);
+          }
+        }
+      }
 
       // ── 第 2 层：请求转换（仅在需要时）
       let upstreamBody: Record<string, unknown> = {
@@ -256,6 +348,12 @@ export function registerDiagnosticsRoutes(
         });
         upstreamStatus = response.status;
         upstreamText = await response.text();
+        // 诊断会真打上游、真烧额度，必须留痕：出现"谁在反复调诊断"时
+        // 要能从日志查到。正常转发每笔都写日志，诊断不该是盲区。
+        ctx.logger.info(
+          `诊断转发：provider=${provider.name}(${provider.id}) status=${upstreamStatus} ` +
+            `latency=${Date.now() - startedAt}ms by=${request.principal?.userId ?? 'unknown'}`,
+        );
         steps.push({
           step: 'upstream',
           ok: response.ok,
@@ -287,13 +385,30 @@ export function registerDiagnosticsRoutes(
       }
 
       // ── 第 4 层：响应转换
-      if (candidate.convertResponsesToChat) {
+      //
+      // 流式响应（SSE）这里**不解析**：它是一行行 `data: {...}`，JSON.parse 必然失败，
+      // 而真实链路是好的——那样诊断就会在功能正常时报错（Codex 永远发 stream:true，
+      // 所以这个假错必然撞上）。正确处理是明确跳过并说清原因，让用户改用非流式 body
+      // 验证转换；流式那条路由 sweep 由 convert.test.ts 覆盖。
+      const wantsStream = (requestBody as { stream?: unknown }).stream === true;
+      if (candidate.convertResponsesToChat && wantsStream) {
+        steps.push({
+          step: 'convert-response',
+          ok: true,
+          skipped: true,
+          reason:
+            '请求是流式（stream:true），上游返回 SSE。本接口不解析流式，' +
+            '否则会把"功能正常"误报成 JSON 解析失败。要验证转换映射请传 stream:false 的 body。',
+          // 仍给出 SSE 原文，肉眼可确认事件序列是否合理
+          ssePreview: upstreamText.slice(0, 2000),
+        });
+      } else if (candidate.convertResponsesToChat) {
         try {
           const chat = JSON.parse(upstreamText) as Record<string, unknown>;
           const back = chatToResponsesResponse({
             model: candidate.upstreamModel,
             chat: chat as never,
-            customToolNames: new Set<string>(),
+            customToolNames,
             responseId: 'resp_diagnostics',
             createdAt: Math.floor(Date.now() / 1000),
           });
@@ -366,23 +481,46 @@ export function registerDiagnosticsRoutes(
         fix: codexUsable ? undefined : '添加 responses 供应商，或开启 protocolConversion',
       });
 
-      // 2. 目录条目必须只含该 Agent 能用的协议
-      // buildModelCatalog 返回的是 JSON 字符串（直接写进 Codex 的目录文件），这里解析出来看形状
-      const codexCatalog = JSON.parse(
-        buildModelCatalog(aliases, {}),
-      ) as { models: Array<{ slug: string }> };
-      const catalogHasOpenaiWhenOff = !settings.protocolConversion &&
-        codexCatalog.models.some((item) => {
-          const alias = aliases.find((a) => a.alias === item.slug);
-          return alias?.apiType === 'openai';
-        });
+      // 2. 磁盘上真实的 Codex 目录里，不能有当前用不了的协议
+      //
+      // 必须读**磁盘上真正写进 Codex 的那份文件**，不能用 buildModelCatalog 现场重建：
+      // 重建时若不带 `agents/service.ts` 那套协议过滤，就会把 openai 别名也算进来，
+      // 于是在"responses + openai 并存、开关关闭"这个最常见的配置下**稳定误报**，
+      // 并建议用户"重新 apply"——而 apply 之后目录本来就对，用户会陷入反复空转。
+      //
+      // 读文件还有个额外好处：它反映的是"Codex 现在实际看到的"，而不是"如果现在
+      // 重新 apply 会生成什么"。这两者在用户改过设置却没 apply 时并不相同。
+      const resolver = new AgentPathResolver(ctx.config.agentHomeDir);
+      const catalogPath = resolver.resolve(
+        'codex',
+        { tenantId: DEFAULT_TENANT_ID, userId: '' },
+        'catalog',
+      );
+      const onDisk = readCatalogSlugs(catalogPath);
+      const unusable = onDisk === null
+        ? []
+        : onDisk.filter((slug) => {
+            const alias = aliases.find((a) => a.alias === slug);
+            // 目录里可能含直连模式的裸模型名（没有对应别名），那些不算问题
+            if (!alias) return false;
+            return (
+              alias.apiType !== 'responses' &&
+              !(settings.protocolConversion && alias.apiType === 'openai')
+            );
+          });
       checks.push({
-        name: 'Codex 模型目录不含用不了的协议',
-        ok: !catalogHasOpenaiWhenOff,
-        detail: catalogHasOpenaiWhenOff
-          ? '目录里有 openai 供应商的别名，但跨协议转发关着——用户选中后必然 501'
-          : `目录 ${codexCatalog.models.length} 个条目，协议均可用`,
-        fix: catalogHasOpenaiWhenOff ? '重新 apply 一次 Codex 配置，或开启 protocolConversion' : undefined,
+        name: 'Codex 目录里没有用不了的协议',
+        ok: unusable.length === 0,
+        detail:
+          onDisk === null
+            ? '还没 apply 过，目录文件不存在（Codex 会回退到内置官方模型列表）'
+            : unusable.length === 0
+              ? `目录 ${onDisk.length} 个条目，协议均可用`
+              : `目录里有 ${unusable.length} 个当前用不了的条目：${unusable.slice(0, 3).join('、')}`,
+        fix:
+          unusable.length > 0
+            ? '重新 apply 一次 Codex 配置；若目录里有 openai 别名又想用，需开启 protocolConversion'
+            : undefined,
       });
 
       // 3. 审批模型映射只在网关模式有意义

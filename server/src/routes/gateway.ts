@@ -8,7 +8,6 @@ import {
   GATEWAY_PATHS as GATEWAY_PATHS_ALL,
   assertApiTypeMatch,
   forwardOnce,
-  requiredApiType,
   writeDeferredError,
   type ForwardOutcome,
   type GatewayPath,
@@ -18,6 +17,7 @@ import type { Principal } from '../domain/identity';
 import {
   isApprovalReviewRequest,
   selectCandidates,
+  wouldAutoEnableConversion,
   type Candidate,
 } from '../gateway/selection';
 
@@ -122,11 +122,7 @@ export function registerGatewayRoutes(
       // 等于悄悄改了全局行为却毫无提示。
       //
       // 触发条件刻意收窄（见下方注释），只有"打开真的能解决问题"才开。
-      const autoEnabledConversion =
-        !settings.protocolConversion &&
-        requiredApiType(path) === 'responses' &&
-        !records.some((item) => item.enabled && item.apiType === 'responses') &&
-        records.some((item) => item.enabled && item.apiType === 'openai');
+      const autoEnabledConversion = wouldAutoEnableConversion(records, settings, path);
       if (autoEnabledConversion) {
         // 写前重读：上面读 settings 到这里的区间内，用户可能在页面上改了别的开关
         // （例如 web_search）。直接写回旧快照会把这些改动覆盖掉——只改这一个字段。

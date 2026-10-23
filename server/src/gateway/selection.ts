@@ -117,6 +117,12 @@ export function selectCandidates(
   // 被排除的供应商，供诊断接口解释"为什么不是它"。
   // 必须在"没有可用供应商"的早退之前算出来——那正是最需要解释原因的场景：
   // 用户看到"没有可用的 responses 供应商"，但界面上明明有几家供应商。
+  //
+  // 文案分两档，取决于 convertible（= 路径要 responses 且开关已开）：
+  // - convertible 为真：只有非 openai 的才是真"协议不匹配"，用短句即可。
+  // - convertible 为假：括注要同时覆盖两种成因——开关没开（responses 路径下
+  //   openai 本可被转换），或方向本就不支持（/messages、/chat/completions
+  //   永远没有转换器）。少写"或方向不适用"，用户会以为开个开关就能好。
   const excluded: ExcludedProvider[] = providers
     .filter((item) => !usable.some((kept) => kept.id === item.id))
     .map((item) => ({
@@ -225,5 +231,30 @@ export function isApprovalReviewRequest(
   } catch {
     return false;
   }
+}
+
+/**
+ * 这次请求是否会触发"自动开启跨协议转发"。
+ *
+ * 触发条件必须这么窄——只有"打开真的能解决问题"才开：
+ * - 路径确实要求 responses（`/v1/messages` 命中 openai 时开开关毫无作用，只会误导）
+ * - 没有启用的 responses 供应商（有的话直接用，不该悄悄改变全局行为）
+ * - 确实有启用的 openai 供应商（否则开了也没有可用候选）
+ *
+ * 抽到这里是为了让**诊断接口能给出与真实网关相同的结论**。诊断若不含这段判断，
+ * 就会出现"诊断说直发 /responses、实际被自动开启后走 /chat/completions"——
+ * 方向完全相反的误导，比没有诊断更浪费时间。
+ */
+export function wouldAutoEnableConversion(
+  records: readonly ProviderRecord[],
+  settings: TenantSettings,
+  path: GatewayPath,
+): boolean {
+  return (
+    !settings.protocolConversion &&
+    requiredApiType(path) === 'responses' &&
+    !records.some((item) => item.enabled && item.apiType === 'responses') &&
+    records.some((item) => item.enabled && item.apiType === 'openai')
+  );
 }
 
