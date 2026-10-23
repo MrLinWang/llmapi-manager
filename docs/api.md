@@ -508,3 +508,66 @@ Claude Code 恒为 0）。写成功不等于生效：这些进程内存里还是
 
 可能的 `code`：`corrupt_file`、`plaintext_credentials`、`credential_decrypt_failed`、
 `setup_pending`。
+
+## API 令牌（程序化访问）
+
+`/api/*` 默认只接受浏览器会话 cookie。要给脚本或 CI 用，创建一个 API 令牌：
+
+```bash
+# 1. 用会话创建令牌（明文只在这一次响应里出现）
+curl -X POST http://127.0.0.1:8787/api/tokens \
+  -H 'Cookie: <你的会话 cookie>' \
+  -H 'content-type: application/json' \
+  -d '{"name":"CI 脚本","scopes":["providers:read","logs:read"]}'
+# → { "token": "api_xxx…", "tokenView": { … } }
+
+# 2. 之后用 Bearer 调用，不需要 cookie
+curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
+```
+
+**与网关令牌（`lam_`）是两套东西，不要混用**：
+
+| | API 令牌（`api_`） | 网关令牌（`lam_`） |
+| --- | --- | --- |
+| 调用面 | `/api/*` 管理面 | `/v1/*` 推理转发 |
+| 权限模型 | scopes（可收窄） | 无，只能转发 |
+| 存放 | `data/tenants/<id>/api-tokens.json` | 租户设置里 |
+
+### 接口
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/tokens` | `settings:read` | 列出令牌，含 `availableScopes`（前端据此渲染勾选项） |
+| POST | `/api/tokens` | `settings:write` | 创建；**仅此响应返回明文** |
+| DELETE | `/api/tokens/:id` | `settings:write` | 吊销（置 `revokedAt`，不物理删除） |
+
+创建参数：
+
+| 字段 | 说明 |
+| --- | --- |
+| `name` | 必填，≤64 字，列表里靠它区分 |
+| `scopes` | 必填，权限名数组，不能为空 |
+| `expiresAt` | 可选 ISO 时间；省略或 `null` 表示不过期 |
+
+### 边界
+
+- **只能收窄、不能提权**：`scopes` 必须是创建者自身权限的子集，否则 403。
+- `users:manage` / `tenants:manage` 不允许授予令牌（当前没有接口使用，开放只有风险）。
+- **令牌不能创建或吊销令牌**：否则一个即将被吊销的令牌可以先给自己留后门。
+- **令牌不能调用 `authenticated` 级接口**：改口令必须由真人会话完成，
+  否则凭据泄露后可以永久接管账号，吊销令牌也救不回来。
+- 明文只在创建响应里出现一次，之后只存 sha256；列表只给 `prefix`/`tail`。
+- `lastUsedAt` 按 60 秒节流更新（每次请求都写盘会让高频脚本把磁盘打得很差）。
+
+## 信息接口
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/info` | `public` | 名称、版本、启动时间、运行时长、网关基址 |
+| GET | `/api/overview` | `providers:read` | 供应商分布、别名数、关键设置、Agent 状态、今日统计 |
+
+`/api/info` 是 public（程序需要登录前确认"这是不是我要连的实例"），因此**不含**
+数据目录等部署细节。`/api/health` 同理，已移除 `dataDir` 字段。
+
+`/api/overview` 的价值是"一次拿全"：脚本不必为了一份总览发七八个请求。
+

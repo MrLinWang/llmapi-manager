@@ -21,7 +21,7 @@ server/               Fastify + TypeScript
   src/context.ts      AppContext：config / logger / paths / identity / store / secrets
   src/domain/         纯领域类型与纯函数（无 IO）
   src/store/          JSON 文件存储、路径、租户作用域仓储
-  src/auth/           口令哈希、会话签名、Principal 解析、权限裁决、路由守卫
+  src/auth/           口令哈希、会话签名、Principal 解析（会话/API 令牌）、权限裁决、路由守卫
   src/crypto/         凭据编解码（AES-256-GCM）
   src/gateway/        网关令牌、令牌鉴权、上游转发
     convert/          跨协议转换：responses→chat 的请求/响应/流式三向映射
@@ -238,9 +238,23 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
   改这块时注意 `ProviderForm` 用 `useId()` 生成输入框 id —— 同一页面可能同时存在多个
   实例，写死 id 会让 label 关联到别的表单。
 
+### 14. API 令牌只能收窄权限
+
+`/api/*` 除会话 cookie 外还接受 `Authorization: Bearer api_…`。三条硬规则：
+
+- **两套令牌不混用**：`api_` 只进 `/api/*` 管理面，`lam_` 只进 `/v1/*` 转发。
+  前缀分开是为了日志与处置能区分，别为了"统一"合并它们。
+- **只收窄、不提权**：`scopes` 必须是创建者权限的子集；判定时**只看 scopes、忽略角色**
+  （`policy.ts` 的 `can`）。若叠加角色，创建只读令牌反而会拿到创建者全部权限。
+- **令牌不能碰账号与会话**：`authenticated` 级接口（改口令）拒绝令牌——否则凭据泄露
+  后可永久接管账号，吊销令牌也救不回来。令牌也不能创建/吊销令牌（防自我续命）。
+
+存储只存 `sha256`、比对用 `timingSafeEqual`、明文只在创建响应里出现一次。
+`lastUsedAt` 按 60 秒节流更新：每次请求都写盘会让高频脚本把磁盘打得很差。
+
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 178 + web 9 = 187 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 204 + web 10 = 214 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
@@ -250,6 +264,8 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
 - 改到配置默认值 → 补 `server/test/config.test.ts`（当前 `ADMIN_USERNAME` 默认 `admin`）。
 - 改到首次初始化 → 补 `server/test/setup.test.ts`（令牌校验、一次性、重放拒绝、重启幂等）。
 - 改到协议匹配 → 补 `server/test/gateway.test.ts` 的 `requiredApiType` 断言 + smoke 的双向 501 用例。
+- 改到鉴权/权限 → 补 `server/test/apiToken.test.ts`（令牌生命周期）与 smoke 里的
+  「令牌能调管理接口」「越权 403」「令牌不能改口令/建令牌」「吊销后失效」。
 - 改到协议转换 → 补 `server/test/convert.test.ts`（请求/响应/流式三向映射），
   并确认 smoke 里三条都在："自动开启后打通 Chat 上游"、"有 responses 供应商时不自动开"、
   "转换解决不了时仍 501 且不改设置"。

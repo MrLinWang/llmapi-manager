@@ -167,3 +167,31 @@ npm start
 
 整个 `data/` 目录可直接复制到新机器。若 `DATA_ENCRYPTION_KEY` 不变，供应商 Key 仍可解密；
 若更换了密钥，需要在控制台重新填写各供应商的 Key（网关令牌也要重新生成并重新下发 Agent 配置）。
+
+### `api-tokens.json`
+
+程序化访问用的 API 令牌（`api_` 前缀），格式：
+
+```json
+{
+  "schemaVersion": 1,
+  "tokens": [
+    {
+      "id": "tok_…",
+      "name": "CI 脚本",
+      "tokenHash": "<sha256>",
+      "prefix": "api_abc1234",
+      "tail": "x9Yz",
+      "scopes": ["providers:read", "logs:read"],
+      "createdBy": "u_…",
+      "createdAt": "2026-10-24T00:00:00.000Z",
+      "lastUsedAt": null,
+      "expiresAt": null,
+      "revokedAt": null
+    }
+  ]
+}
+```
+
+只存哈希，不含明文。可直接删除整个文件来清空所有令牌（需重启服务）。
+
