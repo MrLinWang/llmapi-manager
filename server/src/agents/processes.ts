@@ -10,14 +10,15 @@ import path from 'node:path';
  * 用户会在 `/model` 里看到旧模型列表，看起来像"配置没生效"。参考实现（cc-switch）
  * 也是先 `codex app-server daemon restart` 再让用户重开 TUI。
  *
- * 实现上分两层，两者互不替代：
+ * 实现上分三层，彼此不替代——少任何一层都有明确的故障形态：
  *
- * 1. **守护进程**：`codex app-server daemon stop` 让 TUI 连的那个托管 daemon 退出。
- *    这是官方入口，比自己 pkill 安全——它自己会处理停机宽限期与锁文件。
- * 2. **TUI 进程**：`codex`（无子命令）进程本身。它没有官方退出入口，只能按进程表
- *    精确匹配后发信号。匹配规则刻意保守，只认"可执行文件叫 codex、且没有子命令或
- *    子命令不是 app-server/exec 等"的进程，避免误杀 `codex --version`、
- *    编辑器插件或本服务自己的子进程。
+ * 1. **官方入口**：`codex app-server daemon stop` 让 TUI 连的那个托管 daemon 退出。
+ *    这是官方入口，比自己 pkill 安全，它会自己处理停机宽限期与锁文件。
+ *    但它要写 `~/.codex`，目录只读或 daemon 状态异常时会失败。
+ * 2. **pid 文件兜底**：读 `app-server-daemon/*.pid` 里 daemon 自己写的 pid 精确结束。
+ *    第 1 层失败后 daemon 仍在跑，用户会看到"点了退出进程但 Codex 还能用"。
+ * 3. **TUI 进程**：`codex`（无子命令）进程本身。它没有官方退出入口，只能按进程表
+ *    精确匹配后发信号。匹配规则刻意保守，见 isCodexClientCommand。
  */
 
 export interface AgentProcess {
@@ -137,11 +138,12 @@ export function isCodexClientCommand(command: string): boolean {
   if (subcommand === undefined) return true;
 
   /**
-   * 明确"不是长驻客户端"的子命令。除此之外一律当作客户端处理：
-   * 未知参数（例如 `exec -a codex sleep 90` 里的 `90`）说明这条命令行的
-   * 形状和我们预期的不一样，此时宁可**不误杀**——但也不能因此漏掉真正的 TUI。
-   * 这里用白名单排除法：只有认识的一次性命令才放过，其余按客户端处理更安全，
-   * 因为漏杀的表现是"用户以为重启了其实没有"，比误杀一个瞬时命令更难排查。
+   * 明确"不是长驻客户端"的子命令。除此之外一律当作客户端处理。
+   *
+   * 这里刻意用白名单排除法而不是"只认 exec/TUI"：未知形态的命令行说明我们的预期
+   * 已经过时（子命令会随版本增删），此时按客户端处理更安全。取舍的依据是两种错的
+   * 代价不对称——漏杀的表现是"用户以为重启了其实没有"，配置看着对却不生效，
+   * 极难排查；误杀一个瞬时命令只是白杀一次，用户重跑即可。
    */
   const NON_CLIENT_SUBCOMMANDS = new Set([
     'app-server',
@@ -160,6 +162,44 @@ export function isCodexClientCommand(command: string): boolean {
   // `--version` / `--help` 这类以 - 开头的已被上面的选项跳过逻辑处理，
   // 走到这里的都是普通子命令：exec 与 TUI 都算客户端。
   return true;
+}
+
+/**
+ * 结束 Codex 的托管 daemon 与它的 updater。
+ *
+ * 为什么不只靠 `codex app-server daemon stop`：那条命令要写 `~/.codex`（锁文件、
+ * pid 文件）。目录只读、或 daemon 状态异常时它会失败，而失败之后 daemon 仍在跑——
+ * 用户点"退出进程"却看到 Codex 依然可用，只能手动 `pkill -9 -f codex`。
+ *
+ * 所以这里读 `app-server-daemon/*.pid` 里记录的 pid 作为兜底：
+ * 那些文件是 daemon 自己写的，比按命令行猜更准（daemon 的参数形态会随版本变）。
+ */
+function stopManagedDaemonProcesses(codexHome: string): { killed: number; warnings: string[] } {
+  const warnings: string[] = [];
+  let killed = 0;
+  const pidFiles = ['daemon.pid', 'daemon-updater.pid'];
+
+  for (const name of pidFiles) {
+    const file = path.join(codexHome, 'app-server-daemon', name);
+    let pid: number;
+    try {
+      const record = JSON.parse(fs.readFileSync(file, 'utf8')) as { pid?: number };
+      if (typeof record.pid !== 'number') continue;
+      pid = record.pid;
+    } catch {
+      // 文件不存在或格式变了：交给 daemon stop 那条路，不算错误
+      continue;
+    }
+    try {
+      process.kill(pid, 'SIGTERM');
+      killed += 1;
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      // ESRCH = 已经退出了，说明结果已经达到
+      if (!/ESRCH/.test(detail)) warnings.push(`结束 ${name} 记录的进程 ${pid} 失败：${detail}`);
+    }
+  }
+  return { killed, warnings };
 }
 
 function parseProcessTable(table: string): AgentProcess[] {
@@ -198,9 +238,14 @@ export function codexHomeDir(agentHomeDir: string | undefined): string {
   return path.join(agentHomeDir ?? os.homedir(), '.codex');
 }
 
-function runCommand(file: string, args: string[], env: NodeJS.ProcessEnv): Promise<string> {
+function runCommand(
+  file: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  timeoutMs = 20_000,
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { timeout: 20_000, env, encoding: 'utf8' }, (error, stdout, stderr) => {
+    execFile(file, args, { timeout: timeoutMs, env, encoding: 'utf8' }, (error, stdout, stderr) => {
       if (error) {
         const detail = `${stdout ?? ''}${stderr ?? ''}`.trim();
         reject(new Error(detail === '' ? error.message : detail));
@@ -214,8 +259,11 @@ function runCommand(file: string, args: string[], env: NodeJS.ProcessEnv): Promi
 /**
  * 停止 Codex 守护进程 + 所有 TUI 客户端。
  *
- * 顺序很重要：先停 daemon（官方命令，会优雅关闭），再停 TUI 进程。
- * 反过来的话 TUI 可能在 daemon 关闭过程中自动重连。
+ * 顺序很重要：先停 daemon（官方命令 + pid 兜底），再停 TUI 进程。
+ * 反过来的话 TUI 可能在 daemon 关闭过程中自动重连，刚杀完又连上。
+ *
+ * 每一步失败都只记 warning、不中断后续步骤：用户点的是"把能停的停掉"，
+ * 半途抛错会让已经停掉的 daemon 与还在跑的 TUI 处于更混乱的状态。
  */
 export async function stopCodexProcesses(
   agentHomeDir: string | undefined,
@@ -231,7 +279,9 @@ export async function stopCodexProcesses(
   const env: NodeJS.ProcessEnv = { ...process.env };
   if (fs.existsSync(codexHome)) env.CODEX_HOME = codexHome;
   try {
-    await runCommand('codex', ['app-server', 'daemon', 'stop'], env);
+    // 5 秒足够：正常情况它立刻返回；目录只读时也立刻失败。
+    // 原来的 20 秒会让整个"退出进程"操作卡住 20 秒，用户以为按钮没反应。
+    await runCommand('codex', ['app-server', 'daemon', 'stop'], env, 5_000);
     actions.push('已停止 Codex 守护进程（codex app-server daemon stop）');
   } catch (cause) {
     // 没有 daemon、或 codex 不在 PATH 都算常见情况，不当作错误
@@ -245,7 +295,16 @@ export async function stopCodexProcesses(
     }
   }
 
-  // 2) TUI / exec 进程
+  // 2) 托管 daemon 的兜底：`daemon stop` 在只读目录等情况下会失败，
+  //    失败后 daemon 仍活着，表现为"点了退出进程但 Codex 还能用"。
+  //    这里按它自己写的 pid 文件精确结束，不依赖命令行形态。
+  const daemonFallback = stopManagedDaemonProcesses(codexHome);
+  if (daemonFallback.killed > 0) {
+    actions.push(`已按 pid 文件结束 ${daemonFallback.killed} 个 Codex 守护进程`);
+  }
+  warnings.push(...daemonFallback.warnings);
+
+  // 3) TUI / exec 进程
   const killed: AgentProcess[] = [];
   for (const item of found) {
     try {
@@ -259,15 +318,48 @@ export async function stopCodexProcesses(
   }
   if (killed.length > 0) {
     actions.push(`已结束 ${killed.length} 个 Codex 客户端进程`);
-    // 给进程一点退出时间，再补一刀处理忽略 SIGTERM 的
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    for (const item of killed) {
+    // 先给 SIGTERM 一点时间，再对仍然活着的补 SIGKILL。
+    // 300ms 太短：Codex 的 TUI 关闭时可能还在收尾（写 rollout、断连接），
+    // 实测常常来不及退出，用户看到的是"点了退出但进程还在"。
+    //
+    // 三轮递增等待（800/1200/1600ms）而不是一次性长等：
+    // - 每轮都重新探测，已经退出的立刻 break，正常情况 800ms 就结束；
+    // - 只在还有活进程时才继续等并补 SIGKILL，避免把操作固定拖到 3.6 秒。
+    for (const delay of [800, 1200, 1600]) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      const alive = killed.filter((item) => {
+        try {
+          process.kill(item.pid, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      if (alive.length === 0) break;
+      for (const item of alive) {
+        try {
+          process.kill(item.pid, 'SIGKILL');
+        } catch {
+          // 已退出
+        }
+      }
+    }
+    const stillAlive = killed.filter((item) => {
       try {
         process.kill(item.pid, 0);
-        process.kill(item.pid, 'SIGKILL');
+        return true;
       } catch {
-        // 已退出
+        return false;
       }
+    });
+    if (stillAlive.length > 0) {
+      warnings.push(
+        `${stillAlive.length} 个进程在 SIGKILL 后仍未退出（pid ${stillAlive
+          .map((item) => item.pid)
+          .join(', ')}），可能需要手动处理`,
+      );
+    } else {
+      actions.push('已确认相关进程全部退出');
     }
   }
 

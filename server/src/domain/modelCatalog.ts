@@ -92,21 +92,58 @@ export function buildModelCatalog(
   aliases: readonly ModelAlias[],
   options: BuildCatalogOptions,
 ): string {
+  return buildCatalogEntries(
+    aliases.map((alias) => ({
+      model: alias.alias,
+      description: `${alias.providerName} 提供的 ${alias.upstreamModel}`,
+    })),
+    options,
+  );
+}
+
+/**
+ * 直连模式用的目录：模型名是**上游真实的裸名**，没有网关别名。
+ *
+ * 为什么直连也要生成目录：不给 `model_catalog_json` 时，Codex 会回退到**内置的官方
+ * 模型列表**（models-manager 的 `fallback_models` → `load_remote_models_from_file`），
+ * `/model` 里就变成一堆 GPT-6.x，与用户配置的供应商毫无关系。真实踩过这个坑。
+ */
+export function buildDirectModelCatalog(
+  models: readonly string[],
+  providerName: string,
+  options: BuildCatalogOptions,
+): string {
+  return buildCatalogEntries(
+    models.map((model) => ({ model, description: `${providerName} 提供的 ${model}` })),
+    options,
+  );
+}
+
+interface CatalogEntryInput {
+  /** 写进 slug 的模型标识：网关模式是别名，直连模式是上游裸模型名 */
+  model: string;
+  description: string;
+}
+
+function buildCatalogEntries(
+  inputs: readonly CatalogEntryInput[],
+  options: BuildCatalogOptions,
+): string {
   const entries: CodexCatalogEntry[] = [];
   const seen = new Set<string>();
 
-  const push = (alias: ModelAlias): void => {
-    if (seen.has(alias.alias)) return;
-    seen.add(alias.alias);
+  const push = (input: CatalogEntryInput): void => {
+    if (seen.has(input.model)) return;
+    seen.add(input.model);
     entries.push({
-      slug: alias.alias,
+      slug: input.model,
       // display_name 直接用别名本身（= slug），不再另拼一个「供应商 + 模型」的人类可读名：
       // Codex 的 /model 列表渲染的就是这个字段，两者一致后，列表里看到的
       // 与写进 config.toml 的 model 是同一个字符串，不会出现对不上号的情况。
-      display_name: alias.alias,
+      display_name: input.model,
       // description 仍是给人看的来源说明，与 display_name 不要求一致；
       // /model 列表把它作为条目上的次要文字展示，用来补充"来自哪家、哪个上游模型"。
-      description: `${alias.providerName} 提供的 ${alias.upstreamModel}`,
+      description: input.description,
       priority: entries.length + 1,
       visibility: 'list',
       supported_in_api: true,
@@ -122,12 +159,12 @@ export function buildModelCatalog(
     });
   };
 
-  // 默认模型排最前，其余按别名顺序
+  // 默认模型排最前，其余按原顺序
   if (options.preferredClientModel) {
-    const preferred = aliases.find((item) => item.alias === options.preferredClientModel);
+    const preferred = inputs.find((item) => item.model === options.preferredClientModel);
     if (preferred) push(preferred);
   }
-  for (const alias of aliases) push(alias);
+  for (const input of inputs) push(input);
 
   const catalog: CodexCatalog = { models: entries };
   return `${JSON.stringify(catalog, null, 2)}\n`;
