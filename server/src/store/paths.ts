@@ -43,4 +43,8 @@ export class StorePaths {
     return path.join(this.tenantDir(tenantId), 'requests.jsonl');
   }
 
+  apiTokensFile(tenantId: string): string {
+    return path.join(this.tenantDir(tenantId), 'api-tokens.json');
+  }
+
 }

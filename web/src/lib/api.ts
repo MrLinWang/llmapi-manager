@@ -2,6 +2,8 @@ import type {
   AgentPreview,
   AgentConnectionMode,
   AgentTargetPreference,
+  ApiTokenView,
+  GatewayOverview,
   StopProcessesResult,
   AgentSummary,
   Me,
@@ -93,6 +95,16 @@ export const api = {
       '/api/auth/password',
       json({ oldPassword, newPassword }),
     ),
+
+  /** 程序化访问令牌。列表不含明文与哈希；明文只在创建响应里出现一次。 */
+  apiTokens: () =>
+    request<{ tokens: ApiTokenView[]; availableScopes: string[] }>('/api/tokens'),
+  createApiToken: (body: { name: string; scopes: string[]; expiresAt?: string | null }) =>
+    request<{ token: string; tokenView: ApiTokenView }>('/api/tokens', json(body)),
+  revokeApiToken: (id: string) =>
+    request<{ tokenView: ApiTokenView }>(`/api/tokens/${id}`, { method: 'DELETE' }),
+
+  overview: () => request<GatewayOverview>('/api/overview'),
 
   providers: () => request<{ providers: Provider[] }>('/api/providers'),
   createProvider: (body: ProviderInput) =>

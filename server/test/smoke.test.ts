@@ -1543,3 +1543,225 @@ describe('冒烟：持久化与隔离', () => {
     expect(relogin.statusCode).toBe(200);
   });
 });
+
+describe('冒烟：API 令牌与信息接口', () => {
+  // 这些用例需要有效的登录会话。放在顶层而不是嵌在「持久化与隔离」里：
+  // 那一组末尾会改口令、导致 cookie 失效，嵌进去会全部变成 401。
+  let tokenCookie = '';
+
+  beforeAll(async () => {
+    const login = await call('POST', '/api/auth/login', {
+      username: 'admin',
+      password: 'brand-new-password',
+    });
+    expect(login.statusCode).toBe(200);
+    tokenCookie = String(login.headers['set-cookie']).split(';')[0];
+  });
+
+  const bearer = (token: string): Record<string, string> => ({
+    authorization: `Bearer ${token}`,
+  });
+
+  it('用令牌可以调用管理接口，无需 cookie', async () => {
+    const created = await call(
+      'POST', '/api/tokens',
+      { name: 'CI 脚本', scopes: ['providers:read', 'providers:write'] },
+      { cookie: tokenCookie },
+    );
+    expect(created.statusCode).toBe(200);
+    const token = created.json().token as string;
+    expect(token.startsWith('api_')).toBe(true);
+
+    // 不带 cookie，只带 Bearer
+    const list = await call('GET', '/api/providers', undefined, bearer(token));
+    expect(list.statusCode).toBe(200);
+
+    // 写权限也生效
+    const write = await call(
+      'POST', '/api/providers',
+      {
+        name: '令牌创建的供应商',
+        apiType: 'openai',
+        baseUrl: 'http://127.0.0.1:65534',
+        apiKey: 'sk-token-created',
+        models: ['m1'],
+      },
+      bearer(token),
+    );
+    expect(write.statusCode).toBe(201);
+  });
+
+  it('令牌的权限是收窄的：越权返回 403', async () => {
+    const created = await call(
+      'POST', '/api/tokens',
+      { name: '只读令牌', scopes: ['providers:read'] },
+      { cookie: tokenCookie },
+    );
+    const token = created.json().token as string;
+
+    // 读能过
+    expect((await call('GET', '/api/providers', undefined, bearer(token))).statusCode).toBe(200);
+    // 写不能过
+    const denied = await call(
+      'POST', '/api/providers',
+      { name: 'x', apiType: 'openai', baseUrl: 'http://127.0.0.1:65535', apiKey: 'k', models: [] },
+      bearer(token),
+    );
+    expect(denied.statusCode).toBe(403);
+    // 错误信息要指明是令牌缺权限，而不是角色——令牌没有角色语义
+    expect(denied.json().error.message).toContain('API 令牌');
+    // 且不能把令牌内容带进错误信息
+    expect(denied.body).not.toContain(token);
+  });
+
+  it('令牌不能调用需要真人会话的接口', async () => {
+    // 改口令必须由真人会话完成：否则凭据泄露后攻击者可以永久接管账号，
+    // 而吊销令牌也救不回来（口令已被改）
+    const created = await call(
+      'POST', '/api/tokens',
+      { name: '全权限令牌', scopes: ['settings:read', 'settings:write'] },
+      { cookie: tokenCookie },
+    );
+    const token = created.json().token as string;
+
+    const response = await call(
+      'POST', '/api/auth/password',
+      { oldPassword: 'brand-new-password', newPassword: 'hacked-password-123' },
+      bearer(token),
+    );
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.message).toContain('登录会话');
+  });
+
+  it('令牌不能创建或吊销令牌，避免自我续命', async () => {
+    const created = await call(
+      'POST', '/api/tokens',
+      { name: '想自我续命', scopes: ['settings:read', 'settings:write'] },
+      { cookie: tokenCookie },
+    );
+    const token = created.json().token as string;
+
+    const again = await call(
+      'POST', '/api/tokens',
+      { name: '后门', scopes: ['settings:read'] },
+      bearer(token),
+    );
+    expect(again.statusCode).toBe(403);
+  });
+
+  it('吊销后立即失效', async () => {
+    const created = await call(
+      'POST', '/api/tokens',
+      { name: '待吊销', scopes: ['providers:read'] },
+      { cookie: tokenCookie },
+    );
+    const body = created.json() as { token: string; tokenView: { id: string } };
+    expect((await call('GET', '/api/providers', undefined, bearer(body.token))).statusCode).toBe(200);
+
+    const revoked = await call('DELETE', `/api/tokens/${body.tokenView.id}`, undefined, { cookie: tokenCookie });
+    expect(revoked.statusCode).toBe(200);
+    expect(revoked.json().tokenView.revokedAt).toBeTruthy();
+
+    expect((await call('GET', '/api/providers', undefined, bearer(body.token))).statusCode).toBe(401);
+  });
+
+  it('列表不含哈希与明文，只给 prefix/tail', async () => {
+    const created = await call(
+      'POST', '/api/tokens',
+      { name: '列表检查', scopes: ['providers:read'] },
+      { cookie: tokenCookie },
+    );
+    const token = created.json().token as string;
+
+    const list = await call('GET', '/api/tokens', undefined, { cookie: tokenCookie });
+    expect(list.statusCode).toBe(200);
+    expect(list.body).not.toContain(token);
+    expect(list.body).not.toContain('tokenHash');
+    const found = (list.json().tokens as Array<{ name: string; prefix: string }>).find(
+      (item) => item.name === '列表检查',
+    );
+    expect(found?.prefix).toBe(token.slice(0, 11));
+  });
+
+  it('不能授予自己没有的权限，也不能授予保留权限', async () => {
+    const overreach = await call(
+      'POST', '/api/tokens',
+      { name: '提权尝试', scopes: ['users:manage'] },
+      { cookie: tokenCookie },
+    );
+    // admin 角色本身就没有 users:manage，两项拒绝理由都成立
+    expect([400, 403]).toContain(overreach.statusCode);
+  });
+
+  it('空 scopes 与非法 scope 都被拒绝', async () => {
+    expect(
+      (await call('POST', '/api/tokens', { name: 'x', scopes: [] }, { cookie: tokenCookie })).statusCode,
+    ).toBe(400);
+    expect(
+      (await call('POST', '/api/tokens', { name: 'x', scopes: ['不存在的权限'] }, { cookie: tokenCookie }))
+        .statusCode,
+    ).toBe(400);
+  });
+
+  it('过期的 expiresAt 被拒绝', async () => {
+    const response = await call(
+      'POST', '/api/tokens',
+      { name: 'x', scopes: ['providers:read'], expiresAt: '2020-01-01T00:00:00.000Z' },
+      { cookie: tokenCookie },
+    );
+    expect(response.statusCode).toBe(400);
+  });
+});
+
+describe('补充信息接口', () => {
+  let infoCookie = '';
+  beforeAll(async () => {
+    const login = await call('POST', '/api/auth/login', {
+      username: 'admin',
+      password: 'brand-new-password',
+    });
+    infoCookie = String(login.headers['set-cookie']).split(';')[0];
+  });
+
+  it('/api/info 是 public 但不泄漏部署细节', async () => {
+    const response = await call('GET', '/api/info');
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as Record<string, unknown>;
+    expect(body.name).toBe('llmapi-manager');
+    expect(typeof body.version).toBe('string');
+    // 本机绝对路径属于部署细节，不能出现在 public 接口里
+    expect(response.body).not.toContain('/mnt/');
+    expect(response.body).not.toContain('/home/');
+    expect(body.dataDir).toBeUndefined();
+  });
+
+  it('/api/health 不再返回 dataDir', async () => {
+    const response = await call('GET', '/api/health');
+    expect(response.statusCode).toBe(200);
+    expect(response.json().dataDir).toBeUndefined();
+    // 探活字段仍在
+    expect(response.json().ok).toBe(true);
+  });
+
+  it('/api/overview 一次拿到供应商分布、设置与 Agent 状态', async () => {
+    const response = await call('GET', '/api/overview', undefined, { cookie: infoCookie });
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as {
+      providers: { total: number; byApiType: Record<string, number> };
+      aliases: { total: number };
+      settings: Record<string, unknown>;
+      agents: Array<{ id: string }>;
+      todayStats: Record<string, unknown>;
+    };
+    expect(body.providers.total).toBeGreaterThan(0);
+    expect(body.providers.byApiType).toHaveProperty('responses');
+    expect(body.aliases.total).toBeGreaterThan(0);
+    expect(body.settings).toHaveProperty('protocolConversion');
+    expect(body.agents.map((item) => item.id)).toContain('codex');
+    expect(body.todayStats).toHaveProperty('successRate');
+  });
+
+  it('/api/overview 需要 providers:read，未登录被拒', async () => {
+    expect((await call('GET', '/api/overview')).statusCode).toBe(401);
+  });
+});

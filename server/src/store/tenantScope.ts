@@ -5,6 +5,7 @@ import { defaultTenantSettings } from '../domain/settings';
 import type { AgentsData, AgentBindingState, AgentId } from '../domain/agent';
 import { defaultAgentsData } from '../domain/agent';
 import type { RequestLogRecord } from '../domain/requestLog';
+import type { ApiTokenRecord } from '../domain/apiToken';
 import { createJsonFile, appendJsonLine, readJsonLines, type JsonFile } from './jsonFile';
 import type { StorePaths } from './paths';
 import type { IdentityRepo } from './identityRepo';
@@ -28,6 +29,14 @@ export interface AgentRepo {
   clearBinding(agentId: AgentId): void;
 }
 
+export interface ApiTokenRepo {
+  list(): ApiTokenRecord[];
+  get(id: string): ApiTokenRecord | undefined;
+  /** 按 sha256 查找，供每次带令牌的请求使用 */
+  findByHash(tokenHash: string): ApiTokenRecord | undefined;
+  saveAll(tokens: ApiTokenRecord[]): void;
+}
+
 export interface RequestLogRepo {
   append(record: RequestLogRecord): void;
   recent(limit: number): RequestLogRecord[];
@@ -40,6 +49,7 @@ export interface TenantRepos {
   readonly settings: SettingsRepo;
   readonly agents: AgentRepo;
   readonly requestLog: RequestLogRepo;
+  readonly apiTokens: ApiTokenRepo;
 }
 
 export interface Store {
@@ -107,12 +117,27 @@ export function createStore(
       },
     };
 
+    const apiTokensFile: JsonFile<{ tokens: ApiTokenRecord[] }> = createJsonFile({
+      filePath: paths.apiTokensFile(tenantId),
+      schemaVersion: 1,
+      defaultValue: () => ({ tokens: [] }),
+      logger,
+    });
+
+    const apiTokens: ApiTokenRepo = {
+      list: () => apiTokensFile.read().tokens ?? [],
+      get: (id) => (apiTokensFile.read().tokens ?? []).find((item) => item.id === id),
+      findByHash: (tokenHash) =>
+        (apiTokensFile.read().tokens ?? []).find((item) => item.tokenHash === tokenHash),
+      saveAll: (next) => apiTokensFile.write({ tokens: next }),
+    };
+
     const requestLog: RequestLogRepo = {
       append: (record) => appendJsonLine(logFile, record),
       recent: (limit) => readJsonLines<RequestLogRecord>(logFile, limit).reverse(),
     };
 
-    return { tenantId, providers, settings, agents, requestLog };
+    return { tenantId, providers, settings, agents, requestLog, apiTokens };
   };
 
   return {

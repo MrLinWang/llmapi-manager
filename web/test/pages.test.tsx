@@ -282,6 +282,47 @@ describe('前端页面装配', () => {
     expect(document.body.textContent ?? '').toContain('data/setup.json');
     setOverrides({});
   });
+  it('设置页可管理 API 令牌：只能勾选自己拥有的权限', async () => {
+    // 令牌是收窄授权，界面上若能勾选自己没有的权限，用户点下去只会撞 403。
+    // 这里断言渲染时就按 can() 过滤——mock 的 me 只给了 settings/providers 等，
+    // 没有 users:manage / tenants:manage。
+    setOverrides({
+      '/api/tokens': {
+        tokens: [],
+        availableScopes: [
+          'providers:read',
+          'providers:write',
+          'settings:read',
+          'settings:write',
+          'users:manage',
+          'tenants:manage',
+        ],
+      },
+    });
+    const { render, screen } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const SettingsPage = (await import('../src/pages/SettingsPage')).default;
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <SettingsPage />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('API 令牌')).toBeTruthy();
+    // 拥有的一项要出现（可能同时出现在"我的权限"里，所以用 findAll）
+    expect((await screen.findAllByText('providers:read')).length).toBeGreaterThan(0);
+    // 没有的权限不能渲染成可勾选项
+    expect(screen.queryByText('users:manage')).toBeNull();
+    expect(screen.queryByText('tenants:manage')).toBeNull();
+    // 界面必须说明两套令牌的区别，否则用户会拿去调 /v1 发现不通
+    expect(document.body.textContent ?? '').toContain('lam_');
+    setOverrides({});
+  });
+
   it('协议类型三个选项句式一致，且都能在表格里显示可读短名', async () => {
     const { API_TYPE_META } = await import('../src/lib/labels');
     expect(API_TYPE_META).toHaveLength(3);

@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context';
-import { AppError, unauthorized } from '../http/errors';
+import { AppError, forbidden, unauthorized } from '../http/errors';
 import { resolvePrincipalFromSession } from '../auth/principal';
+import { resolvePrincipalFromApiToken } from '../auth/apiTokenPrincipal';
 import { assertCan } from '../auth/policy';
 import type { Permission } from '../domain/permissions';
 import type { Principal } from '../domain/identity';
@@ -50,14 +51,21 @@ export function registerApiGuard(
     }
     if (access === 'public') return;
 
-    const principal = resolvePrincipalFromSession(
-      request,
-      ctx.config.sessionSecret,
-      ctx.identity,
-    );
+    // 会话优先于令牌：同一请求两者都带时行为必须确定，且会话是"真人正在操作"
+    // 的更强信号，不该被一个附带的 Authorization 头改变语义。
+    const principal =
+      resolvePrincipalFromSession(request, ctx.config.sessionSecret, ctx.identity) ??
+      resolvePrincipalFromApiToken(request, ctx.store, ctx.logger);
     if (!principal) throw unauthorized();
 
-    if (access !== 'authenticated') {
+    if (access === 'authenticated') {
+      // `authenticated` 级接口（改口令、读自己的会话）假设的是"真人会话"。
+      // 令牌不该能改口令——那等于凭据泄露后可以永久接管账号，
+      // 而吊销令牌反而救不回来（口令已被改）。
+      if (principal.via === 'api-token') {
+        throw forbidden('该接口需要登录会话，API 令牌不能调用');
+      }
+    } else {
       assertCan(principal, access as Permission);
     }
 

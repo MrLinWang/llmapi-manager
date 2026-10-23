@@ -24,8 +24,15 @@ export interface Principal {
   userId: string;
   tenantId: string;
   role: Role;
-  /** 认证方式，便于日志与将来审计 */
-  via: 'session' | 'gateway-token';
+  /** 认证方式，便于日志与审计 */
+  via: 'session' | 'gateway-token' | 'api-token';
+  /**
+   * 令牌认证时的权限子集。
+   *
+   * 有值时**按它判定、不再走角色映射**——这正是"令牌只能收窄权限"的实现方式。
+   * session 认证时为 undefined（走角色）。
+   */
+  scopes?: readonly import('./permissions').Permission[];
 }
 
 export interface IdentityData {

@@ -4,6 +4,7 @@ import { api, ApiError } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { roleLabel } from '../lib/labels';
 import { Badge, Card, Icon, Notice, PageHeader } from '../components/ui';
+import { ApiTokensCard } from '../components/ApiTokensCard';
 
 export default function SettingsPage(): JSX.Element {
   const { me, can, logout } = useAuth();
@@ -142,6 +143,8 @@ export default function SettingsPage(): JSX.Element {
           </form>
         </Card>
       )}
+
+      {can('settings:read') && <ApiTokensCard />}
 
       <Card title="多用户与租户" desc="当前版本的边界与后续扩展方式。">
         <div className="flex items-start gap-3 rounded-xl border border-line bg-subtle/40 p-4">

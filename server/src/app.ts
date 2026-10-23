@@ -13,6 +13,8 @@ import { registerProviderRoutes } from './routes/providers';
 import { registerModelRoutes } from './routes/models';
 import { registerLogRoutes } from './routes/logs';
 import { registerAgentRoutes } from './routes/agents';
+import { registerApiTokenRoutes } from './routes/apiTokens';
+import { registerApiInfoRoutes } from './routes/apiInfo';
 import { registerGatewayRoutes } from './routes/gateway';
 import { DEFAULT_TENANT_ID } from './domain/identity';
 
@@ -111,10 +113,11 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     app,
     registry,
     { method: 'GET', url: '/api/health', access: 'public' },
+    // 这是 public 接口，**不能**返回 dataDir：那是本机绝对路径，
+    // 等于把部署结构告诉任何扫到这个端口的人。需要路径请查日志或配置文档。
     async () => ({
       ok: true,
       warnings: getWarnings(),
-      dataDir: ctx.config.dataDir,
       gatewayBaseUrl: `${ctx.config.publicBaseUrl}/v1`,
     }),
   );
@@ -129,6 +132,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   registerModelRoutes(app, ctx, registry, repos);
   registerLogRoutes(app, ctx, registry, repos);
   registerAgentRoutes(app, ctx, registry, repos);
+  registerApiTokenRoutes(app, ctx, registry, repos);
+  registerApiInfoRoutes(app, ctx, registry, repos);
   registerGatewayRoutes(app, ctx, providerService);
 
   registry.assertAllDeclared();

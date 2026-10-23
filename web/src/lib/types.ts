@@ -182,3 +182,41 @@ export interface SetupStatus {
   };
   failedAttempts?: number;
 }
+
+/** API 令牌（程序化访问管理面）。列表里不含明文与哈希。 */
+export interface ApiTokenView {
+  id: string;
+  name: string;
+  prefix: string;
+  tail: string;
+  scopes: string[];
+  createdBy: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface GatewayOverview {
+  providers: {
+    total: number;
+    enabled: number;
+    byApiType: { openai: number; anthropic: number; responses: number };
+  };
+  aliases: { total: number };
+  settings: {
+    defaultProviderId: string | null;
+    defaultModel: string | null;
+    protocolConversion: boolean;
+    approvalReviewModel: string | null;
+    disableCodexWebSearch: boolean;
+    agentTargets: Record<string, AgentTargetPreference>;
+  };
+  agents: Array<{
+    id: string;
+    applied: boolean;
+    appliedAt: string | null;
+    runningProcesses: number;
+  }>;
+  todayStats: { total: number; success: number; successRate: number; avgLatencyMs: number };
+}
