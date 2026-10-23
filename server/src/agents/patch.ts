@@ -157,6 +157,15 @@ export function maskPreviewSecret(value: string): string {
 
 const SENSITIVE_PREVIEW_KEY = /(api[_-]?key|auth[_-]?token|access[_-]?token|secret|password)/i;
 
+/**
+ * 扁平键路径（如 `env.ANTHROPIC_AUTH_TOKEN`）是否承载凭据。
+ * apply 的响应脱敏也用这条规则，两处必须一致——否则预览打码了、
+ * apply 却把明文发出去，等于白做。
+ */
+export function isSensitiveValueKey(key: string): boolean {
+  return SENSITIVE_PREVIEW_KEY.test(key);
+}
+
 function isSensitivePreviewKey(write: DesiredWrites): boolean {
   return (
     SENSITIVE_PREVIEW_KEY.test(write.path) ||
@@ -176,8 +185,32 @@ export interface WriteResult {
   filePath: string;
   role: AgentFileRole;
   created: boolean;
+  /** 备份是被改文件的同目录副本（`<文件名>.bak-<时间戳>`）；文件原本不存在时为 null */
   backupPath: string | null;
   values: Record<string, string>;
+}
+
+/**
+ * 写前备份：把原内容在同目录留一份 `config.toml.bak-<时间戳>`。
+ *
+ * 为什么放在被改文件旁边而不是服务的数据目录：
+ * 备份的意义是"改坏了能立刻找回"。放在 ~/.codex 下，用户不依赖本服务、
+ * 不依赖服务是否还在跑、也不怕数据目录被清空或被迁到别处，就能自己恢复。
+ *
+ * 时间戳精确到毫秒并带序号：同一秒内连续 apply 两次是很常见的（改完设置立刻重应用），
+ * 秒级时间戳会让第二次静默覆盖掉第一次的备份。
+ */
+function writeSiblingBackup(filePath: string, content: string): string {
+  const base = `${filePath}.bak-${timestamp()}`;
+  let candidate = base;
+  let index = 1;
+  // 极端情况下同一毫秒内写两次，加序号而不是覆盖前一份
+  while (fs.existsSync(candidate)) {
+    candidate = `${base}-${index}`;
+    index += 1;
+  }
+  fs.writeFileSync(candidate, content, { mode: 0o600 });
+  return candidate;
 }
 
 export interface ApplyFilesOptions {
@@ -187,12 +220,16 @@ export interface ApplyFilesOptions {
   paths: Record<AgentFileRole, string | undefined>;
   /** role → 目标键值 */
   writes: Partial<Record<AgentFileRole, DesiredWrites[]>>;
-  backupsDir: string;
   /**
    * 整体生成的文件（如 Codex 模型目录）：不做按键合并，直接用 content 覆盖。
    * 仍然遵守"写前备份"与"记录 created 以便还原时删除"。
    */
-  generatedFiles?: Array<{ role: AgentFileRole; path: string; content: string }>;
+  generatedFiles?: Array<{
+    role: AgentFileRole;
+    path: string;
+    /** undefined 表示删除该文件：切换连接模式时要清掉上一模式留下的产物 */
+    content?: string;
+  }>;
 }
 
 function timestamp(): string {
@@ -201,6 +238,13 @@ function timestamp(): string {
 
 /**
  * 写入前先备份；只改我们拥有的键；格式解析失败即停，绝不退回"写空文件"。
+ *
+ * 解析失败必须抛错而不是"尽力写一份新的"：Agent 配置文件里有大量用户自有内容
+ * （MCP server、审批策略、profile），一次静默覆盖就可能让用户丢掉整套配置，
+ * 而备份虽然存在，用户未必知道去找。
+ *
+ * 写入用"临时文件 + rename"，避免中途失败留下半份配置——Codex 读到截断的 TOML
+ * 会直接拒绝启动。
  */
 export function applyAgentWrites(options: ApplyFilesOptions): WriteResult[] {
   const results: WriteResult[] = [];
@@ -242,13 +286,8 @@ export function applyAgentWrites(options: ApplyFilesOptions): WriteResult[] {
       nextContent = applyJsonWrites(existing ?? '', writes);
     }
 
-    let backupPath: string | null = null;
-    if (existing !== null) {
-      fs.mkdirSync(options.backupsDir, { recursive: true });
-      const backupName = `${timestamp()}-${path.basename(filePath)}`;
-      backupPath = path.join(options.backupsDir, backupName);
-      fs.writeFileSync(backupPath, existing, { mode: 0o600 });
-    }
+    // 写前同目录备份：改坏了用户能就地找回
+    const backupPath = existing !== null ? writeSiblingBackup(filePath, existing) : null;
 
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const tmp = `${filePath}.${process.pid}.tmp`;
@@ -268,12 +307,23 @@ export function applyAgentWrites(options: ApplyFilesOptions): WriteResult[] {
   // 生成类文件：整体覆盖，不参与按键合并
   for (const file of options.generatedFiles ?? []) {
     const existing = readFileSafe(file.path);
-    let backupPath: string | null = null;
-    if (existing !== null) {
-      fs.mkdirSync(options.backupsDir, { recursive: true });
-      backupPath = path.join(options.backupsDir, `${timestamp()}-${path.basename(file.path)}`);
-      fs.writeFileSync(backupPath, existing, { mode: 0o600 });
+
+    // content 缺省 = 删除。用于从网关模式切到直连模式时清理旧的模型目录：
+    // 不清掉的话 Codex 会继续用别名目录，而直连写的是裸模型名，两者对不上。
+    if (file.content === undefined) {
+      if (existing !== null) {
+        fs.rmSync(file.path, { force: true });
+        results.push({
+          filePath: file.path,
+          role: file.role,
+          created: false,
+          backupPath: null,
+          values: {},
+        });
+      }
+      continue;
     }
+    const backupPath = existing !== null ? writeSiblingBackup(file.path, existing) : null;
     fs.mkdirSync(path.dirname(file.path), { recursive: true });
     const tmp = `${file.path}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, file.content, { mode: 0o600 });

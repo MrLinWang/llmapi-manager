@@ -1,4 +1,5 @@
 import type { ProviderRecord } from './provider';
+import type { AgentConnectionMode } from './settings';
 
 export const AGENT_IDS = ['codex', 'claude-code'] as const;
 export type AgentId = (typeof AGENT_IDS)[number];
@@ -49,6 +50,11 @@ export interface WrittenFileSnapshot {
 }
 
 export interface AgentBindingState {
+  /**
+   * 应用配置时探测到的、仍在运行的该 Agent 进程数。
+   * 大于 0 表示这些进程仍在用内存里的旧配置，需要重启才能生效。
+   */
+  runningProcesses?: number;
   agentId: AgentId;
   appliedAt: string;
   appliedBy: string;
@@ -80,6 +86,10 @@ export interface AgentPreview {
   applied: boolean;
   appliedAt?: string;
   gatewayBaseUrl: string;
+  /** 本次会按走网关还是直连上游来写配置 */
+  connectionMode: AgentConnectionMode;
+  /** 直连时实际写入 base_url 的上游地址；网关模式为 undefined */
+  directBaseUrl?: string;
   files: AgentFilePreview[];
 }
 

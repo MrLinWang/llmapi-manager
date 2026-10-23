@@ -43,7 +43,4 @@ export class StorePaths {
     return path.join(this.tenantDir(tenantId), 'requests.jsonl');
   }
 
-  backupsDir(tenantId: string, agentId: string): string {
-    return path.join(this.tenantDir(tenantId), 'backups', agentId);
-  }
 }
