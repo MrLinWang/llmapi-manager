@@ -118,7 +118,8 @@
 | PATCH | `/api/providers/:id/enabled` | `providers:write` | `{ "enabled": true }` |
 | DELETE | `/api/providers/:id` | `providers:write` | 若删的是默认供应商，返回 `{ newDefaultProviderId }` |
 | PUT | `/api/providers/order` | `providers:write` | `{ "ids": [...] }`，按数组顺序重排 `priority` |
-| POST | `/api/providers/:id/test` | `providers:write` | 请求上游 `/models`，10s 超时 |
+| POST | `/api/providers/:id/test` | `providers:write` | 请求上游 `/models`，10s 超时；结果写回 `lastTest` |
+| POST | `/api/providers/models` | `providers:write` | 按表单**临时值**拉取模型列表，不要求供应商已保存 |
 | POST | `/api/providers/:id/default` | `providers:write` | 设为默认，可带 `{ "model": "..." }` |
 
 创建/更新请求体：
@@ -161,6 +162,41 @@
 
 测试失败不会抛 500，结果同时写回该供应商的 `lastTest`。
 
+### POST /api/providers/models
+
+权限 `providers:write`。按**表单里填的临时值**向上游拉取模型列表，
+用于新增供应商时"先试连再保存"——此时还没有 id，`/:id/test` 用不了。
+
+```json
+{
+  "apiType": "openai",
+  "baseUrl": "https://api.example.com",
+  "apiKey": "sk-...",
+  "providerId": "p_xxx"
+}
+```
+
+- `apiKey` 为空且传了 `providerId` 时，**沿用已保存的 Key**。前端不回显明文，
+  编辑态不该为了拉列表让用户重填一次。
+- 两者都没有 → 400 `尚未填写 API Key，且没有可沿用的已保存 Key`。
+- `baseUrl` 已以 `/v1` 结尾时不重复拼接，与转发路径规则一致。
+- 鉴权头按协议体系分组：`anthropic` 用 `x-api-key` + `anthropic-version`，
+  `openai` / `responses` 用 `Authorization: Bearer`。
+
+返回与连通性测试同构：
+
+```json
+{ "ok": true, "latencyMs": 42, "status": 200, "models": ["gpt-5", "gpt-5-mini", "o3"] }
+{ "ok": false, "latencyMs": 10003, "error": "请求超时（10s）" }
+```
+
+连上了但响应里没有可识别的 `data[]` / `models[]` 时返回 `ok: false` 并说明原因，
+而不是给一个空列表——否则界面看起来像是"上游真的没有模型"。
+任何失败都不会变成 500。
+
+前端把返回结果渲染成**可点选的模型片段**（参考 new-api 渠道编辑的模型框）：
+点一下加入、再点一下取消，已选模型以强调色显示。
+
 ## 聚合与设置
 
 ### GET /api/models
@@ -169,10 +205,10 @@
 
 ```json
 {
-  "prefix": "lmm-",
+  "prefix": "lam-",
   "aliases": [
     {
-      "alias": "lmm-mock-openai/gpt-x",
+      "alias": "lam-mock-openai/gpt-x",
       "providerId": "p_...",
       "providerKey": "mock-openai",
       "providerName": "Mock OpenAI",
@@ -183,15 +219,15 @@
   "default": { "providerId": "p_...", "providerName": "Mock OpenAI", "model": "gpt-x" },
   "gateway": {
     "baseUrl": "http://127.0.0.1:8787/v1",
-    "token": { "exists": true, "prefix": "lmm_abcd", "tail": "wxyz",
-               "masked": "lmm_abcd************wxyz", "createdAt": "..." }
+    "token": { "exists": true, "prefix": "lam_abcd", "tail": "wxyz",
+               "masked": "lam_abcd************wxyz", "createdAt": "..." }
   }
 }
 ```
 
 ### GET /api/settings
 
-权限 `settings:read`。返回 `defaultProviderId` / `defaultModel` / `gatewayBaseUrl` / `token`（脱敏）。
+权限 `settings:read`。返回 `defaultProviderId` / `defaultModel` / `disableCodexWebSearch` / `gatewayBaseUrl` / `token`（脱敏）。
 
 ### PUT /api/settings/default
 
@@ -204,14 +240,33 @@
 `providerId: null` 表示清除默认。`model` 必须是该供应商已声明的模型，否则 400；
 省略时取该供应商第一个模型。
 
+### PATCH /api/settings/codex
+
+权限 `settings:write`。Codex 配置的行为开关。
+
+```json
+{ "disableCodexWebSearch": false }
+```
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `disableCodexWebSearch` | `true` | 为 `true` 时下发 `web_search = "disabled"`；为 `false` 时**删除**该行（不残留旧值） |
+
+字段可省略（省略即不修改该项，但仍会刷新 `updatedAt`），传非布尔值返回 400
+`disableCodexWebSearch 必须是布尔值`。
+
+返回 `{ disableCodexWebSearch, requiresReapply: true }` —— 改动只落在设置里，
+需要再调一次 `POST /api/agents/codex/apply` 才会写进 `~/.codex/config.toml`
+（前端勾选/取消后会自动补一次 apply）。
+
 ### POST /api/gateway/token
 
 权限 `gateway:write`。生成或重置网关令牌。
 
 ```json
 {
-  "token": "lmm_<完整令牌，仅此一次>",
-  "masked": "lmm_abcd************wxyz",
+  "token": "lam_<完整令牌，仅此一次>",
+  "masked": "lam_abcd************wxyz",
   "createdAt": "...",
   "note": "这是唯一一次显示完整令牌，请立即复制并更新已下发的 Agent 配置。"
 }
@@ -227,14 +282,15 @@
 | POST | `/api/agents/:id/preview` | `agents:read` | 只读，返回目标路径与键值对照（凭据脱敏） |
 | POST | `/api/agents/:id/apply` | `agents:apply` | 写文件并记录快照 |
 | POST | `/api/agents/:id/revert` | `agents:apply` | 撤销我们写入的键 |
+| POST | `/api/agents/:id/stop-processes` | `agents:apply` | 结束本机 Codex 进程，使其重读配置（Claude Code 返回 `supported: false`） |
 
-`:id` 取 `codex` 或 `claude-code`。无 body。
+`:id` 取 `codex` 或 `claude-code`。以上全部无 body。
 
-供应商按 Agent 的候选协议顺序挑选（`codex`：`responses` → `openai`；`claude-code`：`anthropic`），
-所以 Codex 的预览里 `wire_api` 会是 `responses` 或 `chat`，取决于最后选中哪家供应商 ——
-两者不一致会让 Codex 的请求被网关 501。没有匹配协议的启用供应商时预览返回 400。
+供应商按 Agent 所需的协议挑选：`codex` 只接受 `responses`（它的 `wire_api` 固定写 `responses`），
+`claude-code` 只接受 `anthropic`。Codex 不再回落到 `openai` 供应商 —— `wire_api = "chat"` 已被 Codex 移除。
+没有匹配协议的启用供应商时预览返回 400，消息里会说明缺哪种协议。
 
-预览响应：
+预览响应（Codex 有三个文件，`catalog` 的条目为空是因为它整份生成）：
 
 ```json
 {
@@ -249,15 +305,38 @@
       "exists": true,
       "entries": [
         { "key": "model_provider", "next": "llmapi", "current": "openai", "differs": true },
+        { "key": "model_catalog_json", "next": "/home/user/.codex/llmapi-model-catalog.json",
+          "current": null, "differs": false },
+        { "key": "web_search", "next": "disabled", "current": null, "differs": false },
         { "key": "[model_providers.llmapi] wire_api", "next": "responses",
           "current": null, "differs": false },
+        { "key": "[model_providers.llmapi] model_catalog_url",
+          "next": "http://127.0.0.1:8787/v1/models", "current": null, "differs": false },
         { "key": "[model_providers.llmapi] base_url", "next": "http://127.0.0.1:8787/v1",
           "current": null, "differs": false }
       ]
+    },
+    {
+      "role": "auth",
+      "path": "/home/user/.codex/auth.json",
+      "exists": true,
+      "entries": [
+        { "key": "OPENAI_API_KEY", "next": "lam_abcd****wxyz", "current": null, "differs": false }
+      ]
+    },
+    {
+      "role": "catalog",
+      "path": "/home/user/.codex/llmapi-model-catalog.json",
+      "exists": false,
+      "entries": []
     }
   ]
 }
 ```
+
+`catalog` 是整份生成的文件，没有"按 keys 打补丁"的语义，所以 `entries` 恒为空。
+`model_catalog_json` 必须是顶层键（写进 `[model_providers.llmapi]` 会被 Codex 忽略并告警），
+它和 `model_catalog_url` 的分工见 [agents.md](./agents.md#模型目录model_catalog_json-与-model_catalog_url)。
 
 API Key、网关令牌等凭据类键的 `next` 与 `current` 只返回前 8 位与后 4 位（中间打码），
 完整值不会出现在预览响应中；只有 `apply` 才会把完整值写入目标文件。
@@ -266,19 +345,40 @@ API Key、网关令牌等凭据类键的 `next` 与 `current` 只返回前 8 位
 
 ```json
 { "binding": { "agentId": "codex", "appliedAt": "...", "appliedBy": "u_owner",
-               "files": [{ "role": "config", "path": "...", "values": {}, "created": false }] } }
+               "files": [{ "role": "config", "path": "...", "values": {}, "created": false },
+                         { "role": "catalog", "path": "...", "values": {}, "created": true }] } }
 ```
 
 还原响应：
 
 ```json
 {
-  "restored": ["model_provider", "model"],
-  "conflicts": [{ "key": "env.ANTHROPIC_MODEL", "expected": "lmm-a/x", "current": "user-changed" }]
+  "restored": ["model_provider", "model", "[model_providers.llmapi] wire_api"],
+  "conflicts": [{ "key": "env.ANTHROPIC_MODEL", "expected": "lam-a/x", "current": "user-changed" }]
 }
 ```
 
 `conflicts` 非空表示有键被手动改过、因此保留未动。
+生成类文件若由我们创建，还原时直接删除，其文件名会出现在 `restored` 里。
+
+### POST /api/agents/:id/stop-processes
+
+权限 `agents:apply`。结束本机正在运行的 Codex，让它在下次启动时重读配置与模型目录。
+无 body。
+
+```json
+{
+  "actions": ["已停止 Codex 守护进程（codex app-server daemon stop）", "已结束 1 个 Codex 客户端进程"],
+  "killed": 1,
+  "warnings": [],
+  "supported": true
+}
+```
+
+- 先 `codex app-server daemon stop`，再对匹配到的 `codex`（TUI）/ `codex exec` 进程发 `SIGTERM`，
+  300ms 后补 `SIGKILL`。匹配规则刻意保守，不碰 `app-server` / `login` / `update` / `mcp` 等子命令。
+- `codex` 不在 PATH、守护进程未运行、目录只读等情况都通过 `warnings` / `actions` 说明，**不会**变成 500。
+- 对 `claude-code` 返回 `supported: false` 与 `killed: 0`（没有常驻进程），仍是 200；未知 `:id` 返回 404。
 
 ## 日志与统计
 
@@ -293,7 +393,7 @@ API Key、网关令牌等凭据类键的 `next` 与 `current` 只返回前 8 位
       "tenantId": "t_default",
       "at": "2026-01-01T00:00:00.000Z",
       "path": "/v1/chat/completions",
-      "requestedModel": "lmm-mock-openai/gpt-x",
+      "requestedModel": "lam-mock-openai/gpt-x",
       "upstreamModel": "gpt-x",
       "providerId": "p_...",
       "providerName": "Mock OpenAI",

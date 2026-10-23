@@ -75,11 +75,11 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 
 ### 3. 别名解析失败必须报错，绝不回落
 
-`lmm-<providerKey>/<model>` 是"明确指向某一家"。若供应商被禁用/删除、模型未声明，
+`lam-<providerKey>/<model>` 是"明确指向某一家"。若供应商被禁用/删除、模型未声明，
 `resolveModel` 返回 `invalid`，网关回 400。**不要加"解析失败就用默认供应商"的兜底** ——
 那会用错额度、答错模型，而调用方完全看不出来。
 
-只有不带 `lmm-` 前缀的请求才走"默认供应商 + 默认模型"。
+只有不带 `lam-` 前缀的请求才走"默认供应商 + 默认模型"。
 
 ### 4. Agent 文件只改自己拥有的键
 
@@ -150,13 +150,30 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
   `routes/gateway.ts` 必须 import 复用，不要复制一份。
 - `openai` 与 `responses` 共用 Bearer 鉴权，只有 `anthropic` 用 `x-api-key` +
   `anthropic-version`。鉴权分支按这个分组写，不要逐个协议罗列。
-- 改 Agent 的供应商选择时要连带检查 `wire_api`：Codex 选到 `responses` 供应商写
-  `responses`，选到 `openai` 供应商必须写 `chat`。两者不一致会导致 Codex 发
-  Responses 请求却被网关 501。
+- **Codex CLI 只支持 `wire_api = "responses"`**：`chat` 已被其上游移除
+  （openai/codex discussion #7782），写 `chat` 会让 Codex 拒绝启动。
+  因此 Codex 只能绑定 `responses` 供应商，**不要**再加"回落到 openai 写 chat"的分支。
+- `requires_openai_auth` 必须是 **TOML 布尔 `true`**（`DesiredWrites.raw = true` 原样写入），
+  写成字符串 `"true"` 是类型错误。
+
+### 11. 向上游查模型列表
+
+- 拉取模型列表（`fetchProviderModels`）接受的是**表单临时值**，不是 `ProviderRecord`：
+  新增供应商时还没有 id、也还没落盘，而"先试连再保存"正是该功能的用途。
+- `POST /api/providers/models` 的 `apiKey` 留空且带 `providerId` 时沿用已保存的 Key。
+  前端不回显明文，编辑态不该为了拉列表强迫用户重填。
+- 连上了但响应里没有 `data[]` / `models[]` 时返回 `ok: false` 并说明原因，
+  **不要返回空数组** —— 界面会看起来像"上游真的没有模型"。
+- 任何失败都不抛异常、不回 500（与连通性测试一致）。
+- 上游 `/models` 的 URL 与转发路径同一套规则：`baseUrl` 已以 `/v1` 结尾时不重复拼接。
+- 前端模型编辑器是**标签片段**式（参考 new-api 渠道模型框）：已选模型在框中以片段排列、
+  点 × 移除，末尾留可输入的空片段（回车/逗号添加、支持粘贴多选、空输入退格删最后一个）。
+  改这块时注意 `ProviderForm` 用 `useId()` 生成输入框 id —— 同一页面可能同时存在多个
+  实例，写死 id 会让 label 关联到别的表单。
 
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 118 + web 7 = 125 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 138 + web 9 = 147 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
@@ -166,6 +183,7 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 - 改到配置默认值 → 补 `server/test/config.test.ts`（当前 `ADMIN_USERNAME` 默认 `admin`）。
 - 改到首次初始化 → 补 `server/test/setup.test.ts`（令牌校验、一次性、重放拒绝、重启幂等）。
 - 改到协议匹配 → 补 `server/test/gateway.test.ts` 的 `requiredApiType` 断言 + smoke 的双向 501 用例。
+- 改到模型拉取 → 补 `server/test/smoke.test.ts`（三种协议、`/v1` 拼接、借用已保存 Key、上游不可达不 500）。
 - 改了品牌名 / 对外文案 → 同步 `README.md`、`web/index.html`、登录页与侧边栏。
 
 ## 明确不做的事

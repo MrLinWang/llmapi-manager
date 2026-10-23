@@ -5,19 +5,26 @@
 ## 别名格式
 
 ```
-lmm-<providerKey>/<model>
+lam-<providerKey>/<model>
 ```
 
 - `providerKey`：由供应商名称派生，小写、非字母数字转 `-`、最长 24 字符；租户内唯一，重名追加 `-2`、`-3`。
 - `model`：供应商声明的原始模型名，原样拼接（含斜杠也安全，解析时只按第一个 `/` 切分）。
 - 只有 `enabled=true` 的供应商会发布别名。
 
+> **前缀是硬编码常量**（`server/src/domain/aliases.ts` 的 `ALIAS_PREFIX`）。只有以它开头的 model
+> 才会被当作别名解析；改了前缀，旧写法就不再匹配 `isAliasShape`，于是被当成"不带别名"走默认选路，
+> 原样透传给上游（多数上游会报模型不存在）—— 与"未知别名返回 400"不是一回事，也更难排查。
+> 升级后请重新应用 Agent 配置（Codex 的 `model`、Claude Code 的 `ANTHROPIC_MODEL` 都会重写），
+> 并更新其它客户端里写死的模型名。网关令牌前缀是另一个常量（`server/src/gateway/token.ts`），
+> 它只影响新签发的令牌；旧令牌因为只存哈希，改名后继续有效。
+
 示例：
 
 | 供应商 | providerKey | 模型 | 别名 |
 | --- | --- | --- | --- |
-| Mock OpenAI | `mock-openai` | `gpt-x` | `lmm-mock-openai/gpt-x` |
-| Mock Anthropic | `mock-anthropic` | `claude-x` | `lmm-mock-anthropic/claude-x` |
+| Mock OpenAI | `mock-openai` | `gpt-x` | `lam-mock-openai/gpt-x` |
+| Mock Anthropic | `mock-anthropic` | `claude-x` | `lam-mock-anthropic/claude-x` |
 
 ## 选路
 
@@ -148,7 +155,7 @@ baseUrl = https://api.example.com/v1/    → https://api.example.com/v1/chat/com
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H "Authorization: Bearer $LLMAPI_TOKEN" \
   -H 'content-type: application/json' \
-  -d '{"model":"lmm-mock-openai/gpt-x","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"lam-mock-openai/gpt-x","messages":[{"role":"user","content":"hi"}]}'
 
 # 不带别名：走默认供应商 + 默认模型，可享受一次回退
 curl http://127.0.0.1:8787/v1/chat/completions \
@@ -160,19 +167,19 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 curl -N http://127.0.0.1:8787/v1/chat/completions \
   -H "Authorization: Bearer $LLMAPI_TOKEN" \
   -H 'content-type: application/json' \
-  -d '{"model":"lmm-mock-openai/gpt-x","stream":true,"messages":[]}'
+  -d '{"model":"lam-mock-openai/gpt-x","stream":true,"messages":[]}'
 
 # Anthropic 形态（可用 x-api-key）
 curl http://127.0.0.1:8787/v1/messages \
   -H "x-api-key: $LLMAPI_TOKEN" \
   -H 'content-type: application/json' \
-  -d '{"model":"lmm-mock-anthropic/claude-x","max_tokens":16,"messages":[]}'
+  -d '{"model":"lam-mock-anthropic/claude-x","max_tokens":16,"messages":[]}'
 
 # Responses 形态（必须打到 responses 供应商，请求体是 input 而不是 messages）
 curl http://127.0.0.1:8787/v1/responses \
   -H "Authorization: Bearer $LLMAPI_TOKEN" \
   -H 'content-type: application/json' \
-  -d '{"model":"lmm-mock-responses/gpt-resp","input":"hi"}'
+  -d '{"model":"lam-mock-responses/gpt-resp","input":"hi"}'
 ```
 
 注意最后两例的区别：`/v1/messages` 只能用 `anthropic` 供应商、`/v1/responses` 只能用

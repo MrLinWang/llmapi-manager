@@ -23,6 +23,11 @@
 | `LOG_MAX_BYTES` | `5242880`（5MB） | 单个日志文件的滚动阈值 |
 | `LOG_MAX_FILES` | `5` | 保留的历史日志文件个数 |
 | `AGENT_HOME_DIR` | OS 家目录 | Agent 配置根目录（其下为 `.codex`、`.claude`） |
+| `CODEX_HOME` | 无 | 仅用于定位 Codex 配置目录（结束 Codex 进程时设进子进程环境）。设了就优先于 `AGENT_HOME_DIR/.codex` |
+
+`CODEX_HOME` 是 Codex 自己的约定变量，本服务只读不算：它决定 `codex app-server daemon stop`
+在哪个目录下执行。目录不存在时不会强行设置（codex 会对不存在的路径报错，而"本机还没配过 Codex"
+不该算失败）。写入 Agent 文件的路径仍由 `AGENT_HOME_DIR` 决定。
 
 `PUBLIC_BASE_URL` 的特殊处理：当 `HOST` 是 `0.0.0.0` 或 `::` 时，推导结果会回落成 `127.0.0.1`，
 因为监听地址对客户端没有意义。此时若客户端不在本机，必须显式设置。
@@ -82,7 +87,7 @@ data/                                # 默认即 server/data，见上表 DATA_DI
 ├── setup.json                        首次初始化状态（一次性令牌哈希，完成后清空）
 └── tenants/<tenantId>/
     ├── providers.json                供应商
-    ├── settings.json                 默认供应商/模型、网关令牌
+    ├── settings.json                 默认供应商/模型、网关令牌、Codex 行为开关
     ├── agents.json                   下发快照
     ├── requests.jsonl                请求日志
     └── backups/<agentId>/*           下发前的原文件备份

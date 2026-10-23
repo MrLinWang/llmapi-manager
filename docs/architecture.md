@@ -39,9 +39,12 @@ Agent ──HTTP──┘      │
 
 1. `loadConfig()` 读 `.env` 与环境变量，创建数据目录，解析/生成会话密钥。
 2. `createContext()` 装配上述容器。
-3. `bootstrapIdentity()` 幂等创建 `t_default` 租户与 `u_owner`，并补齐租户数据文件。
+3. `bootstrapIdentity()` 幂等创建 `t_default` 租户并补齐租户数据文件。**默认不建账号**：
+   生成一次性初始化令牌（此时只返回给调用方、尚未打印），由用户在设置页自设用户名与口令
+   （账号 id 固定为 `u_owner`）；仅在设置了 `ADMIN_PASSWORD` 时直接建号，用户名取 `ADMIN_USERNAME`。
 4. `buildApp()` 注册插件、鉴权钩子、路由、静态资源。
-5. `listen()`，打印控制台地址、网关地址；首次启动时额外打印一次性初始化令牌。
+5. `listen()`，打印控制台地址、网关地址；若本次启动生成了初始化令牌，紧接着把它打印到**控制台**
+   （只这一处，不写入日志文件）。
 
 ## 分层约定
 
@@ -49,7 +52,8 @@ Agent ──HTTP──┘      │
 | --- | --- | --- | --- |
 | 路由 | `server/src/routes/` | 解析参数、调用服务、组装响应 | 拼文件路径、写权限判断、直接读写存储 |
 | 服务 | `server/src/services/`、`agents/service.ts` | 业务规则编排、调用仓储 | 处理 HTTP 细节 |
-| 领域 | `server/src/domain/` | 纯类型与纯函数（别名、脱敏、providerKey） | IO、依赖 Fastify |
+| Agent 适配 | `server/src/agents/`（`registry` / `patch` / `toml` / `processes`） | 路径解析、JSON/TOML 保值补丁、进程探测与信号 | 权限判断、HTTP 细节 |
+| 领域 | `server/src/domain/` | 纯类型与纯函数（别名、脱敏、providerKey、Codex 模型目录） | IO、依赖 Fastify |
 | 存储 | `server/src/store/` | 原子读写、租户作用域、损坏隔离 | 业务判断 |
 | 网关 | `server/src/gateway/` | 令牌、鉴权、上游转发 | 管理面权限逻辑 |
 
@@ -81,7 +85,7 @@ POST /v1/chat/completions
   ├─ gateway/auth.ts        解析 Bearer / x-api-key → Principal(role=member)
   ├─ 取租户仓储             ctx.store.forTenant(principal.tenantId)
   ├─ domain/aliases.ts      解析 model：
-  │                            lmm-<key>/<model> → 明确供应商（失败即 400，不回落）
+  │                            lam-<key>/<model> → 明确供应商（失败即 400，不回落）
   │                            其它              → 默认供应商 + 默认模型
   ├─ gateway/forward.ts     先校验协议：requiredApiType(path) 与供应商 apiType 不符即 501
   │                         （必须在发上游请求前拒绝，否则客户端只会看到上游的参数错误）
@@ -102,17 +106,23 @@ POST /v1/chat/completions
 POST /api/agents/codex/apply
   │
   ├─ registerApiGuard       会话鉴权 + 权限 agents:apply
-  ├─ agents/service.ts      选供应商（按 Agent 的候选协议顺序：codex → responses|openai，
-  │                         claude-code → anthropic；协议不符的不会被选中）
+  ├─ agents/service.ts      选供应商（codex → 只接受 responses，claude-code → anthropic；
+  │                         没有匹配协议的启用供应商就 400，不回落）
   │                         取网关令牌明文（从密文解密，仅进程内使用）
-  │                         生成目标键值：model_provider / model / [model_providers.llmapi] ...
-  │                         Codex 的 wire_api 跟随所选供应商（responses → "responses"，openai → "chat"）
-  ├─ agents/registry.ts     AgentPathResolver 解析物理路径（本期落到 OS 家目录）
-  ├─ agents/patch.ts        读现有文件 → 备份（若存在）→ 就地改写 → 原子替换
+  │                         生成目标键值：model_provider / model / model_catalog_json /
+  │                         web_search / [model_providers.llmapi] 表内 5 个键，
+  │                         其中 wire_api 固定 "responses"
+  ├─ domain/modelCatalog.ts  用当前聚合别名整份生成 Codex 模型目录（catalog 角色）
+  ├─ agents/registry.ts      AgentPathResolver 解析物理路径（本期落到 OS 家目录）
+  ├─ agents/patch.ts         读现有文件 → 备份（若存在）→ 就地改写 / 整体覆盖 → 原子替换
   └─ agents.json            记录快照：写入的键值 + appliedBy + created 标记
+
+改完配置后可选 POST /api/agents/codex/stop-processes：
+  agents/service.ts → agents/processes.ts（daemon stop + 按进程表精确 SIGTERM）
 ```
 
-还原走同一套规则的反向操作，只撤销"值仍等于我们写入值"的键。细节见 [agents.md](./agents.md)。
+还原走同一套规则的反向操作，只撤销"值仍等于我们写入值"的键；由我们生成的模型目录文件按 `created` 删除。
+细节见 [agents.md](./agents.md)。
 
 ## 存储布局
 
@@ -123,7 +133,7 @@ data/                                # 实际落点由 DATA_DIR 决定，默认 
 ├── setup.json                        首次初始化状态（init token 哈希，完成后清空）
 └── tenants/<tenantId>/
     ├── providers.json                供应商（apiKey 为密文）
-    ├── settings.json                 默认供应商/模型、网关令牌（哈希 + 密文）
+    ├── settings.json                 默认供应商/模型、网关令牌（哈希 + 密文）、Codex 行为开关
     ├── agents.json                   下发快照
     ├── requests.jsonl                请求日志（追加写）
     └── backups/<agentId>/<时间戳>-<文件名>

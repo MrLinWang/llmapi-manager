@@ -44,20 +44,22 @@ npm run dev -w web        # vite，热更新
 | `server/test/config.test.ts` | 配置默认值（`ADMIN_USERNAME=admin`、日志目录与滚动参数）与非法值回落 |
 | `server/test/setup.test.ts` | 首次初始化：令牌校验、一次性、重放拒绝、重启幂等、`ADMIN_PASSWORD` 应急通道 |
 | `server/test/gateway.test.ts` | 上游 URL 拼接、三条路径的协议匹配、协议文案句式、令牌哈希比对 |
-| `server/test/agents.test.ts` | JSON/TOML 补丁、备份、还原冲突、空壳文件清理 |
+| `server/test/agents.test.ts` | JSON/TOML 补丁（含 `raw` 布尔）、Codex 模型目录生成、备份、还原冲突、空壳文件清理 |
+| `server/test/processes.test.ts` | Codex 进程识别（TUI / `exec` / 不误伤 `mycodex` 与一次性命令）、`etime` 解析 |
 | `server/test/security.test.ts` | 权限矩阵、租户隔离、凭据编解码、路由登记 |
 | `server/test/storage.test.ts` | 原子写、损坏隔离、未来版本隔离 |
 | `server/test/logger.test.ts` | 运行日志落盘、级别阈值、打码、按大小滚动与保留个数 |
-| `server/test/smoke.test.ts` | 端到端：登录、供应商（含三种 `apiType`）、令牌、转发（含流式/回退/501 双向/4xx 透传）、Agent、越权、持久化 |
-| `web/test/pages.test.tsx` | 页面装配：登录、首次设置、供应商、模型（含三种协议选项与文案）、Agent、概览（jsdom + 假 fetch） |
+| `server/test/smoke.test.ts` | 端到端：登录、供应商（含三种 `apiType` 与拉取模型列表）、令牌、转发（含流式/回退/501 双向/4xx 透传）、Agent（含模型目录与 `web_search` 开关、结束进程）、越权、持久化 |
+| `web/test/pages.test.tsx` | 页面装配：登录、首次设置、供应商（含获取模型与标签片段编辑）、模型（含三种协议选项与文案）、Agent、概览（jsdom + 假 fetch） |
 
 `smoke.test.ts` 会起三个假上游（正常 200、永远 500、固定 4xx），用系统分配的随机端口（`port=0`），
 所以并行跑测试不会撞端口。正常那个假上游同时提供 Chat Completions / Responses / Messages 三种
 响应形态（`server/test/mockUpstream.ts`），以便断言请求确实打到了对应协议的路径上。
 Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真实家目录**。
+`processes.test.ts` 只测纯函数（命令行分类与 `etime` 解析），不会真的给任何进程发信号。
 日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**。
 
-当前基线：125 项（server 118 + web 7）。
+当前基线：147 项（server 138 + web 9）。
 
 ```bash
 npm test                                # 全部
@@ -139,7 +141,10 @@ curl -s localhost:8787/api/health | jq      # 启动告警
 - 想看网关实际行为：起一个假上游（参见 `server/test/mockUpstream.ts` 的实现思路），
   把供应商的 Base URL 指向它。
 - 想看 Agent 会写什么：先调 `POST /api/agents/:id/preview`，它不会改任何文件。
-  想验证写入，把 `AGENT_HOME_DIR` 指到临时目录。
+  想验证写入，把 `AGENT_HOME_DIR` 指到临时目录。想连 Codex 的配置目录一起隔离，
+  可另设 `CODEX_HOME`（结束进程时按它定位）。
+- 想看模型目录：应用 Codex 配置后读 `~/.codex/llmapi-model-catalog.json`；
+  `codex debug models` 可导出官方目录作为结构参照。
 - 会话问题：`data/instance.json` 被换了会导致所有会话失效。
 
 ## 提交前自查
@@ -148,6 +153,8 @@ curl -s localhost:8787/api/health | jq      # 启动告警
 - 改了 `/api` 路由 → 权限声明齐全，冒烟用例通过。
 - 改了别名逻辑 → `aliases.test.ts` 覆盖了新边界。
 - 改了 Agent 补丁 → `agents.test.ts` 覆盖"保留无关配置"与"还原冲突"。
+- 改了 Codex 模型目录 → `agents.test.ts`（目录结构）与 `smoke.test.ts`（顶层键 + 目录文件生成/还原）通过。
+- 改了进程识别规则 → `processes.test.ts` 覆盖新的命令行形态，且"不误伤"用例仍通过。
 - 改了存储 → `storage.test.ts` 覆盖原子写与损坏隔离。
 - 改了协议匹配或 `apiType` → `gateway.test.ts` 的 `requiredApiType` 断言 +
   `smoke.test.ts` 的双向 501 用例（`/v1/responses` 打 `openai` 供应商、`responses` 供应商打
@@ -164,4 +171,6 @@ curl -s localhost:8787/api/health | jq      # 启动告警
 | 请求日志 | 全量追加，无轮转 | 加按大小/时间轮转或迁移到数据库 |
 | 无熔断 | 失败供应商不会被摘除 | 加熔断器与健康检查，注意与"别名不回落"的语义区分 |
 | 协议转换 | 三种协议严格匹配，跨协议一律 501 | 引入转换层；在此之前保持明确报错，不要退回"直通" |
+| Codex 模型目录 | 上下文与输出上限是写死的保守值（128k / 8192），不反映上游真实能力 | 需要在供应商记录里补"每模型能力"字段，再喂给目录生成 |
+| 结束进程 | 只覆盖 Linux/macOS（依赖 `ps -ww -Ao`），Windows 上探测不到进程 | 按平台分支实现（Windows 需 `tasklist` / `wmic` 或 `Get-CimInstance`） |
 | 前端数据层 | 自写 `useAsync` | 页面规模变大后再评估引入查询库，不要提前抽象 |

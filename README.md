@@ -8,10 +8,10 @@
 
 ## 能力范围
 
-- **供应商管理**：三种协议 —— OpenAI 兼容（Chat Completions）/ OpenAI 兼容（Responses）/ Anthropic 兼容（Messages）；API Key 加密落盘、列表脱敏、优先级排序、启用开关、连通性测试（请求上游 `/models`）。
-- **模型聚合**：把启用供应商的模型发布为 `lmm-<供应商key>/<模型>` 别名；另可配置"默认供应商 + 默认模型"承接不带别名的请求。
+- **供应商管理**：三种协议 —— OpenAI 兼容（Chat Completions）/ OpenAI 兼容（Responses）/ Anthropic 兼容（Messages）；API Key 加密落盘、列表脱敏、优先级排序、启用开关、连通性测试（请求上游 `/models`）、按表单当前值一键拉取上游模型列表并勾选启用。
+- **模型聚合**：把启用供应商的模型发布为 `lam-<供应商key>/<模型>` 别名；另可配置"默认供应商 + 默认模型"承接不带别名的请求。
 - **统一网关**：`/v1/models`、`/v1/chat/completions`、`/v1/messages`、`/v1/responses`；支持 SSE 流式透传；默认路径失败时按优先级回退一次。
-- **Agent 下发**：Codex CLI（`~/.codex/config.toml` + `auth.json`，候选协议 `responses` → `openai`，`wire_api` 跟随所选供应商）与 Claude Code（`~/.claude/settings.json`，需要 `anthropic`）；支持预览、应用、还原，写前备份，只改自己拥有的键。
+- **Agent 下发**：Codex CLI（`~/.codex/config.toml` + `auth.json` + `llmapi-model-catalog.json`，只接受 `responses` 供应商，`wire_api` 固定 `responses`）与 Claude Code（`~/.claude/settings.json`，需要 `anthropic`）；支持预览、应用、还原、结束 Codex 进程，写前备份，只改自己拥有的键。
 - **可观测**：请求日志与今日统计（请求数、成功率、平均耗时）。
 
 ## 快速开始
@@ -65,12 +65,16 @@ npm start               # http://127.0.0.1:8787
 | PUT/DELETE | `/api/providers/:id` | 更新 / 删除 |
 | PATCH | `/api/providers/:id/enabled` | 启用开关 |
 | POST | `/api/providers/:id/test` | 连通性测试 |
+| POST | `/api/providers/models` | 按表单临时值拉取模型列表（新增时也能用） |
 | PUT | `/api/providers/order` | 调整优先级顺序 |
 | GET | `/api/models` | 聚合别名、默认模型、网关地址与令牌（脱敏） |
 | PUT | `/api/settings/default` | 设置默认供应商与模型 |
+| GET | `/api/settings` | 读取租户设置（含 `disableCodexWebSearch`） |
+| PATCH | `/api/settings/codex` | Codex 行为开关：是否关闭联网搜索 |
 | POST | `/api/gateway/token` | 生成/重置网关令牌（明文只返回一次） |
 | GET | `/api/agents` | Agent 列表与接管状态 |
 | POST | `/api/agents/:id/preview` \| `apply` \| `revert` | 预览 / 应用 / 还原 |
+| POST | `/api/agents/:id/stop-processes` | 结束本机 Codex 进程，使其重读配置 |
 | GET | `/api/logs`、`/api/stats` | 请求日志与统计 |
 
 网关接口（需网关令牌，`Authorization: Bearer <token>` 或 `x-api-key`）：
@@ -92,10 +96,10 @@ POST /v1/responses           # 需要 apiType=responses 的上游（OpenAI 兼�
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H "Authorization: Bearer $LLMAPI_TOKEN" \
   -H 'content-type: application/json' \
-  -d '{"model":"lmm-myprovider/gpt-x","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"lam-myprovider/gpt-x","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-`model` 用聚合别名时只路由到该供应商；不认识的 `lmm-` 别名会返回 400，**不会**回落到默认供应商（避免用错额度、答错模型）。
+`model` 用聚合别名时只路由到该供应商；不认识的 `lam-` 别名会返回 400，**不会**回落到默认供应商（避免用错额度、答错模型）。
 
 ## 环境变量
 
@@ -123,21 +127,22 @@ data/                                  # 实际落点由 DATA_DIR 决定，npm �
 ├── setup.json                          # 首次初始化令牌（哈希），完成后清空
 └── tenants/<tenantId>/
     ├── providers.json                  # 供应商（API Key 经 AES-256-GCM 加密）
-    ├── settings.json                   # 默认模型、网关令牌（只存哈希 + 密文）
+    ├── settings.json                   # 默认模型、网关令牌（只存哈希 + 密文）、Codex 开关
     ├── agents.json                     # 下发快照（含 appliedBy）
     ├── requests.jsonl                  # 网关请求日志
     └── backups/<agent>/<时间戳>-<文件名>
 ```
 
-- **会写你的家目录**：只有点击"应用配置"时才改写 `~/.codex/config.toml`、`~/.codex/auth.json`、`~/.claude/settings.json`；写入前备份到 `data/tenants/<id>/backups/`。
-- **只拥有最小字段集**：Codex 只改 `model_provider`、`model` 与 `[model_providers.llmapi]` 段；Claude Code 只改 `env` 下三个键。其余内容（MCP、钩子、权限、其他 provider）原样保留。
+- **会写你的家目录**：只有点击"应用配置"时才改写 `~/.codex/config.toml`、`~/.codex/auth.json`、`~/.codex/llmapi-model-catalog.json`（模型目录，整份生成）、`~/.claude/settings.json`；写入前备份到 `data/tenants/<id>/backups/`。
+- **会结束你的进程**：Codex 只在启动时读配置与模型目录，所以「退出 Codex 进程」按钮会执行 `codex app-server daemon stop` 并对 `codex` / `codex exec` 进程发信号（先 `SIGTERM`、必要时 `SIGKILL`）。匹配规则保守，不碰 `mycodex`、编辑器插件或 `codex --version` 这类一次性命令。
+- **只拥有最小字段集**：Codex 只改 `model_provider`、`model`、`model_catalog_json`、`web_search` 与 `[model_providers.llmapi]` 段；Claude Code 只改 `env` 下三个键。其余内容（MCP、钩子、权限、其他 provider）原样保留。
 - **还原是保守的**：只移除"当前值仍等于我们写入值"的键；被你手改过的键保留并作为冲突提示。由我们创建、且还原后为空壳的文件会直接删除。
 - **凭据**：口令用 scrypt；网关令牌只存哈希（下发 Agent 时另有密文副本，任何接口都不返回）；供应商 Key 列表接口只返回首 3 位 + 尾 4 位。
 - **明文模式**：不设置 `DATA_ENCRYPTION_KEY` 时凭据以明文保存，`/api/health` 会持续告警，仅建议单机使用。
 
 ## 为多用户预留的设计
 
-当前是单人使用（一个 `t_default` 租户、一个 `admin` 账号），但结构上已经为多用户/租户隔离与权限控制留好接口：
+当前是单人使用（一个 `t_default` 租户、一个 `owner` 账号），但结构上已经为多用户/租户隔离与权限控制留好接口：
 
 - **身份三层**：`Tenant` / `User(role)` / `Principal`（请求上下文）。会话与网关令牌都解析成 `Principal`，没有"匿名默认租户"的兜底。
 - **数据分区**：所有租户数据在 `data/tenants/<tenantId>/`，仓储只能通过 `forTenant(principal)` 获取，路由层不拼路径。
@@ -165,13 +170,13 @@ server/
     app.ts                Fastify 装配、错误处理、SPA 托管
     index.ts              启动入口（bootstrap + listen）
     config.ts  logger.ts  resilience.ts  context.ts  bootstrap.ts
-    domain/               provider、aliases、identity、permissions、agent、settings、requestLog
+    domain/               provider、aliases、identity、permissions、agent、settings、modelCatalog、requestLog
     store/                jsonFile（原子写/损坏隔离）、paths、tenantScope、identityRepo
     auth/                 password、session、principal、policy、guard
     crypto/               secretCodec（AES-256-GCM）
     gateway/              token、auth、forward
-    services/             providers、connectivity、requestLog
-    agents/               registry（路径解析）、patch（JSON/TOML 保值补丁）、toml、service
+    services/             providers、connectivity、requestLog、setup
+    agents/               registry（路径解析）、patch（JSON/TOML 保值补丁）、toml、processes、service
     routes/               auth、providers、models、logs、agents、gateway
   test/                   单元测试 + 端到端冒烟（含假上游）
 web/

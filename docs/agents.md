@@ -6,62 +6,158 @@
 
 | id | 名称 | 文件 | 需要的上游协议 |
 | --- | --- | --- | --- |
-| `codex` | Codex CLI | `~/.codex/config.toml`、`~/.codex/auth.json` | `responses`（回落 `openai`） |
+| `codex` | Codex CLI | `~/.codex/config.toml`、`~/.codex/auth.json`、`~/.codex/llmapi-model-catalog.json`（整份生成） | `responses` |
 | `claude-code` | Claude Code | `~/.claude/settings.json` | `anthropic` |
 
 路径由 `AgentPathResolver` 解析：优先取 `AGENT_HOME_DIR`，否则用服务进程所属 OS 用户的家目录。
 它按 `{ tenantId, userId }` 计算，`registerTenantWorkspace()` 已预留为"每租户独立工作区"的入口。
+结束进程时服务端还会读 `CODEX_HOME`（若设置）来定位 Codex 的配置目录。
 
 ## 选哪个供应商
 
-Agent 只能用与自己协议匹配的供应商。协议按优先级列表依次尝试：
+Agent 只能用与自己协议匹配的供应商：
 
-| Agent | 候选协议（按顺序） |
+| Agent | 候选协议 |
 | --- | --- |
-| `codex` | `responses` → `openai` |
+| `codex` | `responses` |
 | `claude-code` | `anthropic` |
 
-Codex 优先用原生 Responses 上游（`wire_api = "responses"`）；没有则回落到 `openai` 供应商，
-此时 `wire_api` 写 `chat`。**两者必须一起变**：Codex 发 Responses 请求时，
-`/v1/responses` 严格要求 `responses` 上游，若配置写 `responses` 却选了 `openai` 供应商，
-请求会被网关 501 拦下。
+> **Codex 只支持 Responses 协议。** 它已移除 `wire_api = "chat"`（见
+> [openai/codex#7782](https://github.com/openai/codex/discussions/7782)），
+> 配置写 `chat` 会直接拒绝启动。因此 Codex 只能绑定 `responses` 类型的供应商；
+> 没有时预览/应用会返回 400 并提示去改供应商协议，**不会**退回写 `chat` 配置。
 
-对每种候选协议，选择顺序是：
+如果你的上游同时支持 Chat Completions 与 Responses（很多聚合上游都是），
+而你又希望 Codex 和普通 Chat 客户端都能用，做法是建**两条供应商记录**指向同一个
+`baseUrl` 与 Key：一条 `openai`（给 Chat 客户端）、一条 `responses`（给 Codex）。
+
+对每个 Agent 所需的协议，选择顺序是：
 
 1. 默认供应商协议匹配 → 用它；
 2. 否则取第一个启用的、协议匹配的供应商（按 `priority`）；
-3. 所有候选协议都没有 → 400，例如 Codex 是
-   `没有可用的 OpenAI 兼容（Responses） 或 OpenAI 兼容（Chat Completions） 供应商，请先添加并启用`，
-   Claude Code 是 `没有可用的 Anthropic 兼容（Messages） 供应商，请先添加并启用`
-   （`apiTypeLabel` 统一拼出「<厂商> 兼容（<API 形态>）」，与前端下拉文案同源）。
+3. 没有启用的匹配供应商 → 400。报错文案由 `apiTypeLabel` 拼出「<厂商> 兼容（<API 形态>）」，
+   与前端下拉文案同源。Codex 的报错后面还会追加一句引导：
+   `没有可用的 OpenAI 兼容（Responses） 供应商，请先添加并启用。Codex CLI 只支持 Responses 协议：
+   请把某个供应商的协议类型改为「OpenAI 兼容（Responses）」，或新增一个 responses 供应商`；
+   Claude Code 是 `没有可用的 Anthropic 兼容（Messages） 供应商，请先添加并启用`。
 
 模型优先用"默认供应商 + 默认模型"的组合，否则取该供应商声明的第一个模型。
-最终写入客户端的模型是**聚合别名** `lmm-<providerKey>/<model>`，这样 Agent 的每次请求都会明确打到这一家。
+最终写入客户端的模型是**聚合别名** `lam-<providerKey>/<model>`，这样 Agent 的每次请求都会明确打到这一家。
 
 ## 写入内容
 
 ### Codex CLI
 
-`config.toml` 只改这 6 个键：
+`config.toml` 最多改这 9 个键（顶层 4 个、`[model_providers.llmapi]` 表内 5 个；
+`web_search` 在开关关闭时是"删除该行"而非写入）：
 
 ```toml
 model_provider = "llmapi"
-model = "lmm-mock-responses/gpt-resp"
+model = "lam-mock-responses/gpt-resp"
+model_catalog_json = "/home/user/.codex/llmapi-model-catalog.json"   # 顶层键
+web_search = "disabled"       # 由 disableCodexWebSearch 决定，默认写
 
 [model_providers.llmapi]
 name = "LLM API Manager"
 base_url = "http://127.0.0.1:8787/v1"
-wire_api = "responses"        # 选到 responses 供应商时
-requires_openai_auth = true
+model_catalog_url = "http://127.0.0.1:8787/v1/models"
+wire_api = "responses"        # Codex 现已只接受 responses
+requires_openai_auth = true  # 布尔 true，不是字符串 "true"
 ```
 
-若没有 `responses` 供应商、回落到 `openai` 供应商，则 `wire_api` 写 `chat`
-（Codex 省略该键时默认也是 chat），模型指向那家 openai 供应商的别名。
+### 模型目录：`model_catalog_json` 与 `model_catalog_url`
+
+Codex 的「切换模型」列表读的是模型目录，而不是把 `/v1/models` 的响应直接当列表用 ——
+后者是 `{ object, data: [{ id }] }`，而目录要求 `{ models: [{ slug, ... }] }`，结构不同。
+所以应用配置时会额外生成一份目录文件 `~/.codex/llmapi-model-catalog.json`，内容取自网关当前发布的全部别名。
+
+**`model_catalog_json` 必须是顶层键。** 写进 `[model_providers.llmapi]` 会被 Codex 显式忽略并告警，
+表现为 `/model` 里看不到我们的模型。`model_catalog_url` 则是 **provider 级**字段，写在表内指向网关的
+`/v1/models`：`model_catalog_json` 生效时 Codex 用本地目录（不再去拉 URL），
+`model_catalog_url` 留着是为了让「哪条上游提供模型」这件事对 Codex 也是显式的。
+
+目录结构是 Codex 原生的 `{ models: [{ slug, ... }] }`，不是 `/v1/models` 的 `{ object, data }`：
+
+```json
+{
+  "models": [
+    {
+      "slug": "lam-mock-responses/gpt-resp",
+      "display_name": "Mock Responses · gpt-resp",
+      "description": "Mock Responses 提供的 gpt-resp",
+      "priority": 1,
+      "visibility": "list",
+      "supported_in_api": true,
+      "context_window": 128000,
+      "max_output_tokens": 8192,
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        { "effort": "low", "description": "快速响应，推理较轻" },
+        { "effort": "medium", "description": "速度与推理深度均衡" },
+        { "effort": "high", "description": "更深的推理，适合复杂问题" }
+      ],
+      "shell_type": "default",
+      "truncation_policy": { "mode": "tokens", "limit": 10000 },
+      "support_verbosity": false,
+      "experimental_supported_tools": [],
+      "base_instructions": "You are a coding assistant served through LLM API Manager, ..."
+    }
+  ]
+}
+```
+
+几个容易踩的点：
+
+- `slug` 必须与网关能解析的模型名完全一致（`lam-<key>/<model>`），否则 Codex 选中后发来的请求会被网关判为未知别名。
+- `supported_reasoning_levels` 是**对象数组**（`{ effort, description }`），写字符串数组会被判类型错误。
+- 每个模型至少要给 `base_instructions` 或 `model_messages.instructions_template` 之一，否则 Codex 拒绝加载。
+  这里写一段简短说明而不是复制官方 21KB 系统提示词 —— 那些提示词描述的是官方模型的行为约定，套到第三方上游并不成立。
+- `context_window` / `max_output_tokens` 无法确知上游真实上限，取保守值（128k / 8192）。
+  Codex 的 `ModelInfo` 会读 `context_window` 来算可用上下文与自动压缩阈值；
+  `max_output_tokens` 目前不在该结构里（会被忽略），保留它只是让目录文件自解释。
+
+目录文件由我们**整份覆盖生成**（不做按键合并），因此也遵守"写前备份 + 还原"规则：由我们创建的在还原时直接删除；
+应用前就已存在的，还原时重置为 `{}` 并作为冲突提示，避免误删用户内容。
+
+顶层是否写 `web_search = "disabled"` 由租户设置 `disableCodexWebSearch` 决定（默认关闭），
+原因见下。
+
+### 为什么关闭 web_search
+
+Codex 在配置里没写 `web_search` 时默认为 `cached`（`resolve_web_search_mode(...).unwrap_or(WebSearchMode::Cached)`），
+于是把 `web_search` 作为 **Responses 托管工具**放进请求的 `tools[]`。多数聚合上游
+把 Responses 请求转成 Chat 线路时不支持这个工具，会直接返回：
+
+```
+[code=unsupported_tool] unsupported Responses tool type "web_search" at tools[N]
+```
+
+这个报错看起来像"模型不支持"，实际是**工具**不支持——换模型无效，关掉工具才行。
+
+关闭方式（顶层键）：
+
+```toml
+web_search = "disabled"
+```
+
+源码依据：只有 `WebSearchMode::Disabled`（或 `None`）会让 `create_web_search_tool()` 返回 `None`；
+其余取值都会构造出 `ToolSpec::WebSearch` 并进入 `tools[]`。
+
+代价是 Codex 不能联网搜索，所以做成了开关：Agent 配置页 Codex 卡片上的
+「关闭联网搜索」复选框，对应设置项 `disableCodexWebSearch`（默认 `true`）。
+
+- **勾选（默认）**：写 `web_search = "disabled"`，Codex 不发该工具，聚合上游可用。
+- **取消勾选**：会主动**删除**这一行（不是留着不动），再重新应用配置。
+  否则上一版写进去的值会残留，用户会以为开关没生效。删除只在当前值仍是 `"disabled"`
+  时执行，被用户手改过的值保留。
+
+切换开关后页面会自动重新应用配置，省掉一次点击。改完后仍需重启 Codex 进程
+（见「结束正在运行的进程」）。
 
 `auth.json`：
 
 ```json
-{ "OPENAI_API_KEY": "lmm_<网关令牌>" }
+{ "OPENAI_API_KEY": "lam_<网关令牌>" }
 ```
 
 > 这里的 Key 是**本服务的网关令牌**，不是上游供应商的 Key。上游 Key 只存在于服务端。
@@ -74,8 +170,8 @@ requires_openai_auth = true
 {
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8787",
-    "ANTHROPIC_AUTH_TOKEN": "lmm_<网关令牌>",
-    "ANTHROPIC_MODEL": "lmm-mock-anthropic/claude-x"
+    "ANTHROPIC_AUTH_TOKEN": "lam_<网关令牌>",
+    "ANTHROPIC_MODEL": "lam-mock-anthropic/claude-x"
   }
 }
 ```
@@ -92,6 +188,9 @@ JSON 用"读 → 定位 → 就地改写"，TOML 用"按段定位 → 只替换�
 **解析失败必须中止**。文件不是合法 JSON/TOML 时报错返回，绝不退回"写一个空文件"。
 如果目标 JSON 顶层不是对象，或某个中间节点不是对象（无法继续下钻），同样报错而不是覆盖。
 
+模型目录（`llmapi-model-catalog.json`）是唯一的例外：它整份由我们生成、不做按键合并，
+但仍遵守"写前备份 + 只删自己创建的文件"。
+
 ### 写入前备份
 
 仅当文件已存在时备份到：
@@ -107,6 +206,9 @@ data/tenants/<tenantId>/backups/<agentId>/<ISO 时间戳>-<文件名>
 只移除"当前值仍等于我们当初写入的值"的键。被你手改过的键保留，并作为 `conflicts` 返回。
 若文件是本次应用时由我们创建、且还原后已无任何有效内容，则直接删除该文件，
 避免在家目录留下空壳 `config.toml` 或 `{}`。
+
+模型目录文件没有"我们写入的键"可撤销，按 `created` 标记决定：由我们创建的直接删除；
+应用前已存在的重置为 `{}` 并作为冲突返回。
 
 ## 快照
 
@@ -125,13 +227,22 @@ data/tenants/<tenantId>/backups/<agentId>/<ISO 时间戳>-<文件名>
           "path": "/home/user/.codex/config.toml",
           "values": {
             "model_provider": "llmapi",
-            "model": "lmm-mock-responses/gpt-resp",
+            "model": "lam-mock-responses/gpt-resp",
+            "model_catalog_json": "/home/user/.codex/llmapi-model-catalog.json",
+            "web_search": "disabled",
             "[model_providers.llmapi] name": "LLM API Manager",
             "[model_providers.llmapi] base_url": "http://127.0.0.1:8787/v1",
+            "[model_providers.llmapi] model_catalog_url": "http://127.0.0.1:8787/v1/models",
             "[model_providers.llmapi] wire_api": "responses",
-            "[model_providers.llmapi] requires_openai_auth": "true"
+            "[model_providers.llmapi] requires_openai_auth": "true"  // 写入时是布尔 true
           },
           "created": false
+        },
+        {
+          "role": "catalog",
+          "path": "/home/user/.codex/llmapi-model-catalog.json",
+          "values": {},
+          "created": true
         }
       ]
     }
@@ -140,6 +251,8 @@ data/tenants/<tenantId>/backups/<agentId>/<ISO 时间戳>-<文件名>
 ```
 
 `values` 里表内键的写法是 `"[model_providers.llmapi] base_url"`，还原时按此拆出表名与键名。
+生成类文件（`role: "catalog"`）的 `values` 恒为空，还原时只依据 `created`。
+`requires_openai_auth` 快照里是字符串 `"true"`，但写入文件时是 TOML 布尔 `true`（`raw` 标量）。
 `appliedBy` 是为了将来多用户审计留痕。
 
 ## 操作流程
@@ -148,29 +261,76 @@ data/tenants/<tenantId>/backups/<agentId>/<ISO 时间戳>-<文件名>
    以及文件是否已存在。UI 用 `differs` 标记有变化的键。
    凭据类键（`OPENAI_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 等）只返回掩码，完整令牌不会出现在预览响应里；
    完整值只在 `apply` 时写入目标文件。
+   Codex 的预览里有三个文件：`config`（9 个键）、`auth`（1 个键）、`catalog`（条目为空，因为它是整份生成的，
+   UI 显示"该文件无需写入"）。
 2. **应用**（`POST /api/agents/:id/apply`）：备份 → 原子写入 → 记录快照。状态变为"已接管"。
 3. **重启 Agent**：配置只在进程启动时读取，应用后需要重启才能生效（UI 会提示）。
-4. **还原**（`POST /api/agents/:id/revert`）：撤销写入的键，清除快照，状态回到"未接管"。
+   Codex 可以直接用「退出 Codex 进程」按钮（见下节）。
+4. **还原**（`POST /api/agents/:id/revert`）：撤销写入的键，删除我们创建的生成类文件，清除快照，
+   状态回到"未接管"。
 
 ## 新增一个 Agent
 
 1. 在 `server/src/agents/registry.ts` 的 `AGENT_DEFINITIONS` 登记：`homeDirName`、文件列表
    （`role` / `relativePath` / `format`）。
 2. 在 `server/src/agents/service.ts` 的 `buildPlan` 里补 `writes`，并按需要扩展
-   `buildPlan` 的协议选择（`codex → responses|openai`、`claude-code → anthropic`），
-   以及 Codex 的 `wire_api` 必须跟着所选供应商协议走。
+   `buildPlan` 的协议选择（`codex → responses`、`claude-code → anthropic`）。
 3. 补测试：`server/test/agents.test.ts` 覆盖"保留无关配置"与"还原冲突"；
    若是新格式，同时扩展 `agents/patch.ts`（而不是在路由里做字符串替换）。
 4. 更新本文档与 `docs/api.md` 的 Agent 章节。
+
+## 结束正在运行的进程
+
+Codex 只在**启动时**读一次配置与模型目录。改完配置（或换了模型目录）后如果不重启，
+`/model` 里仍是旧列表 —— 看起来像配置没生效。
+
+页面上「**退出 Codex 进程**」按钮调 `POST /api/agents/:id/stop-processes`，服务端做两件事：
+
+1. `codex app-server daemon stop` —— 官方入口，让 TUI 连的托管守护进程优雅退出
+   （先停 daemon 再停 TUI，否则 TUI 可能在 daemon 退出过程中自动重连）；
+2. 按进程表精确匹配后 `SIGTERM` 掉 `codex`（TUI）与 `codex exec` 进程，等 300ms 后对仍存活的补 `SIGKILL`。
+
+匹配规则刻意保守：只认可执行文件名为 `codex`（前面是行首或 `/`，后面是空格或结束）的进程，
+且子命令不在 `app-server` / `login` / `logout` / `update` / `mcp` / `debug` / `completion` /
+`help` / `version` / `apply` / `resume` 之列；`codex --version`、`codex --help` 这类一次性命令也不会被当成 TUI。
+这样避免误杀编辑器插件、`mycodex` 或本服务自己的子进程。
+
+定位配置目录时优先用环境变量 `CODEX_HOME`，否则用 `AGENT_HOME_DIR`（再否则 OS 家目录）下的 `.codex`；
+该目录不存在时不会强行设 `CODEX_HOME`（codex 会对不存在的路径报错，但那只是"本机还没配过"）。
+
+响应：
+
+```json
+{
+  "actions": ["已停止 Codex 守护进程（codex app-server daemon stop）", "已结束 1 个 Codex 客户端进程"],
+  "killed": 1,
+  "warnings": [],
+  "supported": true
+}
+```
+
+`actions` 是成功做到的事，`warnings` 是没做到的原因（例如 `codex` 不在 PATH、守护进程停不掉），
+二者都可能为空。`killed` 是实际发出信号的进程数。
+
+Claude Code 没有常驻进程，该按钮只对 Codex 显示；直接调接口会返回 `supported: false`
+与 `warnings: ["Claude Code 没有需要结束的常驻进程"]`，而不是报错。
+
+> 这需要 `codex` 在服务进程的 PATH 上，且 `~/.codex` 可写。缺 `codex` 时只结束本机进程并在
+> `warnings` 里说明；目录只读或命令失败同样以 `warnings` 返回原因，不会静默当成成功。
 
 ## 排错
 
 | 现象 | 原因 |
 | --- | --- |
 | 预览返回 400「尚未生成网关令牌」 | 先去"模型聚合"页生成令牌 |
-| 预览返回 400「没有可用的 OpenAI 兼容（Responses） 或 OpenAI 兼容（Chat Completions） 供应商」/「没有可用的 Anthropic 兼容（Messages） 供应商」 | 该 Agent 的候选协议都没有启用的供应商（Codex 会先试 `responses`、再试 `openai`，都没有才报错） |
+| 预览返回 400「没有可用的 OpenAI 兼容（Responses） 供应商，请先添加并启用」 | 没有启用的 `responses` 供应商。Codex 只能绑 `responses`，把某家供应商的协议改为「OpenAI 兼容（Responses）」即可 |
+| 预览返回 400「没有可用的 Anthropic 兼容（Messages） 供应商」 | 没有启用的 `anthropic` 供应商（Claude Code 用） |
 | 预览返回 400「未声明任何模型」 | 供应商的 `models` 为空 |
-| Codex 请求网关返回 501 | `wire_api` 与所选供应商协议不一致：`responses` 供应商要写 `responses`，`openai` 供应商要写 `chat`。重新应用配置即可（`wire_api` 由所选供应商协议决定） |
+| Codex 启动报 `` `wire_api = "chat"` is no longer supported `` | 旧版本写出的配置已过时：Codex 只接受 `responses`。把供应商协议改为「OpenAI 兼容（Responses）」后重新应用配置 |
+| Codex 请求网关返回 501 | 供应商协议不是 `responses`：Codex 走 `/v1/responses`，需要 `responses` 类型的供应商 |
+| `/model` 里没有我们的模型 | 检查 `model_catalog_json` 是否被写进了 `[model_providers.llmapi]`（必须是顶层键），以及改完配置后是否重启了 Codex |
+| 上游报 `unsupported Responses tool type "web_search"` | 该上游不支持 Responses 托管工具，勾选「关闭联网搜索」后重新应用 |
+| 结束进程后仍走旧配置 | Codex 进程可能不在服务进程的 PATH 上，看响应里的 `warnings`；也可手动重启 Codex |
 | 应用后 Agent 仍走旧配置 | Agent 进程需要重启 |
 | 还原时出现 conflicts | 被写入的键后来被手动改过，按提示自行处理 |
 | 预览报「字段 xxx 不是对象」 | 目标 JSON 里该路径是标量，无法下钻；需手动整理 |
