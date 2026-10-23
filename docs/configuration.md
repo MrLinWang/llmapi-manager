@@ -89,9 +89,11 @@ data/                                # 默认即 server/data，见上表 DATA_DI
     ├── providers.json                供应商
     ├── settings.json                 默认供应商/模型、网关令牌、Codex 行为开关
     ├── agents.json                   下发快照
-    ├── requests.jsonl                请求日志
-    └── backups/<agentId>/*           下发前的原文件备份
+    └── requests.jsonl                请求日志
 ```
+
+Agent 文件的写前备份**不在数据目录**，而是落在被改文件的同目录
+（`~/.codex/config.toml.bak-<时间戳>`），避免数据目录被清空后无法恢复。
 
 所有 JSON 文件的外层结构：
 
@@ -101,7 +103,7 @@ data/                                # 默认即 server/data，见上表 DATA_DI
 
 - 写入方式：临时文件 + `rename`，权限 0600；不会出现半截 JSON。
 - 损坏或版本高于当前支持：改名为 `<文件名>.corrupt-<ISO 时间戳>`，以默认值启动。
-- 备份不会自动清理，长期使用需自行清理 `backups/`。
+- 备份不会自动清理，长期使用需自行清理目标文件同目录下的 `*.bak-<时间戳>`。
 
 ## 首次启动与初始化
 

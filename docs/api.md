@@ -227,7 +227,7 @@
 
 ### GET /api/settings
 
-权限 `settings:read`。返回 `defaultProviderId` / `defaultModel` / `disableCodexWebSearch` / `gatewayBaseUrl` / `token`（脱敏）。
+权限 `settings:read`。返回 `defaultProviderId` / `defaultModel` / `disableCodexWebSearch` / `approvalReviewModel` / `protocolConversion` / `agentTargets` / `gatewayBaseUrl` / `token`（脱敏）。
 
 ### PUT /api/settings/default
 
@@ -245,15 +245,17 @@
 权限 `settings:write`。Codex 配置的行为开关。
 
 ```json
-{ "disableCodexWebSearch": false }
+{ "disableCodexWebSearch": false, "approvalReviewModel": "gpt-6-luna" }
 ```
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `disableCodexWebSearch` | `true` | 为 `true` 时下发 `web_search = "disabled"`；为 `false` 时**删除**该行（不残留旧值） |
+| `approvalReviewModel` | `null` | 「Approve for me」的模型映射。网关识别出审批请求时，把其 `model`（Codex 硬编码的 `gpt-5.6-luna`）换成此值；`null` 不映射。详见 `docs/gateway.md` |
+| `protocolConversion` | `false` | 跨协议转发。为 `true` 时 `/v1/responses` 可以落到 `openai` 供应商，由网关双向转换（含工具调用与流式）。默认关闭 |
 
-字段可省略（省略即不修改该项，但仍会刷新 `updatedAt`），传非布尔值返回 400
-`disableCodexWebSearch 必须是布尔值`。
+字段可省略（省略即不修改该项，但仍会刷新 `updatedAt`）。传错类型返回 400
+（`disableCodexWebSearch 必须是布尔值` / `approvalReviewModel 必须是字符串或 null`）。
 
 返回 `{ disableCodexWebSearch, requiresReapply: true }` —— 改动只落在设置里，
 需要再调一次 `POST /api/agents/codex/apply` 才会写进 `~/.codex/config.toml`
@@ -282,13 +284,19 @@
 | POST | `/api/agents/:id/preview` | `agents:read` | 只读，返回目标路径与键值对照（凭据脱敏） |
 | POST | `/api/agents/:id/apply` | `agents:apply` | 写文件并记录快照 |
 | POST | `/api/agents/:id/revert` | `agents:apply` | 撤销我们写入的键 |
+| PATCH | `/api/agents/:id/target` | `agents:apply` | 按 Agent 设置连接方式与直连供应商（见下） |
 | POST | `/api/agents/:id/stop-processes` | `agents:apply` | 结束本机 Codex 进程，使其重读配置（Claude Code 返回 `supported: false`） |
 
-`:id` 取 `codex` 或 `claude-code`。以上全部无 body。
+`:id` 取 `codex` 或 `claude-code`；除 `PATCH .../target` 外全部无 body。
 
 供应商按 Agent 所需的协议挑选：`codex` 只接受 `responses`（它的 `wire_api` 固定写 `responses`），
 `claude-code` 只接受 `anthropic`。Codex 不再回落到 `openai` 供应商 —— `wire_api = "chat"` 已被 Codex 移除。
 没有匹配协议的启用供应商时预览返回 400，消息里会说明缺哪种协议。
+
+连接方式按 Agent 各存一份（设置项 `agentTargets`），默认 `gateway`。`direct` 时用上游
+`baseUrl` + 上游真实 Key + 裸模型名，且**必须**通过 `PATCH .../target` 明确指定供应商——
+没指定时预览/应用返回 400，而不是按优先级自动挑一家。走网关与直连的差异见
+[agents.md](./agents.md#连接方式走网关与直连上游)。
 
 预览响应（Codex 有三个文件；`catalog` 是整份生成的，所以 `entries` 里只有一条汇总行）：
 
@@ -298,6 +306,7 @@
   "name": "Codex CLI",
   "applied": false,
   "gatewayBaseUrl": "http://127.0.0.1:8787",
+  "connectionMode": "gateway",
   "files": [
     {
       "role": "config",
@@ -340,6 +349,10 @@
 `catalog` 是整份生成的文件，没有"按 keys 打补丁"的语义：`entries` 里只有一条汇总行
 （`key` 是 `（整份生成）`，`next` 是"包含 N 个模型别名"），不逐个列出 `slug`。
 文件已存在时 `current` 是"（将被覆盖，已自动备份）"。
+
+`mode` 由设置项 `agentTargets[<id>].mode` 决定：`gateway` 时 `connectionMode` 是 `"gateway"`；
+`direct` 时是 `"direct"` 并额外返回 `directBaseUrl`（实际写进 `base_url` 的上游地址，
+Codex 会补 `/v1`，已在末尾含 `/v1` 时不再重复拼接）。
 `model_catalog_json` 必须是顶层键（写进 `[model_providers.llmapi]` 会被 Codex 忽略并告警），
 它和 `model_catalog_url` 的分工见 [agents.md](./agents.md#模型目录model_catalog_json-与-model_catalog_url)。
 
@@ -350,9 +363,13 @@ API Key、网关令牌等凭据类键的 `next` 与 `current` 只返回前 8 位
 
 ```json
 { "binding": { "agentId": "codex", "appliedAt": "...", "appliedBy": "u_owner",
+               "runningProcesses": 2,
                "files": [{ "role": "config", "path": "...", "values": {}, "created": false },
                          { "role": "catalog", "path": "...", "values": {}, "created": true }] } }
 ```
+
+`runningProcesses` 是**应用后探测到的、仍在运行的该 Agent 进程数**（只对 Codex 计数，
+Claude Code 恒为 0）。写成功不等于生效：这些进程内存里还是旧配置，界面据此提示"必须重启"。
 
 还原响应：
 
@@ -365,6 +382,26 @@ API Key、网关令牌等凭据类键的 `next` 与 `current` 只返回前 8 位
 
 `conflicts` 非空表示有键被手动改过、因此保留未动。
 生成类文件若由我们创建，还原时直接删除，其文件名会出现在 `restored` 里。
+
+### PATCH /api/agents/:id/target
+
+权限 `agents:apply`。按 Agent 设置下发偏好（Codex 与 Claude Code 互相独立）。
+
+```json
+{ "mode": "direct", "directProviderId": "p_...", "directModel": "gpt-x" }
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `mode` | `gateway` 走网关；`direct` 把供应商 baseUrl 与真实 Key 直接写进配置 |
+| `directProviderId` | 直连用哪家供应商。**直连时必填**，保存时就校验存在、未停用、协议匹配 |
+| `directModel` | 直连用哪个模型，省略或不在该供应商 `models` 里时取第一个模型 |
+
+字段均可省略（省略即不修改该项）。`mode` 只接受 `gateway` / `direct`；
+`directProviderId`、`directModel` 可传 `null` 或空字符串清除。
+换供应商时会顺带把 `directModel` 清空（旧模型多半已不存在），除非本次请求同时指定了 `directModel`。
+切到 `gateway` 会清空 `directProviderId` / `directModel`，避免下次切回来用了过期供应商。
+返回 `{ agentTargets, requiresReapply: true }`，需再调一次 `apply` 才写进文件。
 
 ### POST /api/agents/:id/stop-processes
 
@@ -380,9 +417,13 @@ API Key、网关令牌等凭据类键的 `next` 与 `current` 只返回前 8 位
 }
 ```
 
-- 先 `codex app-server daemon stop`，再对匹配到的 `codex`（TUI）/ `codex exec` 进程发 `SIGTERM`，
-  300ms 后补 `SIGKILL`。匹配规则刻意保守，不碰 `app-server` / `login` / `update` / `mcp` 等子命令。
+- 三步：① `codex app-server daemon stop`（5s 超时）；② 按
+  `app-server-daemon/daemon.pid`、`daemon-updater.pid` 里记录的 pid 发 `SIGTERM`
+  （官方命令失败时的兜底）；③ 对匹配到的 `codex`（TUI）/ `codex exec` 进程发 `SIGTERM`，
+  按 800ms / 1200ms / 1600ms 三轮检查存活，仍活着的补 `SIGKILL`。
+  匹配规则刻意保守，不碰 `app-server` / `login` / `update` / `mcp` 等子命令。
 - `codex` 不在 PATH、守护进程未运行、目录只读等情况都通过 `warnings` / `actions` 说明，**不会**变成 500。
+  `SIGKILL` 后仍未退出的进程会连同 pid 一起写进 `warnings`。
 - 对 `claude-code` 返回 `supported: false` 与 `killed: 0`（没有常驻进程），仍是 200；未知 `:id` 返回 404。
 
 ## 日志与统计
@@ -436,9 +477,14 @@ API Key、网关令牌等凭据类键的 `next` 与 `current` 只返回前 8 位
 | POST | `/v1/messages` | `anthropic` |
 | POST | `/v1/responses` | `responses` |
 
-三条 POST 路径都是严格匹配：供应商协议与路径不符时返回 501（`not_implemented`），
-不会退化成直通。比如 `/v1/responses` 打到 `openai` 供应商会被拦下 —— 早期它确实是不限协议的
+三条 POST 路径默认严格匹配：供应商协议与路径不符时返回 501（`not_implemented`），
+不会退化成直通。比如 `/v1/responses` 打到 `openai` 供应商默认会被拦下 —— 早期它确实是不限协议的
 直通路径，结果把 Responses 请求发给了只支持 Chat 的上游。
+
+唯一的例外是设置项 `protocolConversion`：打开后 `/v1/responses → openai` 由网关做双向转换
+（其余组合仍 501）。遇到"打开就能解决"的协议不匹配时会**自动开启**并持久化，
+且在响应头带 `x-llmapi-auto-conversion: 1`；开关关着时这类 501 的 `error.details`
+带 `{ "canEnableConversion": true }`。详见 [gateway.md](./gateway.md#跨协议转发responses--chat)。
 
 请求体必须有 `model` 字段。流式由 `"stream": true` 触发。详见 [gateway.md](./gateway.md)。
 

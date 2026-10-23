@@ -59,7 +59,7 @@ Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真
 `processes.test.ts` 只测纯函数（命令行分类与 `etime` 解析），不会真的给任何进程发信号。
 日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**。
 
-当前基线：147 项（server 138 + web 9）。
+当前基线：187 项（server 178 + web 9）。
 
 ```bash
 npm test                                # 全部
@@ -170,7 +170,7 @@ curl -s localhost:8787/api/health | jq      # 启动告警
 | 存储 | JSON 文件 + 进程内缓存 | 换 SQLite/Postgres，实现同一套 `TenantRepos` 接口 |
 | 请求日志 | 全量追加，无轮转 | 加按大小/时间轮转或迁移到数据库 |
 | 无熔断 | 失败供应商不会被摘除 | 加熔断器与健康检查，注意与"别名不回落"的语义区分 |
-| 协议转换 | 三种协议严格匹配，跨协议一律 501 | 引入转换层；在此之前保持明确报错，不要退回"直通" |
+| 协议转换 | 只支持 `/v1/responses → openai`（Chat）一个方向 | 其余组合（如 `/v1/messages`）仍 501；需要时按 `gateway/convert/` 的结构补转换器 |
 | Codex 模型目录 | 上下文与输出上限是写死的保守值（128k / 8192），不反映上游真实能力 | 需要在供应商记录里补"每模型能力"字段，再喂给目录生成 |
 | 结束进程 | 只覆盖 Linux/macOS（依赖 `ps -ww -Ao`），Windows 上探测不到进程 | 按平台分支实现（Windows 需 `tasklist` / `wmic` 或 `Get-CimInstance`） |
 | 前端数据层 | 自写 `useAsync` | 页面规模变大后再评估引入查询库，不要提前抽象 |

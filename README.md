@@ -130,10 +130,10 @@ data/                                  # 实际落点由 DATA_DIR 决定，npm �
     ├── settings.json                   # 默认模型、网关令牌（只存哈希 + 密文）、Codex 开关
     ├── agents.json                     # 下发快照（含 appliedBy）
     ├── requests.jsonl                  # 网关请求日志
-    └── backups/<agent>/<时间戳>-<文件名>
+    └── （备份不再放数据目录，见下）
 ```
 
-- **会写你的家目录**：只有点击"应用配置"时才改写 `~/.codex/config.toml`、`~/.codex/auth.json`、`~/.codex/llmapi-model-catalog.json`（模型目录，整份生成）、`~/.claude/settings.json`；写入前备份到 `data/tenants/<id>/backups/`。
+- **会写你的家目录**：只有点击"应用配置"时才改写 `~/.codex/config.toml`、`~/.codex/auth.json`、`~/.codex/llmapi-model-catalog.json`（模型目录，整份生成）、`~/.claude/settings.json`；写入前在同目录生成 `*.bak-<时间戳>` 备份（如 `~/.codex/config.toml.bak-2026-10-23T14-00-00-000Z`），改坏了可直接找回，不依赖本服务是否还在运行。
 - **会结束你的进程**：Codex 只在启动时读配置与模型目录，所以「退出 Codex 进程」按钮会执行 `codex app-server daemon stop` 并对 `codex` / `codex exec` 进程发信号（先 `SIGTERM`、必要时 `SIGKILL`）。匹配规则保守，不碰 `mycodex`、编辑器插件或 `codex --version` 这类一次性命令。
 - **只拥有最小字段集**：Codex 只改 `model_provider`、`model`、`model_catalog_json`、`web_search` 与 `[model_providers.llmapi]` 段；Claude Code 只改 `env` 下三个键。其余内容（MCP、钩子、权限、其他 provider）原样保留。
 - **还原是保守的**：只移除"当前值仍等于我们写入值"的键；被你手改过的键保留并作为冲突提示。由我们创建、且还原后为空壳的文件会直接删除。
@@ -154,9 +154,10 @@ data/                                  # 实际落点由 DATA_DIR 决定，npm �
 
 ## 已知限制
 
-- 不做协议转换：路径与供应商协议必须严格匹配（`/v1/chat/completions` 要 `openai`、
-  `/v1/messages` 要 `anthropic`、`/v1/responses` 要 `responses`），不匹配明确返回 501，
-  不会静默转发；`/v1/responses` 早期是不限协议的直通路径，现已收紧。
+- 协议默认严格匹配：`/v1/chat/completions` 要 `openai`、`/v1/messages` 要 `anthropic`、
+  `/v1/responses` 要 `responses`，不匹配明确返回 501、不静默转发。
+  唯一例外是 `/v1/responses → openai`：开启「跨协议转发」（或协议不匹配时网关自动开启）后，
+  由网关双向转换请求、响应与流式事件。托管工具（如 `web_search`）没有 Chat 等价物会被丢弃。
 - 不做计费、配额、多用户 UI、MCP/Skills/会话管理、桌面打包。
 - 存储是 JSON 文件 + 原子写，适合单机自托管；高并发或多实例需要换 SQLite/Postgres 与共享状态。
 - 上游能力以"OpenAI / Anthropic 兼容"为前提（OpenAI 体系含 Chat Completions 与 Responses

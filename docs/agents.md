@@ -203,13 +203,22 @@ JSON 用"读 → 定位 → 就地改写"，TOML 用"按段定位 → 只替换�
 
 ### 写入前备份
 
-仅当文件已存在时备份到：
+仅当文件已存在时备份，且备份**放在被改文件的同目录**：
 
 ```
-data/tenants/<tenantId>/backups/<agentId>/<ISO 时间戳>-<文件名>
+~/.codex/config.toml.bak-2026-10-23T09-39-52-003Z
+~/.codex/auth.json.bak-2026-10-23T09-39-52-010Z
 ```
 
-文件不存在时直接创建（含父目录），此时不产生备份。
+为什么是同目录而不是服务的数据目录：
+
+- 备份的意义是"改坏了立刻找回"。放在 Agent 自己的目录里，用户**不依赖本服务仍在运行**、
+  不依赖数据目录是否被清空或迁移，打开文件管理器就能恢复。
+- 时间戳精确到毫秒，同一毫秒内重复写入会追加序号（`-1`、`-2`），**任何一次改动都不会覆盖
+  前一份备份**，历史可回溯。
+- 文件不存在时直接创建（含父目录），此时不产生备份。
+
+清理：备份会累积，需要时自行删除 `*.bak-*` 即可；本服务不自动清理（宁可留多，不可丢失）。
 
 ### 还原是保守的
 
@@ -289,16 +298,76 @@ data/tenants/<tenantId>/backups/<agentId>/<ISO 时间戳>-<文件名>
    若是新格式，同时扩展 `agents/patch.ts`（而不是在路由里做字符串替换）。
 4. 更新本文档与 `docs/api.md` 的 Agent 章节。
 
+## 连接方式：走网关与直连上游
+
+页面上的「连接方式」按 Agent **各自独立**设置（Codex 与 Claude Code 可以一个走网关、一个直连），
+存于设置项 `agentTargets[<agentId>] = { mode, directProviderId, directModel }`，默认全为 `gateway`。
+
+**直连必须明确指定供应商。** 多供应商时按优先级自动挑的问题是：用户既看不到选了谁、
+也无法干预，而直连会把那家的地址与 Key 直接写进配置。所以未指定时预览/应用会返回 400，
+提示去页面上选一家；接口 `PATCH /api/agents/:id/target` 在保存时就会校验（协议匹配、未停用）。
+
+| | `gateway`（走网关） | `direct`（直连上游） |
+| --- | --- | --- |
+| `base_url` | 本服务网关（`PUBLIC_BASE_URL/v1`） | 供应商自己的 `baseUrl` |
+| 凭据 | 网关令牌 `lam_...` | 供应商的真实上游 Key |
+| 模型名 | 别名 `lam-<key>/<model>` | 裸模型名 `<model>` |
+| 模型目录 | 生成本地 `llmapi-model-catalog.json`，条目是**该 Agent 协议可用的别名** | 同样生成，条目是**上游裸模型名** |
+| 服务依赖 | 必须先启动本服务 | **不启动也能用** |
+
+直连模式的用途就是最后一条：把选定供应商的地址与 Key 直接写进 Codex 的配置，
+之后即使本服务没在运行，Codex 也能正常使用。代价是没有网关侧的换源、回退与请求日志。
+
+**两种模式都会生成 `model_catalog_json`**，只是条目里的模型标识不同。直连也必须生成：
+一旦没有它，Codex 会回退到**内置的官方模型列表**（`models-manager` 的 `fallback_models`
+→ `load_remote_models_from_file`），`/model` 里就会出现 `GPT-6.x` 这类与所配供应商
+毫无关系的条目——这个坑真实踩过。
+
+切换模式时会自动重新应用配置，并且**主动清理上一模式的产物**：
+
+- 切到直连：删除 `model_catalog_url`（它指向网关，直连时无意义），并用裸模型名**重写**目录文件。
+- 切回网关：重新生成别名目录并写回 `model_catalog_url`。
+
+预览面板会显示本次是哪种模式（`connectionMode`）与直连时的实际上游地址（`directBaseUrl`），
+避免两种模式写出的文件看起来都一样。
+
+> 直连模式下预览里的 Key 同样只显示前后片段（`sk-super********6789`），完整值只写进
+> Agent 的凭据文件，不经任何接口返回。
+
 ## 结束正在运行的进程
 
 Codex 只在**启动时**读一次配置与模型目录。改完配置（或换了模型目录）后如果不重启，
 `/model` 里仍是旧列表 —— 看起来像配置没生效。
 
-页面上「**退出 Codex 进程**」按钮调 `POST /api/agents/:id/stop-processes`，服务端做两件事：
+页面上「**退出 Codex 进程**」按钮调 `POST /api/agents/:id/stop-processes`，服务端做三步：
 
 1. `codex app-server daemon stop` —— 官方入口，让 TUI 连的托管守护进程优雅退出
    （先停 daemon 再停 TUI，否则 TUI 可能在 daemon 退出过程中自动重连）；
-2. 按进程表精确匹配后 `SIGTERM` 掉 `codex`（TUI）与 `codex exec` 进程，等 300ms 后对仍存活的补 `SIGKILL`。
+2. **按 pid 文件兜底结束 daemon 与 updater** —— 官方命令失败时的保险，见下；
+3. 按进程表精确匹配后 `SIGTERM` 掉 `codex`（TUI）与 `codex exec` 进程，按
+   800ms/1200ms/1600ms 三轮检查存活，仍活着的补 `SIGKILL`。
+
+**目录只列该 Agent 能用的协议。** Codex 的 `wire_api` 固定是 `responses`，所以目录里
+默认不能出现 `openai` 供应商的别名——用户选中后 `/v1/responses` 打到 `openai` 上游必然
+501。让他在列表里看到一个选了就报错的模型，等于把错误推给他。
+同理 Claude Code 只用 `anthropic`。
+
+**开启跨协议转发后例外**：此时网关会把 Responses 请求转成 Chat，`openai` 供应商
+就真的能用了，目录必须把它们列出来。只改转发逻辑不改目录的话，用户开了开关却看不到
+对应模型，会以为功能没生效——这两处是一对，改一个必须改另一个。
+
+### 为什么需要第 2 步（按 pid 文件兜底）
+
+`codex app-server daemon stop` 要写 `~/.codex`（操作锁 `daemon.lock`、pid 文件）。
+目录只读时它会**立刻失败**，而 daemon 进程仍在跑 —— 表现为"点了退出进程，Codex 却还能用"，
+用户只能手动 `pkill -9 -f codex`。
+
+所以读 `app-server-daemon/daemon.pid` 与 `daemon-updater.pid` 里记录的 pid 直接发信号。
+这两个文件由 daemon 自己写，比按命令行匹配可靠：daemon 的参数形态是
+`app-server --listen ... --managed-daemon`，按命令行猜容易漏，且不同版本还不一样。
+
+第 3 步也不是发一次 `SIGTERM` 就算完：Codex 关闭时要收尾（写 rollout、断连接），
+一轮检查常常来不及，用户会看到"点了退出但进程还在"。
 
 匹配规则刻意保守：只认可执行文件名为 `codex`（前面是行首或 `/`，后面是空格或结束）的进程，
 且子命令不在 `app-server` / `login` / `logout` / `update` / `mcp` / `debug` / `completion` /
@@ -325,8 +394,9 @@ Codex 只在**启动时**读一次配置与模型目录。改完配置（或换�
 Claude Code 没有常驻进程，该按钮只对 Codex 显示；直接调接口会返回 `supported: false`
 与 `warnings: ["Claude Code 没有需要结束的常驻进程"]`，而不是报错。
 
-> 这需要 `codex` 在服务进程的 PATH 上，且 `~/.codex` 可写。缺 `codex` 时只结束本机进程并在
-> `warnings` 里说明；目录只读或命令失败同样以 `warnings` 返回原因，不会静默当成成功。
+> 这需要 `codex` 在服务进程的 PATH 上。缺 `codex` 时只结束本机进程并在 `warnings` 里说明。
+> `~/.codex` 只读时官方 `daemon stop` 会失败，但第 2 步的 pid 兜底通常仍能结束进程；
+> 两步的结果都会在 `actions` / `warnings` 里如实返回，不会静默当成成功。
 
 ## 排错
 

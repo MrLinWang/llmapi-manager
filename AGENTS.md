@@ -24,6 +24,7 @@ server/               Fastify + TypeScript
   src/auth/           口令哈希、会话签名、Principal 解析、权限裁决、路由守卫
   src/crypto/         凭据编解码（AES-256-GCM）
   src/gateway/        网关令牌、令牌鉴权、上游转发
+    convert/          跨协议转换：responses→chat 的请求/响应/流式三向映射
   src/services/       业务编排（供应商、连通性测试、请求日志、首次初始化）
   src/agents/         Agent 注册表、路径解析、JSON/TOML 保值补丁、预览/应用/还原
   src/routes/         路由薄壳，只做参数校验与调用服务
@@ -89,6 +90,9 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 - 还原只移除"当前值仍等于我们写入值"的键；被用户改过的键保留并作为 `conflicts` 返回。
 - 由我们创建、且还原后没有任何有效内容的文件要删除（`created` 标记 + `isEmptyDocument`），
   避免在用户家目录留空壳 `config.toml` / `{}`。
+- **写前备份放在被改文件的同目录**（`~/.codex/config.toml.bak-<时间戳>`），不是服务数据目录。
+  备份的意义是"改坏了立刻找回"，必须不依赖本服务是否在跑、数据目录是否还在。
+  时间戳精确到毫秒并在冲突时追加序号，**任何一次改动都不覆盖前一份备份**。
 - 新增 Agent：在 `agents/registry.ts` 登记定义（文件角色、相对路径、格式），
   在 `agents/service.ts` 的 `buildPlan` 里补 `writes`，并明确它需要哪种 `apiType` 的供应商。
 
@@ -100,6 +104,11 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 - 网关令牌只存 `tokenHash`（sha256）。`tokenCipher` 是给 Agent 下发用的密文副本，**任何接口都不得返回**。
   完整令牌只在"生成/重置"那一次响应里出现。
 - 口令只存 scrypt 哈希。日志器会按 key 名与正则打码，但不要依赖它 —— 不要主动把密钥放进日志。
+- **`POST /api/agents/:id/apply` 的响应必须脱敏**：直连模式下写进配置的是上游**真实 Key**，
+  而 `binding.files[].values` 里存的就是那份原值，原样返回等于把凭据经接口发出去。
+  预览路径一直脱敏（`maskPreviewSecret`），apply 曾漏掉——两处必须用同一条敏感键规则
+  （`isSensitiveValueKey`）。注意**只脱敏响应、不脱敏存储**：`revert` 依赖
+  "当前值是否仍等于我们写入的值"做比对，存了打码值会让还原全部变成冲突。
 
 ### 6. 网关转发的三个已知坑
 
@@ -139,13 +148,22 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 - `POST /api/setup` 与 `GET /api/setup/status` 是 `public` 路由（此时还没有账号可用），
   门禁是令牌本身；新增此类接口要同样想清楚"凭什么只有部署者能调用"。
 
-### 10. 三种上游协议严格匹配，不做转换
+### 10. 三种上游协议默认严格匹配，跨协议转发按需自动开启
 
 - `ApiType` 有三值：`openai`（Chat Completions）、`anthropic`（Messages）、`responses`（Responses API）。
 - 路径与协议一一对应：`/v1/chat/completions → openai`、`/v1/messages → anthropic`、
-  `/v1/responses → responses`。**不匹配一律 501**，不要为了"能跑通"而放宽成直通。
+  `/v1/responses → responses`。**默认不匹配一律 501**，不要为了"能跑通"而放宽成直通。
   `/v1/responses` 早期是"不限协议"的直通，会把 Responses 请求发给只支持 Chat 的上游，
   症状是上游报参数错误——这条已被真实问题踩过。
+- **跨协议转发由设置项 `protocolConversion` 控制**（默认 `false`）。
+  打开后 `/v1/responses → openai` 由 `gateway/convert/` 双向转换（含工具调用与流式）；
+  其余组合一律仍然 501——只有 Responses→Chat 有转换器，别顺手把它做成"任意协议互转"。
+- **协议不匹配时自动开启**：当路径要求 `responses`、实例里**没有**启用的 `responses`
+  供应商、但有启用的 `openai` 供应商时，网关自动打开 `protocolConversion` 并持久化。
+  触发条件必须这么窄——如果已经能用 responses，或转换解决不了（如 `/v1/messages`
+  命中 openai），自动打开只会误导用户。
+  自动改动会写响应头 `x-llmapi-auto-conversion: 1`，用户得能发现行为被改了。
+  这个头必须用 `reply.raw.setHeader`，转发是直接写 `reply.raw` 的。
 - 路径清单与协议要求只在 `gateway/forward.ts` 定义一次（`GATEWAY_PATHS` / `requiredApiType`），
   `routes/gateway.ts` 必须 import 复用，不要复制一份。
 - `openai` 与 `responses` 共用 Bearer 鉴权，只有 `anthropic` 用 `x-api-key` +
@@ -156,7 +174,56 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 - `requires_openai_auth` 必须是 **TOML 布尔 `true`**（`DesiredWrites.raw = true` 原样写入），
   写成字符串 `"true"` 是类型错误。
 
-### 11. 向上游查模型列表
+### 11. 连接方式：走网关 vs 直连上游
+
+`agentTargets[<agentId>]`（默认全部 `gateway`）决定写进该 Agent 配置文件的是哪一套东西。
+**按 Agent 分开存**：Codex 与 Claude Code 协议不同、用途也可能不同，一个全局开关会强迫
+两者同步切换。
+
+| | `gateway` | `direct` |
+| --- | --- | --- |
+| `base_url` | `PUBLIC_BASE_URL/v1` | 供应商自己的 `baseUrl` |
+| 凭据 | 网关令牌 `lam_...` | 供应商的真实上游 Key |
+| 模型名 | 别名 `lam-<key>/<model>` | 裸模型名 |
+| 模型目录 | 生成本地 catalog，条目是**该 Agent 协议可用的别名** | 同样生成，条目是**上游裸模型名** |
+
+- **直连必须明确指定供应商**（`directProviderId`）。多供应商时按 priority 自动挑是错的：
+  用户既看不到选了谁也无法干预，而这会把那家的地址和 Key 直接写进配置。
+  未指定时返回 400 让用户去选；保存接口要在写入前就校验协议匹配与是否停用。
+- **目录只列该 Agent 能用的协议**（Codex→`responses`，Claude Code→`anthropic`）。
+  列出 openai 供应商的别名会让用户选中后必然 501——把错误推给用户，而不是在列表里就排除。
+  **例外**：开启 `protocolConversion` 后，Codex 的目录也要包含 `openai` 供应商的别名，
+  否则用户开了开关却看不到对应模型，会以为功能没生效。两处必须一起改。
+- **两种模式都要生成 `model_catalog_json`**，只是条目不同。直连不生成是错的：
+  Codex 拿不到本地目录会回退到**内置官方模型列表**，`/model` 里出现 GPT-6.x，
+  与用户配的供应商无关（真实踩过）。
+- 直连的配置里不能残留任何指向网关的字段：要删除 `model_catalog_url`（它指向网关）。
+  只"不写"不够，上一模式的值会残留。
+- 反向同理：切回网关要重新生成别名目录并写回 `model_catalog_url`。
+- `generatedFiles` 里 `content` 缺省表示**删除该文件**，这是清理上一模式产物的机制。
+- 直连会把上游真实 Key 写进 Agent 的凭据文件。预览必须脱敏（已有 `maskPreviewSecret`），
+  **不要让明文 Key 经任何接口返回**。
+- 这是租户级全局设置，改动要重新 apply 才生效。**前端切换模式时不自动 apply**
+  （刚切到直连还没选供应商时 apply 会 400，等于拿报错当交互反馈）；
+  只有「选定直连供应商」与「web_search 开关」这两处会自动补一次 apply。
+
+### 12. 「Approve for me」的模型只能在网关侧改写
+
+Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没有任何配置项能改：
+
+- 目录条目 `auto_review_model_override` → **无效**：该字段在 `ModelInfo` 上有，
+  但 `select_review_model` 收的是 `&[ModelPreset]`，而 `impl From<ModelInfo> for ModelPreset`
+  没搬这个字段。字段存在 ≠ 生效。
+- `review_model`（config.toml）→ 只给 `/review` 用，guardian 路径不读它。
+- `model_providers.*` → 没有相关字段。
+
+可行做法是**在网关侧改写**：走网关时 `model` 会原样出现在请求体里，把它当占位名换掉。
+判定必须两个条件同时满足——请求头 `x-codex-turn-metadata` 的
+`turn_trigger === "guardian_review"`，且 `model === APPROVAL_REVIEW_MODEL_NAME`。
+只看模型名会误伤"用户真拿这个模型聊天"，只看 turn_trigger 会在占位名随版本变化时改错。
+改写后不做故障转移（换家供应商多半没同名模型）。
+
+### 13. 向上游查模型列表
 
 - 拉取模型列表（`fetchProviderModels`）接受的是**表单临时值**，不是 `ProviderRecord`：
   新增供应商时还没有 id、也还没落盘，而"先试连再保存"正是该功能的用途。
@@ -173,7 +240,7 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 138 + web 9 = 147 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 178 + web 9 = 187 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
@@ -183,13 +250,17 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
 - 改到配置默认值 → 补 `server/test/config.test.ts`（当前 `ADMIN_USERNAME` 默认 `admin`）。
 - 改到首次初始化 → 补 `server/test/setup.test.ts`（令牌校验、一次性、重放拒绝、重启幂等）。
 - 改到协议匹配 → 补 `server/test/gateway.test.ts` 的 `requiredApiType` 断言 + smoke 的双向 501 用例。
+- 改到协议转换 → 补 `server/test/convert.test.ts`（请求/响应/流式三向映射），
+  并确认 smoke 里三条都在："自动开启后打通 Chat 上游"、"有 responses 供应商时不自动开"、
+  "转换解决不了时仍 501 且不改设置"。
 - 改到模型拉取 → 补 `server/test/smoke.test.ts`（三种协议、`/v1` 拼接、借用已保存 Key、上游不可达不 500）。
 - 改了品牌名 / 对外文案 → 同步 `README.md`、`web/index.html`、登录页与侧边栏。
 
 ## 明确不做的事
 
-- 不做协议转换：路径与供应商协议不匹配时返回 501（如 `/v1/messages` 命中 `openai` 供应商、
-  `/v1/responses` 命中非 `responses` 供应商），别偷偷转发到错误路径。
+- 不做**任意**协议互转：只有 `/v1/responses → openai`（Chat）这一个方向有转换器。
+  `/v1/messages`、`/v1/chat/completions` 等其余组合一律 501，
+  即便 `protocolConversion` 开着也不会转换——别偷偷转发到错误路径。
 - 不做计费、配额、多用户 UI、MCP/Skills/会话管理、桌面打包。
 - 不把 JSON 文件存储换成数据库，除非任务明确要求；Repository 接口已就位，替换时不要改路由契约。
 - 不要引入第二套状态管理或数据请求库来"重写"现有 `useAsync`；当前页面刻意保持零额外依赖。

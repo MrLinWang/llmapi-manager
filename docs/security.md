@@ -118,7 +118,8 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
   （或 `AGENT_HOME_DIR` 下的对应路径）。
 - 其中 `llmapi-model-catalog.json` 是 Codex 的模型目录，由我们从当前聚合别名**整份生成**
   （不做按键合并）；应用前若已存在会被备份，还原时按"是否由我们创建"决定删除或重置为 `{}`。
-- 写入前备份到 `data/tenants/<tenantId>/backups/<agentId>/`。
+- 写入前在**被改文件的同目录**留一份 `*.bak-<时间戳>`（如 `~/.codex/config.toml.bak-...`）——
+  备份要能在本服务停掉、数据目录丢失时仍然可用。
 - 只改自己拥有的键，其余内容原样保留；文件解析失败则中止，不写空文件。
 - 还原只撤销"值仍等于我们写入值"的键，被手改过的键保留并报告冲突。
 - **会结束进程**：`POST /api/agents/:id/stop-processes`（权限 `agents:apply`）会执行
