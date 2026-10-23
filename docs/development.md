@@ -44,12 +44,14 @@ npm run dev -w web        # vite，热更新
 | `server/test/config.test.ts` | 配置默认值（`ADMIN_USERNAME=admin`、日志目录与滚动参数）与非法值回落 |
 | `server/test/setup.test.ts` | 首次初始化：令牌校验、一次性、重放拒绝、重启幂等、`ADMIN_PASSWORD` 应急通道 |
 | `server/test/gateway.test.ts` | 上游 URL 拼接、三条路径的协议匹配、协议文案句式、令牌哈希比对 |
+| `server/test/convert.test.ts` | Responses ←→ Chat 的请求 / 响应 / 流式三向映射，含工具调用与有损字段 |
+| `server/test/apiToken.test.ts` | API 令牌生成与校验：`api_` 前缀区分、sha256 比对与 `timingSafeEqual`、空 scopes / 过期 / 吊销一律拒绝、`lastUsedAt` 60 秒节流、对外视图不含 hash |
 | `server/test/agents.test.ts` | JSON/TOML 补丁（含 `raw` 布尔）、Codex 模型目录生成、备份、还原冲突、空壳文件清理 |
 | `server/test/processes.test.ts` | Codex 进程识别（TUI / `exec` / 不误伤 `mycodex` 与一次性命令）、`etime` 解析 |
 | `server/test/security.test.ts` | 权限矩阵、租户隔离、凭据编解码、路由登记 |
 | `server/test/storage.test.ts` | 原子写、损坏隔离、未来版本隔离 |
 | `server/test/logger.test.ts` | 运行日志落盘、级别阈值、打码、按大小滚动与保留个数 |
-| `server/test/smoke.test.ts` | 端到端：登录、供应商（含三种 `apiType` 与拉取模型列表）、令牌、转发（含流式/回退/501 双向/4xx 透传）、Agent（含模型目录与 `web_search` 开关、结束进程）、越权、持久化 |
+| `server/test/smoke.test.ts` | 端到端：登录、供应商（含三种 `apiType` 与拉取模型列表）、网关令牌、API 令牌（生命周期 / 收窄 403 / 不能改口令与建令牌 / 吊销即失效）、转发（含流式/回退/501 双向/4xx 透传/自动开启转换）、诊断接口（默认 404、开启后路由预演与自检清单、只读令牌 403）、Agent（含模型目录与 `web_search` 开关、结束进程）、越权、持久化 |
 | `web/test/pages.test.tsx` | 页面装配：登录、首次设置、供应商（含获取模型与标签片段编辑）、模型（含三种协议选项与文案）、Agent、概览（jsdom + 假 fetch） |
 
 `smoke.test.ts` 会起三个假上游（正常 200、永远 500、固定 4xx），用系统分配的随机端口（`port=0`），
@@ -59,7 +61,7 @@ Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真
 `processes.test.ts` 只测纯函数（命令行分类与 `etime` 解析），不会真的给任何进程发信号。
 日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**。
 
-当前基线：219 项（server 209 + web 10）。
+当前基线：222 项（server 212 + web 10）。
 
 ```bash
 npm test                                # 全部
@@ -159,6 +161,10 @@ curl -s localhost:8787/api/health | jq      # 启动告警
 - 改了协议匹配或 `apiType` → `gateway.test.ts` 的 `requiredApiType` 断言 +
   `smoke.test.ts` 的双向 501 用例（`/v1/responses` 打 `openai` 供应商、`responses` 供应商打
   `/v1/chat/completions`）通过。
+- 改了鉴权 / 权限 → `apiToken.test.ts`（令牌生命周期）与 `smoke.test.ts` 的
+  「令牌能调管理接口」「越权 403」「令牌不能改口令 / 建令牌」「吊销后失效」都通过。
+- 改了诊断接口 → `smoke.test.ts` 里「默认关闭返回 404」与「开启后路由预演/自检清单」通过，
+  且确认它复用的是 `selection.ts` / `convert/` / `upstreamPathFor`，没有自己重算一遍。
 - 改了行为 → `docs/` 对应章节同步更新。
 - 没有把 `data/`、`.env`、`node_modules/`、`dist/` 加进版本库。
 

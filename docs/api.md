@@ -501,10 +501,12 @@ Claude Code 恒为 0）。写成功不等于生效：这些进程内存里还是
     { "code": "plaintext_credentials",
       "message": "未设置 DATA_ENCRYPTION_KEY，供应商 API Key 将以明文保存在 data 目录…" }
   ],
-  "dataDir": "/path/to/data",
   "gatewayBaseUrl": "http://127.0.0.1:8787/v1"
 }
 ```
+
+**不含** `dataDir`：这是 public 接口，返回本机绝对路径等于把部署结构告诉任何扫到这个端口的人。
+需要路径请看启动日志或 `docs/configuration.md`。
 
 可能的 `code`：`corrupt_file`、`plaintext_credentials`、`credential_decrypt_failed`、
 `setup_pending`。
@@ -525,13 +527,25 @@ curl -X POST http://127.0.0.1:8787/api/tokens \
 curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 ```
 
+> ⚠️ **明文只在创建响应的 `token` 字段里出现这一次。** 关掉弹窗、刷新页面或丢了响应体，
+> 就只能吊销重建 —— 服务端只存 `sha256`，没有任何接口能再把它读出来。
+> 控制台的令牌卡片也是这样：明文显示一次，之后列表里只有 `prefix`…`tail`。
+
 **与网关令牌（`lam_`）是两套东西，不要混用**：
 
 | | API 令牌（`api_`） | 网关令牌（`lam_`） |
 | --- | --- | --- |
 | 调用面 | `/api/*` 管理面 | `/v1/*` 推理转发 |
 | 权限模型 | scopes（可收窄） | 无，只能转发 |
-| 存放 | `data/tenants/<id>/api-tokens.json` | 租户设置里 |
+| 存放 | `data/tenants/<id>/api-tokens.json` | 租户设置里（`settings.json`） |
+| 认的请求头 | `Authorization: Bearer` | `Authorization: Bearer` 或 `x-api-key` |
+
+混用的后果很直接，两种情况都是 401（不是 403）：
+
+- 拿 `lam_` 去调 `/api/*` → 管理面只认 `api_` 前缀，`lam_` 被当成无效凭据。
+- 拿 `api_` 去调 `/v1/*` → 网关只比对租户设置里的网关令牌哈希，`api_` 永远匹配不上。
+
+前缀分开就是为了让日志与用户心智都能一眼区分；出问题时也能从日志判断是哪一类凭据泄露。
 
 ### 接口
 
@@ -539,25 +553,40 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 | --- | --- | --- | --- |
 | GET | `/api/tokens` | `settings:read` | 列出令牌，含 `availableScopes`（前端据此渲染勾选项） |
 | POST | `/api/tokens` | `settings:write` | 创建；**仅此响应返回明文** |
-| DELETE | `/api/tokens/:id` | `settings:write` | 吊销（置 `revokedAt`，不物理删除） |
+| DELETE | `/api/tokens/:id` | `settings:write` | 吊销（置 `revokedAt`，不物理删除）；**幂等** |
+
+注意 `GET` 要 `settings:read` 而创建/吊销要 `settings:write`：一个只读令牌能看令牌列表
+（含每个令牌的 scopes），但既不能创建也不能吊销。
 
 创建参数：
 
 | 字段 | 说明 |
 | --- | --- |
-| `name` | 必填，≤64 字，列表里靠它区分 |
-| `scopes` | 必填，权限名数组，不能为空 |
-| `expiresAt` | 可选 ISO 时间；省略或 `null` 表示不过期 |
+| `name` | 必填，**≤64 字**（超出返回 400），列表里靠它区分；首尾空白会被 trim |
+| `scopes` | 必填，权限名数组，**不能为空**；未知权限名返回 400，重复项会自动去重 |
+| `expiresAt` | 可选 ISO 时间；省略、`null` 或空字符串表示不过期。**必须是合法时间且晚于当前时间**，否则 400 |
+
+`expiresAt` 的校验是"必须晚于现在"而不是"允许过去"：填一个过去的时间不会立刻创建一个
+已失效的令牌，而是直接报错。服务端会把它规范化成 ISO 字符串再存。
+
+吊销是幂等的：对一个已吊销的 id 再发 `DELETE` 返回 200 和当前 `tokenView`，不报错。
+所以脚本可以无脑重试。未知 id 才返回 404。
 
 ### 边界
 
-- **只能收窄、不能提权**：`scopes` 必须是创建者自身权限的子集，否则 403。
-- `users:manage` / `tenants:manage` 不允许授予令牌（当前没有接口使用，开放只有风险）。
+- **只能收窄、不能提权**：`scopes` 必须是创建者自身权限的子集，否则 403
+  （错误信息指明"该 API 令牌缺少权限 X"，不会回显角色——令牌没有角色语义）。
+- `users:manage` / `tenants:manage` 不允许授予令牌（当前没有接口使用，开放只有风险），
+  且 `availableScopes` 里也不会出现这两项。
 - **令牌不能创建或吊销令牌**：否则一个即将被吊销的令牌可以先给自己留后门。
-- **令牌不能调用 `authenticated` 级接口**：改口令必须由真人会话完成，
+  用令牌调这两个接口返回 403，必须用登录会话。
+- **令牌不能调用 `authenticated` 级接口**：`/api/auth/me`、`/api/auth/password` 都拒绝令牌，
   否则凭据泄露后可以永久接管账号，吊销令牌也救不回来。
 - 明文只在创建响应里出现一次，之后只存 sha256；列表只给 `prefix`/`tail`。
-- `lastUsedAt` 按 60 秒节流更新（每次请求都写盘会让高频脚本把磁盘打得很差）。
+- `lastUsedAt` 按 60 秒节流更新（每次请求都写盘会让高频脚本把磁盘打得很差），
+  实际精度是"分钟级"，不能用它做精确审计。
+- 令牌按租户分文件存放：当前只有默认租户，所以鉴权时直接查 `t_default`。
+  做多租户需要一张全局 `hash → tenantId` 索引，否则得遍历所有租户。
 
 ## 信息接口
 
@@ -574,8 +603,16 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 ## 诊断接口（`ENABLE_DIAGNOSTICS=1` 才开启）
 
 这段接口是为**排查"功能到底有没有生效"**而存在的，不是日常运维必用。
-默认关闭：未设置 `ENABLE_DIAGNOSTICS=1` 时全部返回 404（不是 403 ——
-不告诉探测者"这里有个开关可以打开"）。
+默认关闭：未设置 `ENABLE_DIAGNOSTICS=1` 时返回 404。
+
+> 关于"404 是为了隐藏功能"这个说法要打个折扣：404 的响应体里其实写明了
+> `诊断接口未启用，请设置 ENABLE_DIAGNOSTICS=1 后重启`，探测者照样知道开关存在。
+> 用 404 而不是 403 的实际理由是**语义**——这里拒绝的原因与调用者身份无关（是功能没开），
+> 而 403 应该留给"你没权限"。
+>
+> 另有一处顺序要留意：404 是在 handler 里抛的（`assertEnabled`），权限判定在更早的
+> `onRequest` 钩子里。所以只有 `providers:read` 的令牌来调，拿到的是 **403**（缺
+> `settings:write`），根本走不到 404。对有权限的调用方，关闭时才是 404。
 
 为什么需要它们：本仓库的行为横跨「设置项 → 选路 → 协议转换 → 上游 → 回转」四层，
 中间任何一层判断错，症状都是**上游不报错、客户端也不报错，只是结果不对**
@@ -588,6 +625,21 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 | GET | `/api/diagnostics/check` | `settings:write` | 自检清单：找出互相矛盾的配置 |
 | GET | `/api/diagnostics/converter` | `settings:write` | 转换器纯函数自检，不依赖供应商 |
 
+四个接口**全部**要求 `settings:write`（不是 `settings:read`）：它们会暴露 prompt 片段、
+能真的打上游，只读权限不该够用。
+
+### 公共参数
+
+两个 POST 接口都接受：
+
+| 字段 | 说明 |
+| --- | --- |
+| `model` | 必填，非空字符串。别名（`lam-xxx/model`）或裸模型名都行 |
+| `path` | 可选，默认 `/responses`。可写 `/responses` 或 `/v1/responses`，也接受 `/chat/completions`、`/messages` |
+| `body` | 仅 `/forward`：替换请求体（见下） |
+
+`path` 会先剥掉 `/v1` 前缀再校验，不在 `GATEWAY_PATHS` 里就返回 400 并列出可选值。
+
 ### `/api/diagnostics/route`
 
 ```bash
@@ -598,28 +650,78 @@ curl -X POST http://127.0.0.1:8787/api/diagnostics/route \
 
 返回里最有用的几个字段：
 
-- `primary.reason`：为什么选它（`alias` / `default-provider` / `approval-placeholder` / `priority`）
+- `ok`：**这次真实请求会不会成功**。它同时考虑"协议匹配"与"会不会转换"，
+  不是简单的"选到了供应商"。
+- `primary.reason`：为什么选它。取值 `alias`（别名明确指向）/ `default-provider`（默认供应商）
+  / `approval-placeholder`（审批占位名被改写）/ `priority`（按协议优先 + priority 排序取第一）
 - `primary.convertResponsesToChat`：这次要不要做协议转换
-- `primary.wouldUseUpstreamUrl`：**上游实际会收到的 URL**。开启转换时它是
+- `primary.wouldUseUpstreamUrl`：**上游实际会收到的 URL**。开启转换时它的路径部分是
   `/chat/completions` 而不是 `/responses` —— 这个字段错了就说明路径改写没生效
-- `excluded[]`：被排除的供应商**及原因**。回答"我明明有三家供应商，为什么说没有"
+  （它由 `upstreamUrl(provider, upstreamPathFor(...))` 算出，与真实转发同一个函数）
+- `primary.apiTypeMatchesPath`：供应商协议是否与路径匹配。`false` 且没有转换，就必然 501
+- `primary.authHeaderKind`：上游会用 `authorization: Bearer` 还是 `x-api-key`
+- `wouldAutoEnableConversion`：**这次真实请求会顺手打开 `protocolConversion`**。
+  真实网关在"路径要 responses、没有启用的 responses 供应商、但有启用的 openai 供应商"时
+  会自动开启并持久化。诊断**不写设置**，只在内存副本上模拟，所以你可以放心反复预演；
+  但要把这个字段当成"我的设置会被改"的预告。
+- `wouldBeRejected`：不为 null 就是"真实网关会返回 501"的完整理由；为 null 表示能过
+- `excluded[]`：被排除的供应商**及原因**（`providerId` / `providerName` / `reason`）。
+  回答"我明明有三家供应商，为什么说没有"
+
+> 为什么诊断要模拟"自动开启"：如果它只在当前设置下算，就会在"只有 openai 供应商 +
+> 开关关着"时回答"直发 /responses、不需要转换"，而真实网关已经自动开了开关、改走
+> `/chat/completions` —— 结论方向完全相反，比没有诊断更误导。
+
+选路失败时（`ok: false`）返回 `reason`、`excluded` 和 `hint`：
+当路径要 `responses`、转换又关着时，`hint` 会直接提示"可以开 `protocolConversion`"。
 
 ### `/api/diagnostics/forward`
 
 真的打一次上游，把 `select` → `convert-request` → `upstream` → `convert-response`
-四步的中间结果都返回。其中 `convert-request.body` 是**上游收到的完整请求体**，
-`convert-response.body` 是**转回 Responses 形状后 Codex 会收到的结果**。
+四步的中间结果都返回。
 
-> ⚠️ 这个接口会回显 prompt 片段，也会真实消耗上游额度。用完请把开关关掉。
+**`convert-request.body` 不是客户端请求体的原样拷贝**，而是"转换并规范化之后、准备发给上游的
+那个对象"。它会：
 
-转换有损时 `convert-request.dropped` 会列出被丢弃的字段（例如 `reasoning.summary`、
-图片的 `file_id` 形态）。这是判断"某个功能为什么没效果"的直接依据。
+- 把 `model` 换成上游模型名（`select` 阶段算出的 `upstreamModel`）；
+- 走转换时由 `responsesToChatRequest` 重写形状：`input` → `messages`、工具从扁平改嵌套、
+  `max_output_tokens` → `max_tokens`；
+- **补上请求里没有的字段**：`stream`（恒有，默认 `false`）、以及 `stream: true` 时自动加的
+  `stream_options: { include_usage: true }`（不加它上游的用量统计永远是 0）。
+
+被丢掉的字段列在 `convert-request.dropped` 里（例如 `reasoning.summary`、`tools.web_search`），
+这是判断"某个功能为什么没效果"的直接依据。没走转换时该步骤带 `skipped: true`。
+
+`convert-response.body` 是**转回 Responses 形状后 Codex 会收到的结果**；不转换时同样 `skipped`。
+
+请求体用 `body` 字段整体替换，默认是 `{ "model": <model> }`：
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/diagnostics/forward \
+  -H 'Authorization: Bearer api_…' -H 'content-type: application/json' \
+  -d '{"model":"lam-my-chat/gpt-x","path":"/responses",
+       "body":{"model":"ignored","input":"hi","tools":[{"type":"function","name":"shell"}]}}'
+```
+
+> ⚠️ 两个成本：这个接口会回显 prompt 片段，也会**真实消耗上游额度**。用完请把开关关掉。
+> 另外它**不支持流式**：即使你在 `body` 里传 `"stream": true`，它也是把上游响应当整段
+> 读完再处理。走转换时这一步会拿 SSE 文本去 `JSON.parse`，因此 `convert-response`
+> 会 `ok: false`；不走转换时你能在 `upstream.bodyPreview` 里看到 RAW SSE 文本。
+> 要验证流式请直接打网关。
+
+其他实现细节：上游请求有 60 秒超时；`upstream.bodyPreview` 只截前 4000 字符并把
+`truncated` 标出来（避免超大响应把诊断接口本身拖垮）；上游不可达时返回
+`ok: false` + `summary: '上游不可达，真实请求会返回 502'`。
 
 ### `/api/diagnostics/check`
 
 把"应该一致"的几处放在一起比对，专门抓这类问题：设置开着但目录没跟上、
 目录里有用户选中后必然 501 的条目、审批模型映射配在了直连模式下（不生效）。
 每条 `check` 都带 `fix` 建议。
+
+四项检查：`Codex 有可用的上游协议`、`Codex 模型目录不含用不了的协议`、
+`审批模型映射的生效条件`（或在直连模式下的告警）、`别名都指向现存供应商`。
+另带 `snapshot`：供应商按协议分布、别名数、关键设置、Agent 列表。
 
 ### `/api/diagnostics/converter`
 

@@ -73,8 +73,8 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 | `gateway:read` / `gateway:write` | 查看网关信息 / 生成与重置网关令牌 |
 | `agents:read` / `agents:apply` | 预览 / 应用与还原 Agent 配置；`agents:apply` 还能**结束本机 Codex 进程** |
 | `logs:read` | 查看请求日志与统计 |
-| `settings:read` / `settings:write` | 查看 / 修改默认供应商与模型、Codex 行为开关 |
-| `users:manage` / `tenants:manage` | 预留给多用户与多租户管理（当前无对应接口） |
+| `settings:read` / `settings:write` | 查看 / 修改默认供应商与模型、Codex 行为开关；**API 令牌的查看 / 创建 / 吊销**也归这里 |
+| `users:manage` / `tenants:manage` | 预留给多用户与多租户管理（当前无对应接口，也不可授予 API 令牌） |
 
 角色映射：
 
@@ -84,13 +84,22 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 | `admin` | 除 `gateway:write`、`users:manage`、`tenants:manage` 外的管理权限 |
 | `member` | 仅 `gateway:read` |
 
+> `member` 是网关令牌解析出的角色，它只够消费模型。**API 令牌不是这个角色**：
+> 令牌解析出的 `role` 虽然也是 `member`，但判定时只看 `scopes`、忽略角色
+> （见下节「只收窄、不提权」）。所以一个带 `providers:read` 的 API 令牌能读供应商，
+> 而网关令牌连 `/api/providers` 都进不去。
+
 强制机制：
 
 - 每条 `/api` 路由必须经 `defineRoute` 注册并声明 `access`；
   `registerApiGuard` 在 `onRequest` 阶段解析 `Principal` 并调用 `assertCan`。
+- 管理面同时接受会话 cookie 与 `Authorization: Bearer api_…`，**会话优先**：
+  两者都带时按会话身份裁决，不会被附带的 Authorization 头改变语义。
 - `RouteRegistry.assertAllDeclared()` 在启动时自检；未登记的路由请求会直接 500，
   **不存在默认放行**。请求未匹配到任何路由时（`routeOptions.url` 为空）交给 404 处理，不误判。
-- 越权返回 403 `{ "error": { "code": "forbidden", "message": "角色 X 缺少权限 Y" } }`，且不执行任何写操作。
+- 越权返回 403，且不执行任何写操作。错误信息分两种：
+  会话是 `角色 X 缺少权限 Y`，API 令牌是 `该 API 令牌缺少权限 Y`
+  —— 令牌没有角色语义，回显角色会把排查方向带偏。
 - `agents:apply` 的作用范围**不止写文件**：它还会通过 `POST /api/agents/:id/stop-processes`
   结束本机上的 Codex 进程（`SIGTERM`，必要时 `SIGKILL`）。这是"改完配置要让客户端重读"的必要一步，
   但它意味着持有该权限的账号（`owner` 与 `admin`）能让同一台机器上的 Codex 会话中断。
@@ -135,6 +144,8 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 | 监听 `0.0.0.0` 且无 TLS | 放在 HTTPS 反代后；Cookie 在 https 下自动加 `Secure` |
 | 未设 `DATA_ENCRYPTION_KEY` | 启动日志 + `/api/health` 持续告警；建议设置 |
 | 网关令牌泄漏 | 重置令牌；令牌只存哈希，泄漏面仅限使用方能消费模型 |
+| **API 令牌泄漏** | 立即 `DELETE /api/tokens/:id` 吊销（记录保留可追溯）；泄漏面等于它 `scopes` 里的那些权限。所以按需最小授权、能设 `expiresAt` 就设 |
+| `ENABLE_DIAGNOSTICS=1` 误开在生产 | 它会回显 prompt 片段并真实打上游；排查完就关掉（未设置时接口返回 404，不是常开项） |
 | 服务进程权限过大 | 它以当前 OS 用户的身份运行，能写该用户的家目录、并能结束该用户的 Codex 进程；考虑用专用用户运行 |
 | 数据目录被他人读取 | 文件权限 0600；确保 `data/` 所在目录不被其他人遍历 |
 | 多实例共享 `data/` | 不支持，会造成写入竞争；单实例部署 |
@@ -154,25 +165,40 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 日志里能一眼看出是哪类凭据泄露，处置方式也不同（前者吊销令牌即可，
 后者还要检查 Agent 配置里是否被写进了上游真实 Key）。
 
+混用的结果是 401，不是"部分可用"：
+
+- `lam_` 调 `/api/*`：管理面只从 `Authorization: Bearer` 里接受 `api_` 前缀的令牌，
+  `lam_` 会被当成无效凭据（`parseBearerToken` 直接返回 null）。
+- `api_` 调 `/v1/*`：网关走的是 `gateway/auth.ts`，只比对租户设置里的网关令牌哈希，
+  `api_` 永远匹配不上。
+
+也就是说**没有哪套令牌能同时干两件事**。想让脚本既能转发又能管配置，就建两个。
+
 ### 只收窄、不提权
 
-令牌的 `scopes` 必须是创建者权限的子集，创建时校验。判定时**只看 scopes、忽略角色**：
-若还叠加角色权限，那么创建一个"只读令牌"反而会拿到创建者的全部权限，收窄就形同虚设。
+令牌的 `scopes` 必须是创建者权限的子集，创建时校验。判定时**只看 scopes、忽略角色**
+（`policy.ts` 的 `can`）：若还叠加角色权限，那么创建一个"只读令牌"反而会拿到创建者的全部权限，
+收窄就形同虚设。
+
+`users:manage` / `tenants:manage` 不允许授予任何令牌：当前没有接口使用这两项，
+开放只会扩大风险面。
 
 ### 为什么令牌不能改口令
 
 `authenticated` 级接口（`/api/auth/me`、`/api/auth/password`）假设操作者是真人会话。
-令牌若能改口令，凭据泄露后攻击者可以永久接管账号——吊销令牌也救不回来（口令已被改）。
-因此令牌访问这类接口一律 403。
+令牌能被用来读 `me` 本身危害不大，但同一个级别里还有改口令，两者共用一条规则：
+**令牌访问 `authenticated` 级接口一律 403**。这样做的理由是改口令——凭据泄露后攻击者
+可以永久接管账号，吊销令牌也救不回来（口令已被改）。
 
 同理，令牌不能创建或吊销令牌：否则一个即将被吊销的令牌可以先给自己留一个后门。
 
 ### 存储
 
 - 只存 `sha256(token)`，比对用 `timingSafeEqual`（防时序侧信道）。
-- 明文只在创建响应里出现一次，不写日志、不进列表。
+- 明文只在创建响应里出现一次，不写日志、不进列表。**丢了就找不回**，只能吊销重建。
 - 数据文件 `data/tenants/<id>/api-tokens.json` 由 `jsonFile.ts` 原子写入、权限 0600。
 - 吊销是置 `revokedAt` 而非删除：保留记录才能解释"某个令牌曾经存在过"。
+- 空 `scopes` 的令牌在校验阶段就被拒绝，避免出现"创建了但什么都干不了"的困惑令牌。
 
 ### 已知限制
 

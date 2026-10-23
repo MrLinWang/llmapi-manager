@@ -24,6 +24,7 @@
 | `LOG_MAX_FILES` | `5` | 保留的历史日志文件个数 |
 | `AGENT_HOME_DIR` | OS 家目录 | Agent 配置根目录（其下为 `.codex`、`.claude`） |
 | `CODEX_HOME` | 无 | 仅用于定位 Codex 配置目录（结束 Codex 进程时设进子进程环境）。设了就优先于 `AGENT_HOME_DIR/.codex` |
+| `ENABLE_DIAGNOSTICS` | 无（关闭） | 设为 `1` 才开启 `/api/diagnostics/*`；未开启时这四个接口返回 404 |
 
 `CODEX_HOME` 是 Codex 自己的约定变量，本服务只读不算：它决定 `codex app-server daemon stop`
 在哪个目录下执行。目录不存在时不会强行设置（codex 会对不存在的路径报错，而"本机还没配过 Codex"
@@ -89,6 +90,7 @@ data/                                # 默认即 server/data，见上表 DATA_DI
     ├── providers.json                供应商
     ├── settings.json                 默认供应商/模型、网关令牌、Codex 行为开关
     ├── agents.json                   下发快照
+    ├── api-tokens.json               程序化访问用的 API 令牌（只存 sha256）
     └── requests.jsonl                请求日志
 ```
 
@@ -170,36 +172,49 @@ npm start
 
 ### `api-tokens.json`
 
-程序化访问用的 API 令牌（`api_` 前缀），格式：
+程序化访问用的 API 令牌（`api_` 前缀），位于 `data/tenants/<id>/api-tokens.json`。
+与其他数据文件一样带 `{ schemaVersion, data }` 外层信封，令牌数组在 `data.tokens` 里：
 
 ```json
 {
   "schemaVersion": 1,
-  "tokens": [
-    {
-      "id": "tok_…",
-      "name": "CI 脚本",
-      "tokenHash": "<sha256>",
-      "prefix": "api_abc1234",
-      "tail": "x9Yz",
-      "scopes": ["providers:read", "logs:read"],
-      "createdBy": "u_…",
-      "createdAt": "2026-10-24T00:00:00.000Z",
-      "lastUsedAt": null,
-      "expiresAt": null,
-      "revokedAt": null
-    }
-  ]
+  "data": {
+    "tokens": [
+      {
+        "id": "tok_…",
+        "tenantId": "t_default",
+        "name": "CI 脚本",
+        "tokenHash": "<sha256>",
+        "prefix": "api_abc1234",
+        "tail": "x9Yz",
+        "scopes": ["providers:read", "logs:read"],
+        "createdBy": "u_…",
+        "createdAt": "2026-10-24T00:00:00.000Z",
+        "lastUsedAt": null,
+        "expiresAt": null,
+        "revokedAt": null
+      }
+    ]
+  }
 }
 ```
 
-只存哈希，不含明文。可直接删除整个文件来清空所有令牌（需重启服务）。
+只存 `sha256(token)`，不含明文，也无法从文件还原出令牌。`prefix` 是前 11 位（含 `api_`）、
+`tail` 是后 4 位，两者合起来足够在列表里认出是哪一个。
+
+删除整个文件即可清空所有令牌，**不需要重启**：存储没有内存缓存，每次鉴权都重新读盘。
+但正在使用该文件的脚本会立刻 401。更推荐用 `DELETE /api/tokens/:id` 吊销 —— 它会保留记录，
+将来能解释"某个令牌曾经存在过"。
+
+> 注意：`revokedAt` 非 null 的记录会一直留在文件里，不自动清理。
 
 ### `ENABLE_DIAGNOSTICS`
 
-设为 `1` 才开启 `/api/diagnostics/*`（默认关闭）。
+设为 `1` 才开启 `/api/diagnostics/*`（默认关闭；其余任何值都视为关闭，不是"非空即开"）。
 
-这些接口会回显转换后的上游请求体（含 prompt 片段），并能发起真实上游调用。
-它是为排查"跨协议转发到底有没有生效"这类问题临时打开的工具，不是常开项。
-默认关闭 + 未开启时返回 404，避免生产环境多一个探测面。
+这些接口会回显转换后的上游请求体（含 prompt 片段），并能发起真实上游调用 ——
+后者会**真实消耗上游额度**。它是为排查"跨协议转发到底有没有生效"这类问题临时打开的工具，
+不是常开项。默认关闭 + 未开启时返回 404（不是 403：不告诉探测者"这里有个开关"）。
+
+四个接口都要求 `settings:write` 权限，也就是说持有一个只读 API 令牌调不通它们。
 
