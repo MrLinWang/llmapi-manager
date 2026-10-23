@@ -68,13 +68,13 @@ describe('别名生成', () => {
       provider({ id: 'p_2', providerKey: 'beta', name: 'Beta', enabled: false }),
     ]);
     expect(aliases.map((item) => item.alias)).toEqual([
-      'lmm-alpha/gpt-x',
-      'lmm-alpha/gpt-x-mini',
+      'lam-alpha/gpt-x',
+      'lam-alpha/gpt-x-mini',
     ]);
   });
 
   it('别名格式固定', () => {
-    expect(buildAlias('alpha', 'gpt-x')).toBe('lmm-alpha/gpt-x');
+    expect(buildAlias('alpha', 'gpt-x')).toBe('lam-alpha/gpt-x');
   });
 });
 
@@ -85,7 +85,7 @@ describe('别名解析', () => {
   ];
 
   it('解析到具体供应商并改写上游模型名', () => {
-    const result = resolveModel('lmm-alpha/gpt-x-mini', providers);
+    const result = resolveModel('lam-alpha/gpt-x-mini', providers);
     expect(result).toMatchObject({
       kind: 'alias',
       alias: { providerKey: 'alpha', upstreamModel: 'gpt-x-mini', apiType: 'openai' },
@@ -100,24 +100,24 @@ describe('别名解析', () => {
   });
 
   it('未知供应商不回落', () => {
-    const result = resolveModel('lmm-unknown/gpt-x', providers);
+    const result = resolveModel('lam-unknown/gpt-x', providers);
     expect(result.kind).toBe('invalid');
   });
 
   it('已禁用供应商不回落', () => {
-    const result = resolveModel('lmm-beta/gpt-x', providers);
+    const result = resolveModel('lam-beta/gpt-x', providers);
     expect(result.kind).toBe('invalid');
     if (result.kind === 'invalid') expect(result.reason).toContain('禁用');
   });
 
   it('未声明的模型不回落', () => {
-    const result = resolveModel('lmm-alpha/gpt-zzz', providers);
+    const result = resolveModel('lam-alpha/gpt-zzz', providers);
     expect(result.kind).toBe('invalid');
   });
 
   it('格式残缺的别名报错', () => {
-    expect(resolveModel('lmm-alpha', providers).kind).toBe('invalid');
-    expect(resolveModel('lmm-/gpt-x', providers).kind).toBe('invalid');
-    expect(resolveModel('lmm-alpha/', providers).kind).toBe('invalid');
+    expect(resolveModel('lam-alpha', providers).kind).toBe('invalid');
+    expect(resolveModel('lam-/gpt-x', providers).kind).toBe('invalid');
+    expect(resolveModel('lam-alpha/', providers).kind).toBe('invalid');
   });
 });

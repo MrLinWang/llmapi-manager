@@ -1,4 +1,4 @@
-import type { ProviderRecord } from '../domain/provider';
+import type { ApiType, ProviderRecord } from '../domain/provider';
 
 const TIMEOUT_MS = 10_000;
 const MAX_ERROR_SNIPPET = 200;
@@ -11,6 +11,13 @@ export interface ConnectivityResult {
   error?: string;
 }
 
+/** 拉取模型列表所需的参数：表单里填的临时值，不要求供应商已保存。 */
+export interface ModelListTarget {
+  apiType: ApiType;
+  baseUrl: string;
+  apiKey: string;
+}
+
 function trimSnippet(text: string): string {
   const compact = text.replace(/\s+/g, ' ').trim();
   return compact.length > MAX_ERROR_SNIPPET
@@ -18,12 +25,21 @@ function trimSnippet(text: string): string {
     : compact;
 }
 
-function modelsUrl(provider: ProviderRecord): string {
-  return `${provider.baseUrl.replace(/\/+$/, '')}/models`;
+/**
+ * 上游 /models 地址。
+ *
+ * Anthropic 官方把模型列表放在 /v1/models（且需要 anthropic-version 头），
+ * 而 OpenAI 体系常见写法是 baseUrl 已含 /v1，再拼 /models 即可。
+ * 与转发路径一致：baseUrl 自带 /v1 时不重复添加。
+ */
+function modelsUrl(target: ModelListTarget): string {
+  const base = target.baseUrl.trim().replace(/\/+$/, '');
+  const hasV1 = /\/v1$/i.test(base);
+  return `${base}${hasV1 ? '' : '/v1'}/models`;
 }
 
-function authHeaders(provider: ProviderRecord, apiKey: string): Record<string, string> {
-  if (provider.apiType === 'anthropic') {
+function authHeaders(target: ModelListTarget, apiKey: string): Record<string, string> {
+  if (target.apiType === 'anthropic') {
     return {
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
@@ -56,23 +72,25 @@ function extractModels(payload: unknown): string[] | undefined {
 }
 
 /**
- * 请求上游 /models 判断连通性。10s 超时，失败信息截断，
- * 任何异常都不抛出 —— 测试失败不该让接口 500。
+ * 请求上游 /models 拉取模型列表。
+ *
+ * 用表单里的临时值（baseUrl/apiKey/apiType）而不是 ProviderRecord：
+ * 新增供应商时还没有 id、也还没落盘，必须先能试连再保存。
+ * 10s 超时，失败信息截断，任何异常都不抛出 —— 拉取失败不该让接口 500。
  */
-export async function testProviderConnectivity(
-  provider: ProviderRecord,
-  apiKey: string,
+export async function fetchProviderModels(
+  target: ModelListTarget,
 ): Promise<ConnectivityResult> {
   const startedAt = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
-    const response = await fetch(modelsUrl(provider), {
+    const response = await fetch(modelsUrl(target), {
       method: 'GET',
       headers: {
         accept: 'application/json',
-        ...authHeaders(provider, apiKey),
+        ...authHeaders(target, target.apiKey),
       },
       signal: controller.signal,
     });
@@ -99,6 +117,16 @@ export async function testProviderConnectivity(
         error: `响应不是合法 JSON：${trimSnippet(text)}`,
       };
     }
+    if (!models) {
+      return {
+        ok: false,
+        latencyMs,
+        status: response.status,
+        // 上游可能把模型列表放在别的字段里；明确告诉用户"连上了但没认出结构"，
+        // 而不是让界面显示一个空列表让人以为上游真没有模型。
+        error: `连上了但响应里没有可识别的模型列表（期望 data[] 或 models[]）：${trimSnippet(text)}`,
+      };
+    }
     return { ok: true, latencyMs, status: response.status, models };
   } catch (error) {
     const latencyMs = Date.now() - startedAt;
@@ -112,4 +140,16 @@ export async function testProviderConnectivity(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/** 对已保存的供应商做连通性测试（沿用旧签名，内部复用 fetchProviderModels）。 */
+export async function testProviderConnectivity(
+  provider: ProviderRecord,
+  apiKey: string,
+): Promise<ConnectivityResult> {
+  return fetchProviderModels({
+    apiType: provider.apiType,
+    baseUrl: provider.baseUrl,
+    apiKey,
+  });
 }

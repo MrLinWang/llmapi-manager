@@ -176,12 +176,109 @@ describe('冒烟：供应商与聚合', () => {
     expect(result.models).toContain('gpt-x');
   });
 
+  it('可按表单临时值拉取模型列表（无需先保存供应商）', async () => {
+    const response = await call(
+      'POST',
+      '/api/providers/models',
+      {
+        apiType: 'openai',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-listing',
+      },
+      { cookie },
+    );
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.ok).toBe(true);
+    expect(body.models).toContain('gpt-x');
+    expect(body.models).toContain('gpt-x-mini');
+  });
+
+  it('anthropic 协议用 x-api-key 拉取，拿到的是它自己的模型', async () => {
+    const response = await call(
+      'POST',
+      '/api/providers/models',
+      {
+        apiType: 'anthropic',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-ant-listing',
+      },
+      { cookie },
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.json().models).toEqual(['claude-x']);
+  });
+
+  it('编辑态未重填 Key 时沿用已保存的 Key', async () => {
+    const list = await call('GET', '/api/providers', undefined, { cookie });
+    const existing = list
+      .json()
+      .providers.find((item: { apiType: string }) => item.apiType === 'openai');
+    expect(existing).toBeTruthy();
+
+    const response = await call(
+      'POST',
+      '/api/providers/models',
+      {
+        apiType: existing.apiType,
+        baseUrl: existing.baseUrl,
+        // 不传 apiKey，靠 providerId 借用
+        providerId: existing.id,
+      },
+      { cookie },
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.json().ok).toBe(true);
+  });
+
+  it('既没有 Key 也没有 providerId 时明确报错', async () => {
+    const response = await call(
+      'POST',
+      '/api/providers/models',
+      { apiType: 'openai', baseUrl: `http://127.0.0.1:${MOCK_PORT}` },
+      { cookie },
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.message).toContain('API Key');
+  });
+
+  it('非法协议或空 baseUrl 被拒绝', async () => {
+    const badType = await call(
+      'POST',
+      '/api/providers/models',
+      { apiType: 'bogus', baseUrl: 'https://x.test', apiKey: 'k' },
+      { cookie },
+    );
+    expect(badType.statusCode).toBe(400);
+
+    const badUrl = await call(
+      'POST',
+      '/api/providers/models',
+      { apiType: 'openai', baseUrl: '   ', apiKey: 'k' },
+      { cookie },
+    );
+    expect(badUrl.statusCode).toBe(400);
+  });
+
+  it('上游不可达时返回 ok:false 而不是 500', async () => {
+    // 用未监听的端口模拟连不上：这是采集失败，不该让接口 5xx
+    const response = await call(
+      'POST',
+      '/api/providers/models',
+      { apiType: 'openai', baseUrl: 'http://127.0.0.1:1', apiKey: 'k' },
+      { cookie },
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.json().ok).toBe(false);
+    expect(response.json().error).toBeTruthy();
+  });
+
   it('聚合别名按约定格式生成', async () => {
     const response = await call('GET', '/api/models', undefined, { cookie });
     const body = response.json();
     expect(body.aliases.map((item: { alias: string }) => item.alias)).toEqual([
-      'lmm-mock-openai/gpt-x',
-      'lmm-mock-openai/gpt-x-mini',
+      'lam-mock-openai/gpt-x',
+      'lam-mock-openai/gpt-x-mini',
     ]);
     expect(body.gateway.token.exists).toBe(false);
   });
@@ -204,7 +301,7 @@ describe('冒烟：供应商与聚合', () => {
 describe('冒烟：网关', () => {
   it('缺少令牌返回 401', async () => {
     const response = await call('POST', '/v1/chat/completions', {
-      model: 'lmm-mock-openai/gpt-x',
+      model: 'lam-mock-openai/gpt-x',
       messages: [],
     });
     expect(response.statusCode).toBe(401);
@@ -214,7 +311,7 @@ describe('冒烟：网关', () => {
     const response = await call(
       'POST',
       '/v1/chat/completions',
-      { model: 'lmm-mock-openai/gpt-x-mini', messages: [{ role: 'user', content: 'hi' }] },
+      { model: 'lam-mock-openai/gpt-x-mini', messages: [{ role: 'user', content: 'hi' }] },
       { authorization: `Bearer ${gatewayToken}` },
     );
     expect(response.statusCode).toBe(200);
@@ -227,7 +324,7 @@ describe('冒烟：网关', () => {
     const response = await call(
       'POST',
       '/v1/chat/completions',
-      { model: 'lmm-mock-openai/gpt-x', messages: [] },
+      { model: 'lam-mock-openai/gpt-x', messages: [] },
       { 'x-api-key': gatewayToken },
     );
     expect(response.statusCode).toBe(200);
@@ -237,7 +334,7 @@ describe('冒烟：网关', () => {
     const response = await call(
       'POST',
       '/v1/chat/completions',
-      { model: 'lmm-mock-openai/gpt-x', stream: true, messages: [] },
+      { model: 'lam-mock-openai/gpt-x', stream: true, messages: [] },
       { authorization: `Bearer ${gatewayToken}` },
     );
     expect(response.statusCode).toBe(200);
@@ -251,7 +348,7 @@ describe('冒烟：网关', () => {
     const response = await call(
       'POST',
       '/v1/chat/completions',
-      { model: 'lmm-mock-openai/gpt-x', messages: [{ role: 'user', content: 'x' }] },
+      { model: 'lam-mock-openai/gpt-x', messages: [{ role: 'user', content: 'x' }] },
       { authorization: `Bearer ${gatewayToken}` },
     );
     expect(response.statusCode).toBe(200);
@@ -262,7 +359,7 @@ describe('冒烟：网关', () => {
     const response = await call(
       'POST',
       '/v1/chat/completions',
-      { model: 'lmm-nobody/gpt-x', messages: [] },
+      { model: 'lam-nobody/gpt-x', messages: [] },
       { authorization: `Bearer ${gatewayToken}` },
     );
     expect(response.statusCode).toBe(400);
@@ -273,7 +370,7 @@ describe('冒烟：网关', () => {
     const response = await call(
       'POST',
       '/v1/messages',
-      { model: 'lmm-mock-openai/gpt-x', messages: [] },
+      { model: 'lam-mock-openai/gpt-x', messages: [] },
       { authorization: `Bearer ${gatewayToken}` },
     );
     expect(response.statusCode).toBe(501);
@@ -286,7 +383,7 @@ describe('冒烟：网关', () => {
     const response = await call(
       'POST',
       '/v1/responses',
-      { model: 'lmm-mock-openai/gpt-x', input: 'hi' },
+      { model: 'lam-mock-openai/gpt-x', input: 'hi' },
       { authorization: `Bearer ${gatewayToken}` },
     );
     expect(response.statusCode).toBe(501);
@@ -311,7 +408,7 @@ describe('冒烟：网关', () => {
     const response = await call(
       'POST',
       '/v1/responses',
-      { model: 'lmm-mock-responses/gpt-resp', input: 'hi' },
+      { model: 'lam-mock-responses/gpt-resp', input: 'hi' },
       { authorization: `Bearer ${gatewayToken}` },
     );
     expect(response.statusCode).toBe(200);
@@ -326,7 +423,7 @@ describe('冒烟：网关', () => {
     const response = await call(
       'POST',
       '/v1/chat/completions',
-      { model: 'lmm-mock-responses/gpt-resp', messages: [] },
+      { model: 'lam-mock-responses/gpt-resp', messages: [] },
       { authorization: `Bearer ${gatewayToken}` },
     );
     expect(response.statusCode).toBe(501);
@@ -340,7 +437,7 @@ describe('冒烟：网关', () => {
     const body = response.json();
     expect(body.object).toBe('list');
     expect(body.data.map((item: { id: string }) => item.id)).toContain(
-      'lmm-mock-openai/gpt-x',
+      'lam-mock-openai/gpt-x',
     );
   });
 
@@ -474,10 +571,9 @@ describe('冒烟：Agent 下发', () => {
     expect(fs.existsSync(body.files[0].path)).toBe(false);
   });
 
-  it('没有可用 responses 供应商时 Codex 回落 chat，wire_api 与所选协议一致', async () => {
-    // 若仍硬写 wire_api=responses，而 /v1/responses 又严格要求 responses 上游，
-    // 配置与网关就会互相矛盾（Codex 发 responses 请求却被 501）。
-    // 这里临时禁用 responses 供应商来模拟"只有 openai"的环境。
+  it('没有 responses 供应商时 Codex 明确报错，而不是写出 chat 配置', async () => {
+    // Codex CLI 已移除 wire_api = "chat"（openai/codex discussion #7782），
+    // 回落 chat 会写出一个 Codex 直接拒绝启动的配置，所以必须报错并给出可操作提示。
     const list = await call('GET', '/api/providers', undefined, { cookie });
     const responsesProvider = list
       .json()
@@ -492,21 +588,12 @@ describe('冒烟：Agent 下发', () => {
     );
     try {
       const preview = await call('POST', '/api/agents/codex/preview', undefined, { cookie });
-      expect(preview.statusCode).toBe(200);
-      const entries = preview
-        .json()
-        .files.flatMap((file: { entries: Array<{ key: string; next: string }> }) => file.entries);
-      const wire = entries.find(
-        (item: { key: string }) => item.key === '[model_providers.llmapi] wire_api',
-      );
-      expect(wire.next).toBe('chat');
-      // 模型应指向某个 openai 供应商（不绑定具体是哪家——优先级会随其他用例变化），
-      // 关键是不能指向 responses 供应商。
-      const model = entries.find((item: { key: string }) => item.key === 'model');
-      expect(model.next).toMatch(/^lmm-/);
-      expect(model.next).not.toContain('lmm-mock-responses/');
+      expect(preview.statusCode).toBe(400);
+      const message = preview.json().error.message as string;
+      expect(message).toContain('Responses');
+      // 提示必须告诉用户怎么修，而不只是"没有可用供应商"
+      expect(message).toContain('协议类型');
     } finally {
-      // 恢复，避免影响后续用例对 responses 供应商的假设
       await call(
         'PATCH',
         `/api/providers/${responsesProvider.id}/enabled`,
@@ -571,6 +658,15 @@ describe('冒烟：Agent 下发', () => {
     // 此时同时存在 openai 与 responses 供应商（responses 在那条网关用例里创建）。
     const preview = await call('POST', '/api/agents/codex/preview', undefined, { cookie });
     expect(preview.statusCode).toBe(200);
+    // 预览面板必须能看到目录文件，否则用户以为什么都没做
+    const previewFiles = preview.json().files as Array<{
+      role: string;
+      entries: Array<{ key: string; next: string }>;
+    }>;
+    const catalogEntries = previewFiles.find((item) => item.role === 'catalog')!.entries;
+    expect(catalogEntries.length).toBeGreaterThan(0);
+    expect(catalogEntries[0].next).toMatch(/\d+ 个模型别名/);
+
     const entries = preview
       .json()
       .files.flatMap((file: { entries: Array<{ key: string; next: string }> }) => file.entries);
@@ -580,7 +676,117 @@ describe('冒烟：Agent 下发', () => {
     expect(wire.next).toBe('responses');
     // 模型必须指向 responses 供应商的别名
     const model = entries.find((item: { key: string }) => item.key === 'model');
-    expect(model.next).toContain('lmm-mock-responses/');
+    expect(model.next).toContain('lam-mock-responses/');
+  });
+  it('Codex 应用时生成模型目录，并写入 catalog 两项配置', async () => {
+    const preview = await call('POST', '/api/agents/codex/preview', undefined, { cookie });
+    expect(preview.statusCode).toBe(200);
+    const files = preview.json().files as Array<{ role: string; path: string }>;
+
+    // 目录文件必须是第三个文件角色
+    const catalogFile = files.find((item) => item.role === 'catalog');
+    expect(catalogFile).toBeTruthy();
+    expect(catalogFile!.path.endsWith('llmapi-model-catalog.json')).toBe(true);
+
+    const entries = preview
+      .json()
+      .files.flatMap((file: { entries: Array<{ key: string; next: string }> }) => file.entries);
+    // web_search 必须显式关闭：多数聚合上游把 Responses 转 Chat 时不支持该托管工具，
+    // 会 400 unsupported_tool。这是顶层键，且必须是字符串 "disabled"。
+    const webSearch = entries.find((item: { key: string }) => item.key === 'web_search');
+    expect(webSearch).toBeTruthy();
+    expect(webSearch!.next).toBe('disabled');
+
+    // model_catalog_json 必须是顶层键：放进 provider 段会被 Codex 忽略（实测）
+    const jsonKey = entries.find((item: { key: string }) => item.key === 'model_catalog_json');
+    const urlKey = entries.find(
+      (item: { key: string }) => item.key === '[model_providers.llmapi] model_catalog_url',
+    );
+    expect(jsonKey).toBeTruthy();
+    expect(jsonKey!.next).toBe(catalogFile!.path);
+    expect(urlKey).toBeTruthy();
+    expect(urlKey!.next).toContain('/v1/models');
+    // 反向断言：provider 段里不能再出现 model_catalog_json
+    expect(
+      entries.some(
+        (item: { key: string }) =>
+          item.key === '[model_providers.llmapi] model_catalog_json',
+      ),
+    ).toBe(false);
+
+    // 真正应用后目录文件存在且结构是 Codex 认的 { models: [...] }
+    const apply = await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    expect(apply.statusCode).toBe(200);
+    const catalog = JSON.parse(fs.readFileSync(catalogFile!.path, 'utf8'));
+    expect(Array.isArray(catalog.models)).toBe(true);
+    expect(catalog.models.length).toBeGreaterThan(0);
+    const slugs = catalog.models.map((m: { slug: string }) => m.slug);
+    // 每个 slug 都必须是网关能解析的别名
+    expect(slugs.every((slug: string) => slug.startsWith('lam-'))).toBe(true);
+    expect(slugs).toContain('lam-mock-responses/gpt-resp');
+    for (const model of catalog.models) {
+      expect(model.context_window).toBeGreaterThan(0);
+      // 只断言 Codex 真正读取的字段；max_output_tokens 会作为未知字段被忽略
+      expect(typeof model.default_reasoning_level).toBe('string');
+    }
+
+    // 还原时：目录文件由我们创建 → 直接删除
+    const revert = await call('POST', '/api/agents/codex/revert', undefined, { cookie });
+    expect(revert.statusCode).toBe(200);
+    expect(fs.existsSync(catalogFile!.path)).toBe(false);
+    const configAfter = fs.readFileSync(files[0].path, 'utf8');
+    expect(configAfter).not.toContain('model_catalog_json');
+    expect(configAfter).not.toContain('model_catalog_url');
+    expect(configAfter).not.toContain('web_search');
+  });
+
+  it('web_search 开关可切换，且关闭时不留残留键', async () => {
+    // 默认开启"关闭联网搜索"
+    const initial = await call('GET', '/api/settings', undefined, { cookie });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json().disableCodexWebSearch).toBe(true);
+
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const configPath = (
+      await call('POST', '/api/agents/codex/preview', undefined, { cookie })
+    )
+      .json()
+      .files.find((file: { role: string }) => file.role === 'config').path;
+    expect(fs.readFileSync(configPath, 'utf8')).toContain('web_search = "disabled"');
+
+    // 关掉这个开关 → 重新应用后应该把那一行删掉，不能残留
+    const off = await call('PATCH', '/api/settings/codex', { disableCodexWebSearch: false }, { cookie });
+    expect(off.statusCode).toBe(200);
+    expect(off.json().disableCodexWebSearch).toBe(false);
+    expect(off.json().requiresReapply).toBe(true);
+
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    expect(fs.readFileSync(configPath, 'utf8')).not.toContain('web_search');
+
+    // 再打开 → 重新写回
+    await call('PATCH', '/api/settings/codex', { disableCodexWebSearch: true }, { cookie });
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    expect(fs.readFileSync(configPath, 'utf8')).toContain('web_search = "disabled"');
+
+    // 非布尔值要拒绝，而不是当成 truthy
+    const bad = await call('PATCH', '/api/settings/codex', { disableCodexWebSearch: 'yes' }, { cookie });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it('结束 Codex 进程的接口受权限保护，且对 Claude Code 明确说明不支持', async () => {
+    // 未登录 → 401
+    const anonymous = await app.inject({ method: 'POST', url: '/api/agents/codex/stop-processes' });
+    expect(anonymous.statusCode).toBe(401);
+
+    // 未知 Agent → 404
+    const unknown = await call('POST', '/api/agents/nope/stop-processes', undefined, { cookie });
+    expect(unknown.statusCode).toBe(404);
+
+    // Claude Code 没有常驻进程，返回 supported=false 而不是报错
+    const claude = await call('POST', '/api/agents/claude-code/stop-processes', undefined, { cookie });
+    expect(claude.statusCode).toBe(200);
+    expect(claude.json().supported).toBe(false);
+    expect(claude.json().warnings.join('')).toContain('没有需要结束的常驻进程');
   });
 
   it('Claude Code 写入 env 段且保留其他设置', async () => {
@@ -621,14 +827,14 @@ describe('冒烟：Agent 下发', () => {
     expect(parsed.env.KEEP).toBe('1');
     expect(parsed.env.ANTHROPIC_BASE_URL).toBe(`http://127.0.0.1:${MOCK_PORT}`);
     expect(parsed.env.ANTHROPIC_AUTH_TOKEN).toBe(gatewayToken);
-    expect(parsed.env.ANTHROPIC_MODEL).toBe('lmm-mock-anthropic/claude-x');
+    expect(parsed.env.ANTHROPIC_MODEL).toBe('lam-mock-anthropic/claude-x');
   });
 
   it('Claude Code 可通过网关调用 anthropic 供应商', async () => {
     const response = await call(
       'POST',
       '/v1/messages',
-      { model: 'lmm-mock-anthropic/claude-x', messages: [{ role: 'user', content: 'hi' }] },
+      { model: 'lam-mock-anthropic/claude-x', messages: [{ role: 'user', content: 'hi' }] },
       { 'x-api-key': gatewayToken },
     );
     expect(response.statusCode).toBe(200);

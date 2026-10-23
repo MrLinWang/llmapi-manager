@@ -24,7 +24,7 @@ export interface ProviderInput {
   websiteUrl?: string;
 }
 
-function normalizeBaseUrl(input: string): string {
+export function normalizeBaseUrl(input: string): string {
   const trimmed = input.trim().replace(/\/+$/, '');
   if (!trimmed) throw badRequest('Base URL 不能为空');
   let parsed: URL;

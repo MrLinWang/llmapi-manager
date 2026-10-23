@@ -1,6 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
-import type { AgentDefinition, AgentId } from '../domain/agent';
+import type { AgentDefinition, AgentFileRole, AgentId } from '../domain/agent';
 
 export const AGENT_DEFINITIONS: Record<AgentId, AgentDefinition> = {
   codex: {
@@ -11,6 +11,10 @@ export const AGENT_DEFINITIONS: Record<AgentId, AgentDefinition> = {
     files: [
       { role: 'config', relativePath: 'config.toml', format: 'toml' },
       { role: 'auth', relativePath: 'auth.json', format: 'json' },
+      // 模型目录：Codex 的模型切换列表读它。虽然我们也写了 model_catalog_url 指向网关
+      // /v1/models，但 config.toml 顶层给了 model_catalog_json 时 Codex 直接用这份静态
+      // 目录（StaticModelsManager），不再去拉远程列表。内容整体由我们生成 → generated=true。
+      { role: 'catalog', relativePath: 'llmapi-model-catalog.json', format: 'json', generated: true },
     ],
   },
   'claude-code': {
@@ -60,7 +64,7 @@ export class AgentPathResolver {
     return path.join(base, definition.homeDirName);
   }
 
-  resolve(agentId: AgentId, input: ResolveInput, role: 'config' | 'auth'): string {
+  resolve(agentId: AgentId, input: ResolveInput, role: AgentFileRole): string {
     const definition = AGENT_DEFINITIONS[agentId];
     const spec = definition.files.find((item) => item.role === role);
     if (!spec) throw new Error(`Agent ${agentId} 未声明 ${role} 文件`);

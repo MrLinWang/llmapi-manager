@@ -53,4 +53,17 @@ export function registerAgentRoutes(
       return agentService.revert(id);
     },
   );
+
+  // 结束本机正在运行的 Agent 进程。Codex 只在启动时读配置与模型目录，
+  // 改完配置不重启会让用户以为没生效——这个接口把"重启"这一步变成一次点击。
+  defineRoute(
+    app,
+    registry,
+    { method: 'POST', url: '/api/agents/:id/stop-processes', access: 'agents:apply' },
+    async (request) => {
+      const principal = getPrincipal(request);
+      const { id } = request.params as { id: string };
+      return agentService.stopProcesses(principal, id);
+    },
+  );
 }

@@ -12,6 +12,11 @@ export interface TomlScalarEdit {
   value: string;
   /** 目标表名，如 model_providers.llmapi；为空表示顶层 */
   table?: string;
+  /**
+   * 为 true 时把 value 原样写入、不加引号，用于布尔/数字这类非字符串标量。
+   * Codex 的 requires_openai_auth 必须是布尔 true，写成 "true"（字符串）会被判定类型不符。
+   */
+  raw?: boolean;
 }
 
 function tomlString(value: string): string {
@@ -83,7 +88,9 @@ export function readTomlScalar(
 
 function setInSection(lines: string[], edit: TomlScalarEdit, section: Section): string[] {
   const next = [...lines];
-  const line = `${edit.key} = ${tomlString(edit.value)}`;
+  const line = edit.raw
+    ? `${edit.key} = ${edit.value}`
+    : `${edit.key} = ${tomlString(edit.value)}`;
 
   for (let i = section.start + 1; i < section.end; i += 1) {
     if (keyPattern(edit.key).test(next[i])) {

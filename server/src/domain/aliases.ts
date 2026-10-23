@@ -1,6 +1,11 @@
 import type { ApiType, ProviderRecord } from './provider';
 
-export const ALIAS_PREFIX = 'lmm-';
+/**
+ * 别名前缀：`lam-<providerKey>/<model>` 是"明确指向某一家"的写法。
+ * resolveModel 只看这个前缀决定走别名还是默认供应商，因此它必须足够独特，
+ * 避免与上游真实模型名撞车。
+ */
+export const ALIAS_PREFIX = 'lam-';
 export const ALIAS_SEPARATOR = '/';
 
 export interface ModelAlias {
@@ -50,7 +55,7 @@ export type AliasResolution =
 
 /**
  * 解析请求里的 model。
- * 关键约束：带 lmm- 前缀但解析不出来时必须报错，绝不回落到默认供应商
+ * 关键约束：带 lam- 前缀但解析不出来时必须报错，绝不回落到默认供应商
  * —— 回落会用别的供应商额度、回答另一个模型，调用方看不出来。
  */
 export function resolveModel(

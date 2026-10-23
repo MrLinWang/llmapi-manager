@@ -20,6 +20,7 @@ function agentIcon(id: string): IconName {
 
 export default function AgentsPage(): JSX.Element {
   const agents = useAsync(() => api.agents());
+  const settings = useAsync(() => api.settings());
   const [preview, setPreview] = useState<AgentPreview | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -49,6 +50,41 @@ export default function AgentsPage(): JSX.Element {
       setMessage('配置已写入。若该 Agent 正在运行，请重启以加载新配置。');
       agents.reload();
       if (preview?.agentId === id) setPreview(await api.previewAgent(id));
+    });
+
+  const doStopProcesses = (id: string): Promise<void> =>
+    run(`stop:${id}`, async () => {
+      const result = await api.stopAgentProcesses(id);
+      // actions 由后端补齐（包含"本机没有正在运行的 Codex 进程"这种情况），
+      // 前端不再自己推断，避免两处逻辑各说一套。
+      const parts: string[] = [...result.actions];
+      if (result.warnings.length > 0) parts.push(...result.warnings);
+      const text = parts.join('；');
+      if (result.warnings.length > 0 && result.actions.length === 0) {
+        setError(text);
+      } else {
+        setMessage(`${text}。重新打开 Codex 即可加载最新配置。`);
+      }
+    });
+
+  /**
+   * 切换 Codex 的行为开关。
+   *
+   * 切换后自动重新应用配置：开关只影响我们生成的文件内容，不改的话用户还得记得
+   * 再点一次"应用配置"，容易出现"开关点了但没生效"的困惑。
+   */
+  const toggleCodexWebSearch = (next: boolean): Promise<void> =>
+    run('toggle:web_search', async () => {
+      await api.setCodexOptions({ disableCodexWebSearch: next });
+      await api.applyAgent('codex');
+      setMessage(
+        next
+          ? '已关闭联网搜索并重新应用配置。Codex 不再发送 web_search 工具。'
+          : '已开启联网搜索并重新应用配置。上游若不支持该工具会报 unsupported_tool。',
+      );
+      settings.reload();
+      agents.reload();
+      if (preview?.agentId === 'codex') setPreview(await api.previewAgent('codex'));
     });
 
   const doRevert = (id: string): Promise<void> =>
@@ -131,6 +167,19 @@ export default function AgentsPage(): JSX.Element {
                 <Icon name="zap" className="size-3.5" />
                 {busy === `apply:${agent.id}` ? '写入中…' : agent.applied ? '重新应用' : '应用配置'}
               </button>
+              {/* 只有 Codex 有常驻进程与启动时快照的模型目录，Claude Code 不需要 */}
+              {agent.id === 'codex' && (
+                <button
+                  type="button"
+                  className="btn-outline btn-sm"
+                  disabled={busy === `stop:${agent.id}`}
+                  title="结束本机正在运行的 Codex（TUI 与托管守护进程），让它重新读取配置与模型目录"
+                  onClick={() => void doStopProcesses(agent.id)}
+                >
+                  <Icon name="refresh" className="size-3.5" />
+                  {busy === `stop:${agent.id}` ? '结束中…' : '退出 Codex 进程'}
+                </button>
+              )}
               <button
                 type="button"
                 className="btn-ghost btn-sm"
@@ -140,6 +189,39 @@ export default function AgentsPage(): JSX.Element {
                 {busy === `revert:${agent.id}` ? '还原中…' : '还原'}
               </button>
             </div>
+
+            {/*
+              只有 Codex 需要这个开关：web_search 是 Responses 的托管工具，
+              聚合上游转 Chat 时普遍不支持，会 400 unsupported_tool。
+            */}
+            {agent.id === 'codex' && (
+              <div className="mt-3 border-t border-line pt-3">
+                <label className="flex cursor-pointer items-start gap-2.5">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 size-4 shrink-0 accent-accent"
+                    checked={settings.data?.disableCodexWebSearch ?? true}
+                    disabled={
+                      settings.loading || busy === 'toggle:web_search' || settings.data === null
+                    }
+                    onChange={(event) => void toggleCodexWebSearch(event.target.checked)}
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-xs font-medium text-ink">
+                      关闭联网搜索（web_search = "disabled"）
+                      {busy === 'toggle:web_search' && (
+                        <span className="ml-1 text-muted">切换中…</span>
+                      )}
+                    </span>
+                    <span className="mt-0.5 block text-[11px] leading-4 text-muted">
+                      Codex 默认把 <code className="font-mono">web_search</code> 作为 Responses
+                      托管工具塞进请求，多数聚合上游转 Chat 线路时不支持，会报{' '}
+                      <code className="font-mono">unsupported_tool</code>。直连官方上游可关掉此项以保留联网搜索。
+                    </span>
+                  </span>
+                </label>
+              </div>
+            )}
           </Card>
         ))}
       </div>

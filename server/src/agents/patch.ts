@@ -11,6 +11,16 @@ export interface DesiredWrites {
   value: string;
   /** TOML 专属：所在表 */
   table?: string;
+  /** TOML 专属：值为非字符串标量（如布尔 true）时原样写入，不加引号 */
+  raw?: boolean;
+  /**
+   * TOML 专属：不写入，而是把这个键删掉。
+   *
+   * 用于"开关关掉后要撤销上一版写进去的键"——否则用户关了开关重新应用，
+   * 旧值仍留在文件里，看起来像开关没生效。删除同样只在当前值等于 `value`
+   * 时才执行，避免抹掉用户手改的值。
+   */
+  remove?: boolean;
 }
 
 export function readJsonPath(content: string, dotted: string): string | null {
@@ -178,6 +188,11 @@ export interface ApplyFilesOptions {
   /** role → 目标键值 */
   writes: Partial<Record<AgentFileRole, DesiredWrites[]>>;
   backupsDir: string;
+  /**
+   * 整体生成的文件（如 Codex 模型目录）：不做按键合并，直接用 content 覆盖。
+   * 仍然遵守"写前备份"与"记录 created 以便还原时删除"。
+   */
+  generatedFiles?: Array<{ role: AgentFileRole; path: string; content: string }>;
 }
 
 function timestamp(): string {
@@ -205,12 +220,24 @@ export function applyAgentWrites(options: ApplyFilesOptions): WriteResult[] {
 
     let nextContent: string;
     if (spec.format === 'toml') {
-      const edits = writes.map((write) => ({
+      const additions = writes.filter((write) => write.remove !== true);
+      const removals = writes.filter((write) => write.remove === true);
+      const edits = additions.map((write) => ({
         key: write.path,
         value: write.value,
         table: write.table,
+        raw: write.raw,
       }));
       nextContent = applyTomlEdits(existing ?? '', edits);
+      for (const removal of removals) {
+        const outcome = removeTomlKeyIfValue(
+          nextContent,
+          removal.path,
+          removal.value,
+          removal.table,
+        );
+        nextContent = outcome.content;
+      }
     } else {
       nextContent = applyJsonWrites(existing ?? '', writes);
     }
@@ -230,9 +257,36 @@ export function applyAgentWrites(options: ApplyFilesOptions): WriteResult[] {
 
     const values: Record<string, string> = {};
     for (const write of writes) {
+      // 删除项不进快照：它的语义是"让这个键消失"，不是"我们写了某个值"，
+      // 放进去会让还原逻辑去找一个本就不存在的值。
+      if (write.remove === true) continue;
       values[write.table ? `[${write.table}] ${write.path}` : write.path] = write.value;
     }
     results.push({ filePath, role, created, backupPath, values });
+  }
+
+  // 生成类文件：整体覆盖，不参与按键合并
+  for (const file of options.generatedFiles ?? []) {
+    const existing = readFileSafe(file.path);
+    let backupPath: string | null = null;
+    if (existing !== null) {
+      fs.mkdirSync(options.backupsDir, { recursive: true });
+      backupPath = path.join(options.backupsDir, `${timestamp()}-${path.basename(file.path)}`);
+      fs.writeFileSync(backupPath, existing, { mode: 0o600 });
+    }
+    fs.mkdirSync(path.dirname(file.path), { recursive: true });
+    const tmp = `${file.path}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, file.content, { mode: 0o600 });
+    fs.renameSync(tmp, file.path);
+
+    // values 留空：没有"我们写入的键"可撤销；还原时靠 created 决定是否删文件
+    results.push({
+      filePath: file.path,
+      role: file.role,
+      created: existing === null,
+      backupPath,
+      values: {},
+    });
   }
 
   return results;
@@ -270,6 +324,27 @@ export function revertAgentWrites(
     if (!spec) continue;
     const content = readFileSafe(file.path);
     if (content === null) continue;
+
+    // 生成类文件（模型目录）没有"我们写入的键"，整份都是我们写的：
+    // 由我们创建的直接删掉；预先存在的置为 `{}` 并保留，避免误删用户内容。
+    if (spec.generated) {
+      if (Object.keys(file.values).length === 0) {
+        if (file.created) {
+          fs.rmSync(file.path, { force: true });
+          restored.push(path.basename(file.path));
+        } else {
+          const tmp = `${file.path}.${process.pid}.revert.tmp`;
+          fs.writeFileSync(tmp, '{}\n', { mode: 0o600 });
+          fs.renameSync(tmp, file.path);
+          conflicts.push({
+            key: path.basename(file.path),
+            expected: '(由本服务生成)',
+            current: '文件原本存在，已重置为空对象',
+          });
+        }
+        continue;
+      }
+    }
 
     let working = content;
     let changed = false;

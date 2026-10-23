@@ -69,7 +69,7 @@ export default function ModelsPage(): JSX.Element {
       <PageHeader
         eyebrow="网关"
         title="模型聚合"
-        description="所有启用供应商的模型被聚合为 lmm-<供应商>/<模型> 别名；不带别名的请求走下面的默认模型。"
+        description="所有启用供应商的模型被聚合为 lam-<供应商>/<模型> 别名；不带别名的请求走下面的默认模型。"
         actions={
           current ? <Badge tone="accent">{current.aliases.length} 个可用别名</Badge> : undefined
         }
@@ -129,7 +129,7 @@ export default function ModelsPage(): JSX.Element {
         )}
       </Card>
 
-      <Card title="默认供应商与模型" desc="用于承接不带 lmm- 别名的请求。">
+      <Card title="默认供应商与模型" desc="用于承接不带 lam- 别名的请求。">
         {providers.loading && <Spinner />}
         {!providers.loading && providerList.length === 0 && (
           <Empty icon="providers">还没有供应商，请先在「供应商」页添加。</Empty>

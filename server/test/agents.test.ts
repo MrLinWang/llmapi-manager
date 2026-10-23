@@ -9,6 +9,7 @@ import {
   revertAgentWrites,
   type DesiredWrites,
 } from '../src/agents/patch';
+import { buildModelCatalog } from '../src/domain/modelCatalog';
 import { applyTomlEdits, readTomlScalar } from '../src/agents/toml';
 import { AGENT_DEFINITIONS } from '../src/agents/registry';
 
@@ -38,12 +39,12 @@ describe('JSON 补丁', () => {
     );
     const next = applyJsonWrites(original, [
       { path: 'env.ANTHROPIC_BASE_URL', value: 'http://127.0.0.1:8787' },
-      { path: 'env.ANTHROPIC_MODEL', value: 'lmm-alpha/gpt-x' },
+      { path: 'env.ANTHROPIC_MODEL', value: 'lam-alpha/gpt-x' },
     ]);
     const parsed = JSON.parse(next);
     expect(parsed.permissions).toEqual({ allow: ['Bash'] });
     expect(parsed.env.KEEP_ME).toBe('yes');
-    expect(parsed.env.ANTHROPIC_MODEL).toBe('lmm-alpha/gpt-x');
+    expect(parsed.env.ANTHROPIC_MODEL).toBe('lam-alpha/gpt-x');
     expect(parsed.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:8787');
   });
 
@@ -62,7 +63,7 @@ describe('JSON 补丁', () => {
 
 describe('Agent 预览脱敏', () => {
   it('凭据类键只返回掩码，不返回完整令牌', () => {
-    const token = 'lmm_abcdefghijklmnopqrstuvwxyz1234';
+    const token = 'lam_abcdefghijklmnopqrstuvwxyz1234';
     const entries = buildPreviewEntries(AGENT_DEFINITIONS.codex, 'auth', null, [
       { path: 'OPENAI_API_KEY', value: token },
     ]);
@@ -74,7 +75,7 @@ describe('Agent 预览脱敏', () => {
 
   it('普通配置值保持原样', () => {
     const entries = buildPreviewEntries(AGENT_DEFINITIONS.codex, 'config', null, [
-      { path: 'model', value: 'lmm-packycode/gpt-5.1' },
+      { path: 'model', value: 'lam-packycode/gpt-5.1' },
       {
         path: 'base_url',
         value: 'http://127.0.0.1:8787/v1',
@@ -82,7 +83,7 @@ describe('Agent 预览脱敏', () => {
       },
     ]);
 
-    expect(entries[0].next).toBe('lmm-packycode/gpt-5.1');
+    expect(entries[0].next).toBe('lam-packycode/gpt-5.1');
     expect(entries[1].next).toBe('http://127.0.0.1:8787/v1');
   });
 });
@@ -104,7 +105,7 @@ describe('TOML 补丁', () => {
 
     const next = applyTomlEdits(original, [
       { key: 'model_provider', value: 'llmapi' },
-      { key: 'model', value: 'lmm-alpha/gpt-x' },
+      { key: 'model', value: 'lam-alpha/gpt-x' },
       { key: 'base_url', value: 'http://127.0.0.1:8787/v1', table: 'model_providers.llmapi' },
       { key: 'wire_api', value: 'responses', table: 'model_providers.llmapi' },
     ]);
@@ -113,11 +114,84 @@ describe('TOML 补丁', () => {
     expect(next).toContain('[model_providers.other]');
     expect(next).toContain('[mcp_servers.demo]');
     expect(readTomlScalar(next, 'model_provider')).toBe('llmapi');
-    expect(readTomlScalar(next, 'model')).toBe('lmm-alpha/gpt-x');
+    expect(readTomlScalar(next, 'model')).toBe('lam-alpha/gpt-x');
     expect(readTomlScalar(next, 'base_url', 'model_providers.llmapi')).toBe(
       'http://127.0.0.1:8787/v1',
     );
     expect(readTomlScalar(next, 'wire_api', 'model_providers.llmapi')).toBe('responses');
+  });
+
+  it('raw 写入布尔时输出不加引号，且读回能匹配（可还原）', () => {
+    // requires_openai_auth 必须是 TOML 布尔 true。曾写成字符串 "true"，
+    // Codex 会判类型不符。
+    const next = applyTomlEdits('', [
+      { key: 'requires_openai_auth', value: 'true', raw: true, table: 'model_providers.llmapi' },
+    ]);
+    expect(next).toContain('requires_openai_auth = true');
+    expect(next).not.toContain('requires_openai_auth = "true"');
+    // 读回的是裸文本 "true"，与快照里的值一致，还原时才能正确比对
+    expect(readTomlScalar(next, 'requires_openai_auth', 'model_providers.llmapi')).toBe('true');
+  });
+
+  it('非 raw 的字符串值仍然带引号', () => {
+    const next = applyTomlEdits('', [
+      { key: 'wire_api', value: 'responses', table: 'model_providers.llmapi' },
+    ]);
+    expect(next).toContain('wire_api = "responses"');
+  });
+
+  it('Codex 模型目录包含 Codex 解析器要求的必填字段', () => {
+    // 字段口径按 `codex debug models` 导出的官方目录对齐（不写死版本号：
+    // 仓库内无法核实具体版本，且 Codex 升级可能调整 schema）。缺任一项都会导致
+    // "failed to parse model_catalog_json"：
+    // - supported_reasoning_levels 必须是 {effort, description} 对象数组
+    // - 必须提供 base_instructions 或 model_messages.instructions_template
+    const raw = buildModelCatalog(
+      [
+        { alias: 'lam-a/gpt-x', providerId: 'p1', providerKey: 'a', providerName: 'A', apiType: 'openai', upstreamModel: 'gpt-x' },
+        { alias: 'lam-b/claude-x', providerId: 'p2', providerKey: 'b', providerName: 'B', apiType: 'anthropic', upstreamModel: 'claude-x' },
+      ],
+      { preferredClientModel: 'lam-b/claude-x' },
+    );
+    const parsed = JSON.parse(raw) as { models: Array<Record<string, unknown>> };
+
+    expect(Array.isArray(parsed.models)).toBe(true);
+    expect(parsed.models).toHaveLength(2);
+    // 默认模型排第一
+    expect(parsed.models[0].slug).toBe('lam-b/claude-x');
+    // slug 必须与网关别名完全一致
+    expect(parsed.models.map((m) => m.slug).sort()).toEqual(['lam-a/gpt-x', 'lam-b/claude-x']);
+
+    for (const model of parsed.models) {
+      expect(typeof model.display_name).toBe('string');
+      expect(model.visibility).toBe('list');
+      expect(model.supported_in_api).toBe(true);
+      expect(typeof model.shell_type).toBe('string');
+      expect(model.context_window).toBeGreaterThan(0);
+      // max_output_tokens 不在 Codex 的 ModelInfo 里，断言它等于在为无效字段背书
+      expect(typeof model.shell_type).toBe('string');
+      // 关键：对象数组，不是字符串数组
+      const levels = model.supported_reasoning_levels as Array<Record<string, unknown>>;
+      expect(Array.isArray(levels)).toBe(true);
+      expect(levels.length).toBeGreaterThan(0);
+      for (const level of levels) {
+        expect(typeof level.effort).toBe('string');
+        expect(typeof level.description).toBe('string');
+      }
+      // 关键：指令字段必须非空，否则 Codex 拒绝加载
+      expect(typeof model.base_instructions).toBe('string');
+      expect((model.base_instructions as string).length).toBeGreaterThan(0);
+      expect(model.truncation_policy).toBeTruthy();
+    }
+  });
+
+  it('默认模型不在别名里时不会凭空造条目', () => {
+    const raw = buildModelCatalog(
+      [{ alias: 'lam-a/gpt-x', providerId: 'p1', providerKey: 'a', providerName: 'A', apiType: 'openai', upstreamModel: 'gpt-x' }],
+      { preferredClientModel: 'lam-zzz/nope' },
+    );
+    const parsed = JSON.parse(raw) as { models: Array<{ slug: string }> };
+    expect(parsed.models.map((m) => m.slug)).toEqual(['lam-a/gpt-x']);
   });
 
   it('新建文件时也能生成完整结构', () => {
@@ -141,7 +215,7 @@ describe('Agent 应用与还原', () => {
     const writes: Partial<Record<'config', DesiredWrites[]>> = {
       config: [
         { path: 'env.ANTHROPIC_BASE_URL', value: 'http://gw' },
-        { path: 'env.ANTHROPIC_MODEL', value: 'lmm-alpha/gpt-x' },
+        { path: 'env.ANTHROPIC_MODEL', value: 'lam-alpha/gpt-x' },
       ],
     };
     const backupsDir = path.join(dir, 'backups');
@@ -159,7 +233,7 @@ describe('Agent 应用与还原', () => {
 
     const applied = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     expect(applied.env.KEEP).toBe('1');
-    expect(applied.env.ANTHROPIC_MODEL).toBe('lmm-alpha/gpt-x');
+    expect(applied.env.ANTHROPIC_MODEL).toBe('lam-alpha/gpt-x');
 
     // 用户手改了其中一个键
     applied.env.ANTHROPIC_MODEL = 'user-changed';
@@ -188,7 +262,7 @@ describe('Agent 应用与还原', () => {
       writes: {
         config: [
           { path: 'model_provider', value: 'llmapi' },
-          { path: 'model', value: 'lmm-alpha/gpt-x' },
+          { path: 'model', value: 'lam-alpha/gpt-x' },
         ],
       },
       backupsDir: path.join(dir, 'backups'),
@@ -211,7 +285,7 @@ describe('Agent 应用与还原', () => {
       paths: { config: configPath, auth: authPath },
       writes: {
         config: [{ path: 'model_provider', value: 'llmapi' }],
-        auth: [{ path: 'OPENAI_API_KEY', value: 'lmm_token' }],
+        auth: [{ path: 'OPENAI_API_KEY', value: 'lam_token' }],
       },
       backupsDir: path.join(dir, 'backups'),
     });
@@ -261,7 +335,7 @@ describe('Agent 应用与还原', () => {
       configPath,
       [
         'model_provider = "llmapi"',
-        'model = "lmm-alpha/gpt-x"',
+        'model = "lam-alpha/gpt-x"',
         '',
         '[model_providers.llmapi]',
         'base_url = "http://gw/v1"',
@@ -278,7 +352,7 @@ describe('Agent 应用与还原', () => {
         path: configPath,
         values: {
           model_provider: 'llmapi',
-          model: 'lmm-alpha/gpt-x',
+          model: 'lam-alpha/gpt-x',
           '[model_providers.llmapi] base_url': 'http://gw/v1',
         },
       },

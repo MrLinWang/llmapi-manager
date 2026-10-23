@@ -55,6 +55,7 @@ export function registerModelRoutes(
       return {
         defaultProviderId: settings.defaultProviderId,
         defaultModel: settings.defaultModel,
+        disableCodexWebSearch: settings.disableCodexWebSearch,
         gatewayBaseUrl: `${ctx.config.publicBaseUrl}/v1`,
         token: viewTokenMeta(settings),
       };
@@ -120,6 +121,34 @@ export function registerModelRoutes(
       };
       repos.settings.write(next);
       return { defaultProviderId: next.defaultProviderId, defaultModel: next.defaultModel };
+    },
+  );
+
+  // Codex 配置里的行为开关。放在这里而不是新建一个 routes 文件：
+  // 它和默认模型一样是租户级设置，共用同一份 settings.json。
+  defineRoute(
+    app,
+    registry,
+    { method: 'PATCH', url: '/api/settings/codex', access: 'settings:write' },
+    async (request) => {
+      const body = (request.body ?? {}) as { disableCodexWebSearch?: unknown };
+      const settings = repos.settings.read();
+
+      const next: TenantSettings = { ...settings };
+      if (body.disableCodexWebSearch !== undefined) {
+        if (typeof body.disableCodexWebSearch !== 'boolean') {
+          throw badRequest('disableCodexWebSearch 必须是布尔值');
+        }
+        next.disableCodexWebSearch = body.disableCodexWebSearch;
+      }
+      next.updatedAt = new Date().toISOString();
+      repos.settings.write(next);
+
+      return {
+        disableCodexWebSearch: next.disableCodexWebSearch,
+        // 提示调用方：这项改动要重新"应用配置"才会写进 Codex 的文件
+        requiresReapply: true,
+      };
     },
   );
 }

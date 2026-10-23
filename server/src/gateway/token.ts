@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { GatewayTokenMeta, TenantSettings } from '../domain/settings';
 import type { SecretCodec } from '../crypto/secretCodec';
 
-const TOKEN_PREFIX = 'lmm_';
+const TOKEN_PREFIX = 'lam_';
 
 export function hashGatewayToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');

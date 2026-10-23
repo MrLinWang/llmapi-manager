@@ -55,6 +55,16 @@ id_ed25519
 .npmrc
 cookies.txt
 *.har
+# 调试时 curl -c/-b 生成的 cookie jar 常被随手命名成这些裸名
+.c
+.ck
+cookies.json
+cookie*.jar
+session.json
+# 手工备份/补丁残留
+*.bak
+*.orig
+*.rej
 
 # ── 环境变量（保留模板）─────────────────────────────────────────────
 .env

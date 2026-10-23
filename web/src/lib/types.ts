@@ -83,7 +83,8 @@ export interface PreviewEntry {
 }
 
 export interface AgentFilePreview {
-  role: 'config' | 'auth';
+  /** 与服务端 AgentFileRole 保持一致：catalog 是整份生成的模型目录文件 */
+  role: 'config' | 'auth' | 'catalog';
   path: string;
   exists: boolean;
   entries: PreviewEntry[];
@@ -96,6 +97,15 @@ export interface AgentPreview {
   appliedAt?: string;
   gatewayBaseUrl: string;
   files: AgentFilePreview[];
+}
+
+export interface StopProcessesResult {
+  actions: string[];
+  /** 被结束的进程数 */
+  killed: number;
+  warnings: string[];
+  /** 该 Agent 是否支持进程操作（Claude Code 无常驻进程） */
+  supported: boolean;
 }
 
 export interface RequestLog {

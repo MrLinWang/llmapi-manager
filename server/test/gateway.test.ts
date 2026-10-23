@@ -64,23 +64,23 @@ describe('协议匹配', () => {
 describe('网关头鉴权', () => {
   it('哈希比对不接受错误令牌', () => {
     const meta = {
-      tokenHash: hashGatewayToken('lmm_correct'),
+      tokenHash: hashGatewayToken('lam_correct'),
       tokenCipher: '',
-      prefix: 'lmm_corr',
+      prefix: 'lam_corr',
       tail: 'rect',
       createdAt: '2026-01-01T00:00:00.000Z',
       tenantId: 't_default',
       createdBy: 'u_owner',
     };
-    expect(tokenMatches('lmm_correct', meta)).toBe(true);
-    expect(tokenMatches('lmm_wrong', meta)).toBe(false);
-    expect(tokenMatches('lmm_correct', null)).toBe(false);
+    expect(tokenMatches('lam_correct', meta)).toBe(true);
+    expect(tokenMatches('lam_wrong', meta)).toBe(false);
+    expect(tokenMatches('lam_correct', null)).toBe(false);
   });
 });
 
 describe('默认路径选路', () => {
   it('别名请求不会进入默认回退列表', () => {
-    const result = resolveModel('lmm-alpha/gpt-x', [provider]);
+    const result = resolveModel('lam-alpha/gpt-x', [provider]);
     expect(result.kind).toBe('alias');
   });
 

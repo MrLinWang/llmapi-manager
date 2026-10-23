@@ -55,11 +55,17 @@ const routes: RouteMap = {
     rules: { minUsernameLength: 3, maxUsernameLength: 32, minPasswordLength: 8 },
   },
   '/api/providers': { providers },
+  '/api/providers/models': {
+    ok: true,
+    latencyMs: 42,
+    status: 200,
+    models: ['gpt-x', 'gpt-x-mini', 'gpt-x-new'],
+  },
   '/api/models': {
-    prefix: 'lmm-',
+    prefix: 'lam-',
     aliases: [
       {
-        alias: 'lmm-mock-openai/gpt-x',
+        alias: 'lam-mock-openai/gpt-x',
         providerId: 'p_1',
         providerKey: 'mock-openai',
         providerName: 'Mock OpenAI',
@@ -72,9 +78,9 @@ const routes: RouteMap = {
       baseUrl: 'http://127.0.0.1:8787/v1',
       token: {
         exists: true,
-        prefix: 'lmm_abcd',
+        prefix: 'lam_abcd',
         tail: 'wxyz',
-        masked: 'lmm_abcd************wxyz',
+        masked: 'lam_abcd************wxyz',
         createdAt: '2026-01-01T00:00:00.000Z',
       },
     },
@@ -104,7 +110,7 @@ const routes: RouteMap = {
         tenantId: 't_default',
         at: '2026-01-01T00:00:00.000Z',
         path: '/v1/chat/completions',
-        requestedModel: 'lmm-mock-openai/gpt-x',
+        requestedModel: 'lam-mock-openai/gpt-x',
         upstreamModel: 'gpt-x',
         providerId: 'p_1',
         providerName: 'Mock OpenAI',
@@ -178,7 +184,7 @@ describe('前端页面装配', () => {
     );
 
     await waitFor(() => expect(screen.getByText('Mock OpenAI')).toBeTruthy());
-    expect(screen.getByText('lmm-mock-openai/')).toBeTruthy();
+    expect(screen.getByText('lam-mock-openai/')).toBeTruthy();
     expect(screen.getByText('sk-********cret')).toBeTruthy();
     expect(screen.getByRole('button', { name: '新增供应商' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '测试' })).toBeTruthy();
@@ -199,11 +205,11 @@ describe('前端页面装配', () => {
     await waitFor(() =>
       expect(screen.getByText('http://127.0.0.1:8787/v1')).toBeTruthy(),
     );
-    expect(screen.getByText('lmm_abcd************wxyz')).toBeTruthy();
-    expect(screen.getByText('lmm-mock-openai/gpt-x')).toBeTruthy();
+    expect(screen.getByText('lam_abcd************wxyz')).toBeTruthy();
+    expect(screen.getByText('lam-mock-openai/gpt-x')).toBeTruthy();
     expect(screen.getByRole('button', { name: '重置令牌' })).toBeTruthy();
     // 令牌明文绝不能出现在页面上
-    expect(document.body.textContent ?? '').not.toMatch(/lmm_[A-Za-z0-9_-]{20,}/);
+    expect(document.body.textContent ?? '').not.toMatch(/lam_[A-Za-z0-9_-]{20,}/);
   });
 
   it('Agent 页展示两个 Agent 与状态', async () => {
@@ -238,7 +244,7 @@ describe('前端页面装配', () => {
 
     await waitFor(() => expect(screen.getByText('91.7%')).toBeTruthy());
     expect(screen.getByText('320ms')).toBeTruthy();
-    expect(screen.getAllByText('lmm-mock-openai/gpt-x').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('lam-mock-openai/gpt-x').length).toBeGreaterThan(0);
     // 供应商名同时出现在筛选下拉与日志行里
     expect(screen.getAllByText('Mock OpenAI').length).toBeGreaterThan(1);
   });
@@ -291,5 +297,58 @@ describe('前端页面装配', () => {
       'responses',
       'anthropic',
     ]);
+  });
+  it('供应商表单提供"从上游获取模型"按钮，Base URL 为空时禁用', async () => {
+    const { render, screen } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const { ProviderForm } = await import('../src/components/ProviderForm');
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <ProviderForm onSaved={() => {}} onCancel={() => {}} />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const button = await screen.findByRole('button', { name: '从上游获取模型' });
+    // 还没填 Base URL，按钮应禁用，避免发出必然失败的请求
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+  });
+  it('模型以标签片段呈现：可输入添加、点 × 移除', async () => {
+    const { render, screen, fireEvent, within } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const { ProviderForm } = await import('../src/components/ProviderForm');
+
+    // 注意：vitest globals 关闭时 RTL 不会自动 cleanup，前面用例的 DOM 还在，
+    // 所以所有查询都限定在本用例的 container 内。
+    const { container } = render(
+      <MemoryRouter>
+        <AuthProvider>
+          <ProviderForm
+            provider={{ ...providers[0], models: ['gpt-x', 'gpt-x-mini'] }}
+            onSaved={() => {}}
+            onCancel={() => {}}
+          />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+    const view = within(container);
+
+    // 已保存的模型应作为标签片段渲染（每个都带 × 移除按钮）
+    expect(await view.findByLabelText('移除模型 gpt-x')).toBeTruthy();
+    expect(view.getByLabelText('移除模型 gpt-x-mini')).toBeTruthy();
+
+    // 输入后回车即添加为新片段
+    const input = view.getByLabelText('模型列表') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'gpt-brand-new' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(view.getByLabelText('移除模型 gpt-brand-new')).toBeTruthy();
+
+    // 点 × 移除该片段
+    fireEvent.click(view.getByLabelText('移除模型 gpt-brand-new'));
+    expect(view.queryByLabelText('移除模型 gpt-brand-new')).toBeNull();
   });
 });

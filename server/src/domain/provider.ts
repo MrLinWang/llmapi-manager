@@ -101,7 +101,7 @@ export function slugifyProviderKey(name: string): string {
 
 /**
  * 生成租户内唯一的 providerKey。重名时追加 -2、-3……，
- * 保证别名 `lmm-<key>/<model>` 长期稳定可解析。
+ * 保证别名 `lam-<key>/<model>` 长期稳定可解析。
  */
 export function allocateProviderKey(
   name: string,

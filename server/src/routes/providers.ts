@@ -8,7 +8,8 @@ import {
   assertNameAvailable,
   type ProviderInput,
 } from '../services/providers';
-import { testProviderConnectivity } from '../services/connectivity';
+import { normalizeBaseUrl } from '../services/providers';
+import { fetchProviderModels, testProviderConnectivity } from '../services/connectivity';
 import { badRequest } from '../http/errors';
 import { API_TYPES, type ApiType } from '../domain/provider';
 
@@ -134,6 +135,56 @@ export function registerProviderRoutes(
         error: result.error,
       });
       return result;
+    },
+  );
+
+  /**
+   * 按表单里填的临时值拉取上游模型列表。
+   *
+   * 为什么不复用 /api/providers/:id/test：新增供应商时还没有 id、也还没落盘，
+   * 而"先试连再保存"正是这个功能的用途。编辑时若 apiKey 留空，允许传
+   * providerId 借用已保存的 Key —— 前端不回显明文，用户也不该为了拉列表重填一次。
+   */
+  defineRoute(
+    app,
+    registry,
+    { method: 'POST', url: '/api/providers/models', access: 'providers:write' },
+    async (request) => {
+      const body = (request.body ?? {}) as {
+        apiType?: unknown;
+        baseUrl?: unknown;
+        apiKey?: unknown;
+        providerId?: unknown;
+      };
+      if (!API_TYPES.includes(body.apiType as ApiType)) {
+        throw badRequest(`apiType 只能是 ${API_TYPES.join(' / ')}`);
+      }
+      if (typeof body.baseUrl !== 'string' || body.baseUrl.trim() === '') {
+        throw badRequest('baseUrl 不能为空');
+      }
+
+      let apiKey =
+        typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
+      if (apiKey === '') {
+        // 编辑态：借用已保存的 Key，避免前端为了拉列表再要求用户重填
+        if (typeof body.providerId === 'string' && body.providerId !== '') {
+          const record = service.get(body.providerId);
+          apiKey = service.plainApiKey(record);
+        }
+        if (apiKey === '') {
+          throw badRequest('尚未填写 API Key，且没有可沿用的已保存 Key');
+        }
+      }
+
+      // 这条路由接受"表单里的临时 baseUrl"，且可能在 apiKey 为空时借用已保存的 Key。
+      // 不校验 scheme 的话，持有 providers:write 的人可以把已存 Key 以 Bearer 发往
+      // 任意地址（含内网、file: 等）。normalizeBaseUrl 只放行 http/https，
+      // 与保存供应商时同一套规则，避免两处标准不一致。
+      return fetchProviderModels({
+        apiType: body.apiType as ApiType,
+        baseUrl: normalizeBaseUrl(body.baseUrl),
+        apiKey,
+      });
     },
   );
 

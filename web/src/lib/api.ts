@@ -1,5 +1,6 @@
 import type {
   AgentPreview,
+  StopProcessesResult,
   AgentSummary,
   Me,
   ModelsResponse,
@@ -94,6 +95,16 @@ export const api = {
     }),
   testProvider: (id: string) =>
     request<TestResult>(`/api/providers/${id}/test`, { method: 'POST' }),
+  /**
+   * 按表单当前值拉取上游模型列表，不要求供应商已保存。
+   * apiKey 留空时传 providerId，服务端沿用已保存的 Key。
+   */
+  fetchProviderModels: (body: {
+    apiType: 'openai' | 'anthropic' | 'responses';
+    baseUrl: string;
+    apiKey?: string;
+    providerId?: string;
+  }) => request<TestResult>('/api/providers/models', json(body)),
   setProviderEnabled: (id: string, enabled: boolean) =>
     request<{ provider: Provider }>(`/api/providers/${id}/enabled`, {
       method: 'PATCH',
@@ -110,6 +121,13 @@ export const api = {
     request<{ defaultProviderId: string | null; defaultModel: string | null }>(
       '/api/settings/default',
       { method: 'PUT', body: JSON.stringify({ providerId, model }) },
+    ),
+  settings: () =>
+    request<{ disableCodexWebSearch: boolean }>('/api/settings'),
+  setCodexOptions: (input: { disableCodexWebSearch: boolean }) =>
+    request<{ disableCodexWebSearch: boolean; requiresReapply: boolean }>(
+      '/api/settings/codex',
+      { method: 'PATCH', body: JSON.stringify(input) },
     ),
   resetGatewayToken: () =>
     request<{ token: string; masked: string; createdAt: string; note: string }>(
@@ -130,6 +148,9 @@ export const api = {
       `/api/agents/${id}/revert`,
       { method: 'POST' },
     ),
+
+  stopAgentProcesses: (id: string) =>
+    request<StopProcessesResult>(`/api/agents/${id}/stop-processes`, { method: 'POST' }),
 
   logs: (providerId?: string, limit = 50) => {
     const params = new URLSearchParams({ limit: String(limit) });

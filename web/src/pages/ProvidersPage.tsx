@@ -164,7 +164,7 @@ export default function ProvidersPage(): JSX.Element {
                             )}
                           </div>
                           <code className="mt-0.5 block whitespace-nowrap font-mono text-[11px] text-muted">
-                            lmm-{provider.providerKey}/
+                            lam-{provider.providerKey}/
                           </code>
                         </div>
                       </div>
@@ -207,7 +207,12 @@ export default function ProvidersPage(): JSX.Element {
                         <TestResultLine provider={provider} />
                       )}
                     </td>
-                    <td className="bg-elevated group-hover:bg-subtle/50 sm:sticky sm:right-0 sm:z-10 sm:border-l sm:border-line">
+                    {/*
+                      固定列的背景必须始终不透明：这里曾被写成 group-hover:bg-subtle/50，
+                      鼠标悬停时 50% 透明，Key/最近测试列的内容会透过操作按钮显示出来。
+                      行悬停的视觉反馈改由非固定单元格承担（见 table-compact 的 hover 规则）。
+                    */}
+                    <td className="bg-elevated group-hover:bg-subtle sm:sticky sm:right-0 sm:z-10 sm:border-l sm:border-line">
                       <div className="flex flex-nowrap items-center justify-end gap-0.5">
                         <IconButton
                           icon="play"

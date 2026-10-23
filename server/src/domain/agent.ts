@@ -3,7 +3,12 @@ import type { ProviderRecord } from './provider';
 export const AGENT_IDS = ['codex', 'claude-code'] as const;
 export type AgentId = (typeof AGENT_IDS)[number];
 
-export type AgentFileRole = 'config' | 'auth';
+/**
+ * config：主配置文件（TOML/JSON，按键打补丁）
+ * auth  ：凭据文件
+ * catalog：模型目录文件（整份由我们生成，同样记录快照以便还原）
+ */
+export type AgentFileRole = 'config' | 'auth' | 'catalog';
 
 export interface AgentFileSpec {
   /** 逻辑角色：config 是主配置，auth 是凭据文件 */
@@ -11,6 +16,11 @@ export interface AgentFileSpec {
   /** 相对解析出的 Agent 根目录的文件名，可含子目录 */
   relativePath: string;
   format: 'json' | 'toml';
+  /**
+   * catalog 角色专用：内容由我们从网关的模型列表整体生成，不做按键合并。
+   * 仍然走"写前备份 + 还原时只删自己创建的文件"那套规则。
+   */
+  generated?: boolean;
 }
 
 export interface AgentDefinition {
