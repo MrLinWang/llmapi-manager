@@ -5,7 +5,9 @@
  * - anthropic  : /v1/messages
  * - responses  : /v1/responses（OpenAI Responses API，Codex 原生使用）
  *
- * 三条路径都严格匹配、互不做协议转换，不匹配一律 501。之所以不能放宽成"直通"：
+ * 三条路径都严格匹配，默认不做协议转换、不匹配一律 501（唯一例外是显式开启的
+ * `protocolConversion`：`/v1/responses → openai` 由 gateway/convert 转换）。
+ * 之所以不能放宽成"直通"：
  * 那会把 Responses 请求发给只支持 Chat 的上游，客户端只会收到上游的参数错误，
  * 完全看不出是选错了供应商——这条被真实问题踩过。
  */

@@ -1,11 +1,25 @@
 import type { ServerResponse } from 'node:http';
 import type { ProviderRecord } from '../domain/provider';
+import { ConversionError, responsesToChatRequest } from './convert/responsesToChat';
+import { chatToResponsesResponse } from './convert/chatToResponses';
+import {
+  ChatStreamToResponsesConverter,
+  serializeResponsesEvent,
+} from './convert/chatToResponsesStream';
 import type { RequestLogRecord } from '../domain/requestLog';
 import { AppError } from '../http/errors';
 
 export type GatewayPath = '/chat/completions' | '/messages' | '/responses';
 
 export interface ForwardTarget {
+  /**
+   * 需要把 Responses 请求转成 Chat 发给上游（`protocolConversion` 打开时）。
+   * 为真时请求体、响应体、流式事件都要经过转换。
+   *
+   * 这个标记挂在 target 而不是 ForwardOptions 上：回退候选可能来自另一种协议，
+   * 主供应商直通、备选需要转换是完全可能的。挂在请求级会让回退方向转错或漏转。
+   */
+  convertResponsesToChat?: boolean;
   provider: ProviderRecord;
   apiKey: string;
   upstreamModel: string;
@@ -25,10 +39,14 @@ export const GATEWAY_PATHS: GatewayPath[] = [
 ];
 
 /**
- * 每条网关路径要求的上游协议：三条路径都严格匹配，不做任何协议转换。
+ * 每条网关路径要求的上游协议：
  * - /v1/chat/completions → openai
  * - /v1/messages          → anthropic
  * - /v1/responses         → responses（OpenAI Responses API）
+ *
+ * 这是**默认**要求，不匹配一律 501。唯一的放宽是 `protocolConversion` 打开后
+ * `/v1/responses → openai`（见 assertApiTypeMatch），因为只有这一个方向有转换器；
+ * 其余组合即便开关打开也仍然拒绝，别把这里当成"任意协议互转"的入口。
  *
  * 返回 null 只表示"该路径不限制协议"，现在没有任何路径用它；
  * 之所以保留，是因为 /v1/responses 曾经就是靠 null 走直通，结果把 Responses 请求
@@ -45,6 +63,17 @@ export function upstreamUrl(provider: ProviderRecord, path: GatewayPath): string
   const base = provider.baseUrl.replace(/\/+$/, '');
   const hasV1 = /\/v1$/i.test(base);
   return `${base}${hasV1 ? '' : '/v1'}${path}`;
+}
+
+/**
+ * 转换请求时要打的上游路径。
+ *
+ * 关键：请求体被改写成 Chat 形状后，路径也必须跟着变成 `/chat/completions`。
+ * 只改 body 不改路径的话，Chat 上游会收到一个打到自己 `/responses` 端点的
+ * Chat 请求体，返回 404 或奇怪的参数错误。
+ */
+function upstreamPathFor(target: ForwardTarget, path: GatewayPath): GatewayPath {
+  return target.convertResponsesToChat === true ? '/chat/completions' : path;
 }
 
 export function buildUpstreamHeaders(
@@ -132,6 +161,10 @@ function writeLog(
 /**
  * 单次转发。流式时逐块透传，客户端断开立即 abort 上游，
  * 避免上游继续计费生成没人要的 token。
+ *
+ * 开了 `convertResponsesToChat` 时三条通道都要转换：请求体在发请求前改写、非流式响应
+ * 转成 Responses 形状、流式逐事件翻译。任何一条漏了，Codex 侧都会表现为"没有输出"或
+ * 一直等待——它只认 Responses 的形状。
  */
 export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutcome> {
   const { target, path, body, reply } = options;
@@ -148,11 +181,48 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
   };
   reply.once('close', onClientClose);
 
-  const payload = { ...body };
+  let payload: Record<string, unknown> = { ...body };
   if (target.modelRewritten) payload.model = target.upstreamModel;
 
+  // 跨协议转发：把 Responses 请求体改写成 Chat 形状。
+  // 转换失败必须在发出请求**之前**报错——否则上游会收到一个残缺请求，
+  // 返回的参数错误与本服务无关，排查方向会被带偏。
+  const convertRequest = target.convertResponsesToChat === true;
+  /** custom 工具名：响应方向要把它们的调用还原成 custom_tool_call */
+  const customToolNames = new Set<string>();
+  if (convertRequest) {
+    try {
+      const originalTools = body.tools;
+      if (Array.isArray(originalTools)) {
+        for (const tool of originalTools) {
+          if (
+            typeof tool === 'object' &&
+            tool !== null &&
+            (tool as { type?: unknown }).type === 'custom' &&
+            typeof (tool as { name?: unknown }).name === 'string'
+          ) {
+            customToolNames.add((tool as { name: string }).name);
+          }
+        }
+      }
+      const converted = responsesToChatRequest(payload, String(payload.model ?? target.upstreamModel));
+      payload = converted.body;
+    } catch (cause) {
+      const message = cause instanceof ConversionError ? cause.message : String(cause);
+      writeLog(options, { status: 400, latencyMs: Date.now() - startedAt, stream, error: message });
+      reply.statusCode = 400;
+      reply.setHeader('content-type', 'application/json');
+      reply.end(
+        JSON.stringify({
+          error: { code: 'conversion_failed', message: `请求无法转换为 Chat 格式：${message}` },
+        }),
+      );
+      return { status: 400, stream, latencyMs: Date.now() - startedAt, error: message };
+    }
+  }
+
   try {
-    const response = await fetch(upstreamUrl(target.provider, path), {
+    const response = await fetch(upstreamUrl(target.provider, upstreamPathFor(target, path)), {
       method: 'POST',
       headers: buildUpstreamHeaders(target.provider, target.apiKey, options.incomingHeaders),
       body: JSON.stringify(payload),
@@ -219,12 +289,48 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
         return { status: 502, stream: true, latencyMs, error: '上游未返回响应体' };
       }
       try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) reply.write(Buffer.from(value));
+        if (convertRequest) {
+          // 逐行解析上游的 Chat SSE，翻译成 Responses 事件再写给客户端。
+          // 不能攒完整个响应：那等于把流式退化成非流式，Codex 会看起来卡住。
+          const converter = new ChatStreamToResponsesConverter(
+            String(payload.model ?? target.upstreamModel),
+            undefined,
+            customToolNames,
+          );
+          const decoder = new TextDecoder();
+          let buffer = '';
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+            buffer += decoder.decode(value, { stream: true });
+            // SSE 以换行分隔；只处理完整的行，残留部分留到下次
+            let newlineIndex = buffer.indexOf('\n');
+            while (newlineIndex >= 0) {
+              const line = buffer.slice(0, newlineIndex).replace(/\r$/, '');
+              buffer = buffer.slice(newlineIndex + 1);
+              for (const event of converter.feedLine(line)) {
+                reply.write(serializeResponsesEvent(event));
+              }
+              newlineIndex = buffer.indexOf('\n');
+            }
+          }
+          // 上游可能没发 [DONE] 就断开，兜底补完事件，否则 Codex 会一直等
+          if (buffer.trim() !== '') {
+            for (const event of converter.feedLine(buffer.replace(/\r$/, ''))) {
+              reply.write(serializeResponsesEvent(event));
+            }
+          }
+          for (const event of converter.finish()) reply.write(serializeResponsesEvent(event));
+          reply.end();
+        } else {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) reply.write(Buffer.from(value));
+          }
+          reply.end();
         }
-        reply.end();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         try {
@@ -244,10 +350,35 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
       return { status: 200, stream: true, latencyMs };
     }
 
-    const text = await response.text();
+    let text = await response.text();
     const latencyMs = Date.now() - startedAt;
+
+    if (convertRequest) {
+      // Chat 响应 → Responses 形状。Codex 解析的是 output 数组，
+      // 直接透传 Chat 的 choices 会让它认为"没有输出"。
+      try {
+        const converted = chatToResponsesResponse({
+          model: String(payload.model ?? target.upstreamModel),
+          chat: JSON.parse(text) as unknown,
+          customToolNames,
+        });
+        text = JSON.stringify(converted);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        writeLog(options, { status: 502, latencyMs, stream: false, error: message });
+        reply.statusCode = 502;
+        reply.setHeader('content-type', 'application/json');
+        reply.end(
+          JSON.stringify({
+            error: { code: 'conversion_failed', message: `上游响应无法转换为 Responses 格式：${message}` },
+          }),
+        );
+        return { status: 502, stream: false, latencyMs, error: message };
+      }
+    }
+
     reply.statusCode = 200;
-    reply.setHeader('content-type', response.headers.get('content-type') ?? 'application/json');
+    reply.setHeader('content-type', 'application/json');
     if (options.fallback) reply.setHeader('x-llmapi-fallback', '1');
     reply.end(text);
     writeLog(options, { status: 200, latencyMs, stream: false });
@@ -302,16 +433,32 @@ export function writeDeferredError(
 /**
  * 路径与上游协议不匹配就拒绝。必须在真正发上游请求之前调用（见 routes/gateway.ts）：
  * 一旦请求已经打出去，客户端拿到的会是上游的参数错误，而看不出是本服务选错了协议。
+ *
+ * `allowConversion` 是用户开关（不是一个"要不要严格"的权限位）。即便为真也只放过
+ * Responses→Chat 这一种组合——别处没有转换器，放过就是把非法请求交给上游。
  */
 export function assertApiTypeMatch(
   provider: ProviderRecord,
   path: GatewayPath,
+  allowConversion = false,
 ): void {
   const required = requiredApiType(path);
   if (required && provider.apiType !== required) {
+    // 只有 Responses→Chat 这一个方向有转换器；其余组合仍然拒绝。
+    // 打开了开关却没转换器，说明是代码/配置对不上，不能放行。
+    const convertible =
+      allowConversion && required === 'responses' && provider.apiType === 'openai';
+    if (convertible) return;
     throw new AppError(
       'not_implemented',
-      `骨架期不做协议转换：${path} 需要 ${required} 上游，而供应商 ${provider.name} 是 ${provider.apiType}`,
+      allowConversion
+        ? `不支持 ${path} → ${provider.apiType} 的转换：目前只支持 Responses → Chat，供应商 ${provider.name} 是 ${provider.apiType}`
+        : `未开启协议转换：${path} 需要 ${required} 上游，而供应商 ${provider.name} 是 ${provider.apiType}。可在设置页开启"跨协议转发"让网关把 Responses 请求转成 Chat 发送`,
+      // 机读标记：前端据此弹出"一键开启"提示，而不是只让用户读一句错误文字。
+      // 只有"开关没开、但打开就能解决"这种情况才带，避免误导。
+      allowConversion || required !== 'responses' || provider.apiType !== 'openai'
+        ? undefined
+        : { canEnableConversion: true },
     );
   }
 }
