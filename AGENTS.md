@@ -24,6 +24,7 @@ server/               Fastify + TypeScript
   src/auth/           口令哈希、会话签名、Principal 解析（会话/API 令牌）、权限裁决、路由守卫
   src/crypto/         凭据编解码（AES-256-GCM）
   src/gateway/        网关令牌、令牌鉴权、上游转发
+    selection.ts      选路：候选、转换判定、审批占位名改写（网关与诊断共用）
     convert/          跨协议转换：responses→chat 的请求/响应/流式三向映射
   src/services/       业务编排（供应商、连通性测试、请求日志、首次初始化）
   src/agents/         Agent 注册表、路径解析、JSON/TOML 保值补丁、预览/应用/还原
@@ -252,9 +253,24 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
 存储只存 `sha256`、比对用 `timingSafeEqual`、明文只在创建响应里出现一次。
 `lastUsedAt` 按 60 秒节流更新：每次请求都写盘会让高频脚本把磁盘打得很差。
 
+### 15. 诊断接口必须复用真实逻辑
+
+`/api/diagnostics/*` 用来回答"某个功能到底有没有生效"（`ENABLE_DIAGNOSTICS=1` 才开）。
+
+**核心约束：诊断不许自己重算一遍。** 选路用 `gateway/selection.ts`、转换用
+`gateway/convert/`、上游 URL 用 `forward.ts` 的 `upstreamPathFor`。
+若诊断自己拼一份逻辑，就会出现"诊断说会转换、实际没转换"——比没有诊断更糟。
+这几个函数当初被抽成共享模块，正是为了这个。
+
+- 默认关闭、未开启时返回 **404**（不是 403）：不告诉探测者"这里有个开关"。
+- 它会回显 prompt 片段并真实打上游，所以定位是"排查工具"而非常开项。
+- 排查这类问题必须靠它，因为症状是**两端都不报错、只是结果不对**
+  （工具调不动、思考区转圈、列表少一家），读日志定位不了。
+- 改这些接口时，确认四条都在：路由预演、全链路、自检清单、转换器纯函数自检。
+
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 204 + web 10 = 214 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 209 + web 10 = 219 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
@@ -264,6 +280,8 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
 - 改到配置默认值 → 补 `server/test/config.test.ts`（当前 `ADMIN_USERNAME` 默认 `admin`）。
 - 改到首次初始化 → 补 `server/test/setup.test.ts`（令牌校验、一次性、重放拒绝、重启幂等）。
 - 改到协议匹配 → 补 `server/test/gateway.test.ts` 的 `requiredApiType` 断言 + smoke 的双向 501 用例。
+- 改到诊断接口 → 确认它复用了 `selection.ts` / `convert/` / `upstreamPathFor`，
+  并在 smoke 里验「默认关闭返回 404」「开启后路由预演能解释原因」。
 - 改到鉴权/权限 → 补 `server/test/apiToken.test.ts`（令牌生命周期）与 smoke 里的
   「令牌能调管理接口」「越权 403」「令牌不能改口令/建令牌」「吊销后失效」。
 - 改到协议转换 → 补 `server/test/convert.test.ts`（请求/响应/流式三向映射），

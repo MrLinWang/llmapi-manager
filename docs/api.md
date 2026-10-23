@@ -571,3 +571,64 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 
 `/api/overview` 的价值是"一次拿全"：脚本不必为了一份总览发七八个请求。
 
+## 诊断接口（`ENABLE_DIAGNOSTICS=1` 才开启）
+
+这段接口是为**排查"功能到底有没有生效"**而存在的，不是日常运维必用。
+默认关闭：未设置 `ENABLE_DIAGNOSTICS=1` 时全部返回 404（不是 403 ——
+不告诉探测者"这里有个开关可以打开"）。
+
+为什么需要它们：本仓库的行为横跨「设置项 → 选路 → 协议转换 → 上游 → 回转」四层，
+中间任何一层判断错，症状都是**上游不报错、客户端也不报错，只是结果不对**
+（工具调用执行不了、思考区一直转圈、模型列表里少一家）。这种问题靠读日志很难定位。
+
+| 方法 | 路径 | 权限 | 作用 |
+| --- | --- | --- | --- |
+| POST | `/api/diagnostics/route` | `settings:write` | 路由预演：不发送请求，只看会走哪里 |
+| POST | `/api/diagnostics/forward` | `settings:write` | 全链路：真打上游，返回每层中间结果 |
+| GET | `/api/diagnostics/check` | `settings:write` | 自检清单：找出互相矛盾的配置 |
+| GET | `/api/diagnostics/converter` | `settings:write` | 转换器纯函数自检，不依赖供应商 |
+
+### `/api/diagnostics/route`
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/diagnostics/route \
+  -H 'Authorization: Bearer api_…' -H 'content-type: application/json' \
+  -d '{"model":"my-model","path":"/responses"}'
+```
+
+返回里最有用的几个字段：
+
+- `primary.reason`：为什么选它（`alias` / `default-provider` / `approval-placeholder` / `priority`）
+- `primary.convertResponsesToChat`：这次要不要做协议转换
+- `primary.wouldUseUpstreamUrl`：**上游实际会收到的 URL**。开启转换时它是
+  `/chat/completions` 而不是 `/responses` —— 这个字段错了就说明路径改写没生效
+- `excluded[]`：被排除的供应商**及原因**。回答"我明明有三家供应商，为什么说没有"
+
+### `/api/diagnostics/forward`
+
+真的打一次上游，把 `select` → `convert-request` → `upstream` → `convert-response`
+四步的中间结果都返回。其中 `convert-request.body` 是**上游收到的完整请求体**，
+`convert-response.body` 是**转回 Responses 形状后 Codex 会收到的结果**。
+
+> ⚠️ 这个接口会回显 prompt 片段，也会真实消耗上游额度。用完请把开关关掉。
+
+转换有损时 `convert-request.dropped` 会列出被丢弃的字段（例如 `reasoning.summary`、
+图片的 `file_id` 形态）。这是判断"某个功能为什么没效果"的直接依据。
+
+### `/api/diagnostics/check`
+
+把"应该一致"的几处放在一起比对，专门抓这类问题：设置开着但目录没跟上、
+目录里有用户选中后必然 501 的条目、审批模型映射配在了直连模式下（不生效）。
+每条 `check` 都带 `fix` 建议。
+
+### `/api/diagnostics/converter`
+
+不碰网络、不读设置，只验证转换器本身的映射是否正常（文本、工具定义、custom 工具、
+有状态特性应拒绝、响应回转）。适合改完 `gateway/convert/` 后立刻确认没写坏。
+
+### 实现约束
+
+诊断**必须复用网关自己的逻辑**（`gateway/selection.ts`、`gateway/convert/`、
+`forward.ts` 的 `upstreamPathFor`）。若诊断自己再算一遍，就会出现
+"诊断说会转换、实际没转换"——这比没有诊断更糟。这也是把这几个函数抽成共享模块的原因。
+
