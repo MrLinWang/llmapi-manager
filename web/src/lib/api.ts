@@ -1,5 +1,7 @@
 import type {
   AgentPreview,
+  AgentConnectionMode,
+  AgentTargetPreference,
   StopProcessesResult,
   AgentSummary,
   Me,
@@ -17,6 +19,12 @@ export class ApiError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    /**
+     * 服务端附带的机读信息。与 message 分开：message 是给人读的中文句子，
+     * details 是给代码判断用的，不要靠匹配 message 里的字面量来分支。
+     * 目前唯一的使用方是 501 时的 `{ canEnableConversion: true }`。
+     */
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -55,11 +63,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
-    const body = payload as { error?: { code?: string; message?: string } } | null;
+    const body = payload as {
+      error?: { code?: string; message?: string; details?: unknown };
+    } | null;
     const code = body?.error?.code ?? 'unknown';
     const message = body?.error?.message ?? `请求失败（HTTP ${response.status}）`;
     if (response.status === 401) onUnauthorized?.();
-    throw new ApiError(response.status, code, message);
+    throw new ApiError(response.status, code, message, body?.error?.details);
   }
 
   return payload as T;
@@ -123,10 +133,43 @@ export const api = {
       { method: 'PUT', body: JSON.stringify({ providerId, model }) },
     ),
   settings: () =>
-    request<{ disableCodexWebSearch: boolean }>('/api/settings'),
-  setCodexOptions: (input: { disableCodexWebSearch: boolean }) =>
-    request<{ disableCodexWebSearch: boolean; requiresReapply: boolean }>(
-      '/api/settings/codex',
+    request<{
+      disableCodexWebSearch: boolean;
+      approvalReviewModel: string | null;
+      protocolConversion: boolean;
+      agentTargets: Record<string, AgentTargetPreference>;
+    }>('/api/settings'),
+  /**
+   * 改 Codex 的三个行为开关。
+   *
+   * 服务端一律返回 requiresReapply: true，但三个开关要不要真的重新 apply 并不相同：
+   * - disableCodexWebSearch：写进 config.toml，必须重新 apply 才生效；
+   * - approvalReviewModel / protocolConversion：纯网关侧运行时行为，不改下发文件，
+   *   所以调用方**不要**跟着 apply（AgentsPage 就是按这个区别处理的）。
+   */
+  setCodexOptions: (input: {
+    disableCodexWebSearch?: boolean;
+    approvalReviewModel?: string | null;
+    protocolConversion?: boolean;
+  }) =>
+    request<{
+      disableCodexWebSearch: boolean;
+      approvalReviewModel: string | null;
+      protocolConversion: boolean;
+      requiresReapply: boolean;
+    }>('/api/settings/codex', { method: 'PATCH', body: JSON.stringify(input) }),
+  /**
+   * 设置某个 Agent 的连接方式与直连目标，按 Agent 分开存。
+   *
+   * 改完不会自己下发：这里的响应同样带 requiresReapply，由调用方决定何时 apply。
+   * 直连但没选供应商时就别 apply —— 服务端会 400，等于拿报错当交互反馈。
+   */
+  setAgentTarget: (
+    id: string,
+    input: { mode?: AgentConnectionMode; directProviderId?: string | null; directModel?: string | null },
+  ) =>
+    request<{ agentTargets: Record<string, AgentTargetPreference>; requiresReapply: boolean }>(
+      `/api/agents/${id}/target`,
       { method: 'PATCH', body: JSON.stringify(input) },
     ),
   resetGatewayToken: () =>
@@ -138,8 +181,12 @@ export const api = {
   agents: () => request<{ agents: AgentSummary[] }>('/api/agents'),
   previewAgent: (id: string) =>
     request<AgentPreview>(`/api/agents/${id}/preview`, { method: 'POST' }),
+  /**
+   * 下发配置。注意返回体里的 runningProcesses：写成功不等于生效，
+   * 仍在运行的 Agent 进程内存里还是旧配置，必须由调用方提示用户重启。
+   */
   applyAgent: (id: string) =>
-    request<{ binding: { appliedAt: string; appliedBy: string } }>(
+    request<{ binding: { appliedAt: string; appliedBy: string; runningProcesses?: number } }>(
       `/api/agents/${id}/apply`,
       { method: 'POST' },
     ),

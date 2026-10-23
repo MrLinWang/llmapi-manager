@@ -217,7 +217,9 @@ export function ProviderForm({
               </select>
               <p className="field-hint">
                 该协议走 <code className="font-mono">{selectedMeta.path}</code>；
-                与上游真实支持的接口必须一致，不匹配时网关返回 501，不做协议转换。
+                与上游真实支持的接口必须一致，不匹配时网关默认返回 501。
+                例外：Codex 只会发 Responses 请求，开启「跨协议转发」后网关会把
+                Responses 转成 Chat 发给「Chat Completions」供应商。
               </p>
             </div>
           </div>

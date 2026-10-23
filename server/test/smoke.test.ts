@@ -367,6 +367,10 @@ describe('冒烟：网关', () => {
   });
 
   it('/v1/messages 命中 openai 供应商时返回 501', async () => {
+    // 这条钉住"转换不是万能的"：只有 Responses → Chat 一个方向有转换器，
+    // Messages 没有等价实现。即便将来有人把开关逻辑改成"不匹配就放行"，
+    // 这里也必须仍然 501——否则会把 Anthropic 请求体发给 Chat 上游，
+    // 客户端只会收到上游的参数错误，完全看不出是本服务选错了协议。
     const response = await call(
       'POST',
       '/v1/messages',
@@ -377,17 +381,80 @@ describe('冒烟：网关', () => {
     expect(response.json().error.message).toContain('协议转换');
   });
 
-  it('/v1/responses 命中 openai 供应商时返回 501（不再无脑直通）', async () => {
-    // responses 从"不限制协议"改为严格匹配后，openai 上游必须被拦住，
-    // 否则会把 Responses 请求当成 Chat 请求发给上游，症状是上游报参数错误。
+  it('/v1/responses 命中 openai 供应商时自动开启跨协议转发并成功', async () => {
+    // Codex 只会发 /v1/responses，而很多上游只有 Chat。当实例里只有 openai
+    // 供应商时，网关自动打开转换而不是把 501 甩给用户——他无从判断这是配置问题
+    // 还是上游故障。
+    //
+    // 这条同时钉住三个契约，缺一不可：
+    // 1) 请求真的成功（转换链路端到端可用，而不只是开关被改了）
+    // 2) 响应头标记出"自动改了设置"（悄悄改全局行为是不可接受的）
+    // 3) 设置被持久化，且第二次请求不再重复标记（否则每次都像被改动过）
+    await call('PATCH', '/api/settings/codex', { protocolConversion: false }, { cookie });
+
     const response = await call(
       'POST',
       '/v1/responses',
-      { model: 'lam-mock-openai/gpt-x', input: 'hi' },
+      { model: 'lam-mock-openai/gpt-x', input: 'hi', stream: false },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(response.statusCode).toBe(200);
+    // 必须能看出"这次请求被转换了、且设置被改动"，否则是静默行为变更
+    expect(response.headers['x-llmapi-auto-conversion']).toBe('1');
+    expect((response.json() as { object: string }).object).toBe('response');
+
+    // 开关已被持久化，后续请求不再重复标记
+    const stored = (await call('GET', '/api/settings', undefined, { cookie })).json() as {
+      protocolConversion: boolean;
+    };
+    expect(stored.protocolConversion).toBe(true);
+
+    const again = await call(
+      'POST', '/v1/responses',
+      { model: 'lam-mock-openai/gpt-x', input: 'hi', stream: false },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(again.statusCode).toBe(200);
+    expect(again.headers['x-llmapi-auto-conversion']).toBeUndefined();
+  });
+
+  it('畸形请求不会触发自动开启转换', async () => {
+    // 真实 bug：自动开启+写盘原本在 body 校验之前，一个缺 model 的请求
+    // （哪怕是扫描器）就能永久改掉租户设置，而那个请求本身还是 400、
+    // 走错误处理器而非 reply.raw，用户看不到 x-llmapi-auto-conversion 头。
+    await call('PATCH', '/api/settings/codex', { protocolConversion: false }, { cookie });
+
+    const bad = await call(
+      'POST', '/v1/responses',
+      { input: 'hi' },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(bad.statusCode).toBe(400);
+
+    const stored = (await call('GET', '/api/settings', undefined, { cookie })).json() as {
+      protocolConversion: boolean;
+    };
+    expect(stored.protocolConversion).toBe(false);
+  });
+
+  it('没有可转换供应商时仍返回 501 并提示', async () => {
+    // 防"误开"：自动开启的触发条件必须窄到"打开真的能解决问题"。
+    // /v1/messages → openai 没有转换器，自动开启对它毫无作用；
+    // 若这里被打开，用户会看到开关莫名变成 true，还会以为已经处理好了，
+    // 而请求照样 501——这种"假修复"比直接报错更浪费时间。
+    await call('PATCH', '/api/settings/codex', { protocolConversion: false }, { cookie });
+    const response = await call(
+      'POST',
+      '/v1/messages',
+      { model: 'lam-mock-openai/gpt-x', messages: [] },
       { authorization: `Bearer ${gatewayToken}` },
     );
     expect(response.statusCode).toBe(501);
-    expect(response.json().error.message).toContain('协议转换');
+    const stored = (await call('GET', '/api/settings', undefined, { cookie })).json() as {
+      protocolConversion: boolean;
+    };
+    // 打开了也解决不了，就不该打开
+    expect(stored.protocolConversion).toBe(false);
   });
 
   it('responses 供应商可接收 /v1/responses 并返回上游原始结构', async () => {
@@ -624,10 +691,17 @@ describe('冒烟：Agent 下发', () => {
     expect(fs.existsSync(authPath)).toBe(true);
     expect(JSON.parse(fs.readFileSync(authPath, 'utf8')).OPENAI_API_KEY).toBe(gatewayToken);
 
-    const backups = fs.readdirSync(
-      path.join(dataDir, 'tenants', 't_default', 'backups', 'codex'),
-    );
-    expect(backups.length).toBe(1);
+    // 备份必须落在被改文件的同目录：用户不依赖本服务、不依赖数据目录是否还在，
+    // 就能就地找回被改坏的配置。文件名形如 config.toml.bak-<时间戳>。
+    const sibling = fs
+      .readdirSync(path.dirname(configPath))
+      .filter((name) => name.startsWith(`${path.basename(configPath)}.bak-`));
+    expect(sibling.length).toBeGreaterThanOrEqual(1);
+    // 备份内容必须是改动前的原文（含用户自己的 mcp_servers）
+    const backupText = fs.readFileSync(path.join(path.dirname(configPath), sibling[0]), 'utf8');
+    expect(backupText).toContain('[mcp_servers.demo]');
+    // 数据目录下不应再有 backups/（已改为同目录）
+    expect(fs.existsSync(path.join(dataDir, 'tenants', 't_default', 'backups'))).toBe(false);
 
     const agents = await call('GET', '/api/agents', undefined, { cookie });
     const codex = agents
@@ -787,6 +861,447 @@ describe('冒烟：Agent 下发', () => {
     expect(claude.statusCode).toBe(200);
     expect(claude.json().supported).toBe(false);
     expect(claude.json().warnings.join('')).toContain('没有需要结束的常驻进程');
+  });
+
+  it('已有 responses 供应商时不会自动开启转换', async () => {
+    // 自动开启只在"打开就能解决问题"时才触发：实例里已经有 responses 供应商，
+    // 说明用户能正常用，不该悄悄把 openai 供应商也拉进来。
+    // 这条防的是"误开"而不是"漏开"：自动改动会把全局设置从 false 变成 true，
+    // 之后所有 Responses 请求都可能落到 Chat 上游上，产生用户没预期的信息损失
+    // （托管工具被丢弃）。所以必须连"设置没被改"一起断言，只看请求成功不够。
+    await call('PATCH', '/api/settings/codex', { protocolConversion: false }, { cookie });
+    const providers = (await call('GET', '/api/providers', undefined, { cookie })).json()
+      .providers as Array<{ apiType: string; providerKey: string; models: string[] }>;
+    const responses = providers.find((item) => item.apiType === 'responses');
+    expect(responses).toBeTruthy();
+
+    const response = await call(
+      'POST',
+      '/v1/responses',
+      { model: `lam-${responses!.providerKey}/${responses!.models[0]}`, input: 'hi' },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['x-llmapi-auto-conversion']).toBeUndefined();
+    const stored = (await call('GET', '/api/settings', undefined, { cookie })).json() as {
+      protocolConversion: boolean;
+    };
+    expect(stored.protocolConversion).toBe(false);
+  });
+
+  it('直连模式：指定供应商、按 Agent 独立，且清掉网关模式的产物', async () => {
+    const stored = await call('GET', '/api/settings', undefined, { cookie });
+    expect(stored.json().agentTargets).toEqual({});
+
+    const previewPath = (
+      await call('POST', '/api/agents/codex/preview', undefined, { cookie })
+    )
+      .json()
+      .files.find((file: { role: string }) => file.role === 'config').path as string;
+
+    // 直接切到直连但没指定供应商 → 必须明确要求选，而不是按优先级自动挑一家。
+    // 多供应商时自动挑会把用户的配置悄悄指向他没选的那家。
+    await call('PATCH', '/api/agents/codex/target', { mode: 'direct' }, { cookie });
+    const noPick = await call('POST', '/api/agents/codex/preview', undefined, { cookie });
+    expect(noPick.statusCode).toBe(400);
+    expect(noPick.json().error.message).toContain('明确指定供应商');
+
+    // 再造一家 responses 供应商，确保"能在多家之间选定"这件事真的被验证到
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '第二个直连候选',
+        apiType: 'responses',
+        baseUrl: 'http://127.0.0.1:65530',
+        apiKey: 'sk-second',
+        models: ['alt-model'],
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const alt = created.json().provider as { id: string };
+
+    const list = await call('GET', '/api/providers', undefined, { cookie });
+    const candidates = (list.json().providers as Array<{ id: string; name: string; apiType: string; enabled: boolean }>)
+      .filter((item) => item.enabled && item.apiType === 'responses');
+    expect(candidates.length).toBeGreaterThan(1);
+    // 故意选优先级靠后的那家，验证不会"总是落到默认供应商"
+    const chosen = candidates[candidates.length - 1];
+    expect(chosen.id).toBe(alt.id);
+
+    const set = await call(
+      'PATCH', '/api/agents/codex/target',
+      { mode: 'direct', directProviderId: chosen.id }, { cookie },
+    );
+    expect(set.statusCode).toBe(200);
+
+    const preview = await call('POST', '/api/agents/codex/preview', undefined, { cookie });
+    expect(preview.json().connectionMode).toBe('direct');
+    // 预览展示的就是实际写进 base_url 的值（已含 /v1），两者必须一致
+    const directBase = preview.json().directBaseUrl as string;
+    expect(directBase).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/);
+
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const direct = fs.readFileSync(previewPath, 'utf8');
+    expect(direct).toContain(`base_url = "${directBase}"`);
+    // 直连仍要写 model_catalog_json：不给它，Codex 会回退到内置官方模型列表，
+    // /model 里就冒出 GPT-6.x 这类与供应商无关的条目（真实踩过）。
+    expect(direct).toContain('model_catalog_json');
+    const directCatalogPath = /model_catalog_json = "([^"]+)"/.exec(direct)?.[1];
+    expect(directCatalogPath).toBeTruthy();
+    const directCatalog = JSON.parse(fs.readFileSync(directCatalogPath as string, 'utf8')) as {
+      models: Array<{ slug: string }>;
+    };
+    // 目录条目必须是该供应商的裸模型名，不能是 lam- 别名（网关才认识）
+    expect(directCatalog.models.map((model) => model.slug)).toContain('alt-model');
+    expect(directCatalog.models.some((model) => model.slug.startsWith('lam-'))).toBe(false);
+    // 也不能混入 Codex 内置的官方模型
+    expect(directCatalog.models.some((model) => /^gpt-6/.test(model.slug))).toBe(false);
+    // 网关地址相关的键仍然要清掉：直连不看网关
+    expect(direct).not.toContain('model_catalog_url');
+
+    // 另一个 Agent 的偏好不受影响：两者互相独立，这正是分开配置的意义。
+    // 这里只看设置读回的偏好（Claude Code 可能因缺 anthropic 供应商无法 apply，
+    // 那是另一回事，与本用例要验证的"模式互不干扰"无关）。
+    const afterCodex = await call('GET', '/api/settings', undefined, { cookie });
+    const targets = afterCodex.json().agentTargets as Record<string, { mode: string }>;
+    expect(targets.codex.mode).toBe('direct');
+    expect(targets['claude-code']).toBeUndefined();
+
+    // 切回网关后别名与目录恢复
+    await call('PATCH', '/api/agents/codex/target', { mode: 'gateway' }, { cookie });
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const gateway = fs.readFileSync(previewPath, 'utf8');
+    expect(gateway).toContain('model_catalog_json');
+    expect(gateway).toMatch(/^model = "lam-mock-responses\//m);
+
+    // 非法值要拒绝
+    expect((await call('PATCH', '/api/agents/codex/target', { mode: 'nope' }, { cookie })).statusCode)
+      .toBe(400);
+    // 协议不匹配的供应商不能用于直连（anthropic 不能给 Codex）
+    const anthropic = (list.json().providers as Array<{ id: string; apiType: string }>)
+      .find((item) => item.apiType === 'anthropic');
+    if (anthropic) {
+      expect(
+        (await call('PATCH', '/api/agents/codex/target', { directProviderId: anthropic.id }, { cookie }))
+          .statusCode,
+      ).toBe(400);
+    }
+  });
+
+  it('Codex 的模型目录只包含协议可用的别名', async () => {
+    // 真实踩过：目录里混进 openai 供应商的别名，用户在 /model 里选中它，
+    // 请求打到 /v1/responses 却因为没开转换而被 501。
+    // 让用户在列表里看到一个"选了就报错"的模型，等于把配置问题推给他。
+    // 关键前提：跨协议转换默认关闭（protocolConversion=false），所以
+    // "openai 供应商能不能用"是有条件的，目录必须跟着开关走，不能一律列出。
+    //
+    // 显式关掉转换：前面的用例可能自动开启过它（触发条件是"只有 openai 供应商"），
+    // 不隔离的话这条断言会随测试执行顺序变化——那是测试污染，不是真的验证了行为。
+    await call('PATCH', '/api/settings/codex', { protocolConversion: false }, { cookie });
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '只支持 chat 的供应商',
+        apiType: 'openai',
+        baseUrl: 'http://127.0.0.1:65531',
+        apiKey: 'sk-chat-only',
+        models: ['chat-only-model'],
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const chatProvider = created.json().provider as { id: string; providerKey: string };
+
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const configPath = (
+      await call('POST', '/api/agents/codex/preview', undefined, { cookie })
+    ).json().files.find((file: { role: string }) => file.role === 'config').path as string;
+    const catalogPath = /model_catalog_json = "([^"]+)"/.exec(
+      fs.readFileSync(configPath, 'utf8'),
+    )?.[1] as string;
+    const slugs = (
+      JSON.parse(fs.readFileSync(catalogPath, 'utf8')) as { models: Array<{ slug: string }> }
+    ).models.map((model) => model.slug);
+
+    // 开关关闭时：openai 供应商的别名不得出现
+    expect(slugs.some((slug) => slug.startsWith(`lam-${chatProvider.providerKey}/`))).toBe(false);
+
+    // 开启跨协议转发后必须出现——否则用户开了开关却看不到对应模型，
+    // 会以为功能没生效
+    await call('PATCH', '/api/settings/codex', { protocolConversion: true }, { cookie });
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const withConversion = (
+      JSON.parse(fs.readFileSync(catalogPath, 'utf8')) as { models: Array<{ slug: string }> }
+    ).models.map((model) => model.slug);
+    expect(withConversion.some((slug) => slug.startsWith(`lam-${chatProvider.providerKey}/`))).toBe(
+      true,
+    );
+    await call('PATCH', '/api/settings/codex', { protocolConversion: false }, { cookie });
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    // responses 供应商的别名必须在。
+    // 必须重新读文件：上面已经 apply 过两次，slugs 是首次 apply 时的旧快照，
+    // 用它断言等于在测"开关关闭时的目录"，与本次行为无关——会碰巧为真而失去保护作用。
+    const responsesKey = (
+      (await call('GET', '/api/providers', undefined, { cookie })).json().providers as Array<{
+        apiType: string;
+        providerKey: string;
+      }>
+    ).find((item) => item.apiType === 'responses')!.providerKey;
+    const afterDisable = (
+      JSON.parse(fs.readFileSync(catalogPath, 'utf8')) as { models: Array<{ slug: string }> }
+    ).models.map((model) => model.slug);
+    expect(afterDisable.some((slug) => slug.startsWith(`lam-${responsesKey}/`))).toBe(true);
+    // 关掉开关后 openai 供应商的别名必须从目录里消失——这才是"跟开关走"的完整验证
+    expect(afterDisable.some((slug) => slug.startsWith(`lam-${chatProvider.providerKey}/`))).toBe(
+      false,
+    );
+  });
+
+  it('apply 响应不回传明文凭据，但落盘快照保留真实值', async () => {
+    // 真实漏洞：直连模式会把上游真实 Key 写进配置，apply 的响应原样带回了
+    // binding.files[].values，等于把凭据经接口发出去（违反 AGENTS.md 第 5 条）。
+    // 预览路径一直是脱敏的，apply 漏了——两处必须一致。
+    //
+    // 但落盘不能脱敏：revert 依赖"当前值是否仍等于我们写入的值"做比对，
+    // 存了打码值就再也对不上，还原会全部变成冲突。
+    const SECRET = 'sk-REAL-UPSTREAM-KEY-abcdef123456';
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '脱敏测试供应商',
+        apiType: 'responses',
+        baseUrl: 'http://127.0.0.1:65532',
+        apiKey: SECRET,
+        models: ['mask-model'],
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const providerId = (created.json().provider as { id: string }).id;
+
+    await call(
+      'PATCH', '/api/agents/codex/target',
+      { mode: 'direct', directProviderId: providerId },
+      { cookie },
+    );
+    const applied = await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    expect(applied.statusCode).toBe(200);
+
+    // 响应里绝不能出现明文
+    expect(applied.body).not.toContain(SECRET);
+    const masked = applied
+      .json()
+      .binding.files.flatMap((file: { values: Record<string, string> }) =>
+        Object.values(file.values) as string[],
+      )
+      .find((value) => value.includes('*'));
+    expect(masked).toBeTruthy();
+
+    // 落盘快照必须保留真实值，否则 revert 的比对会全部失配
+    const stored = fs.readFileSync(
+      path.join(dataDir, 'tenants', 't_default', 'agents.json'),
+      'utf8',
+    );
+    expect(stored).toContain(SECRET);
+
+    await call('PATCH', '/api/agents/codex/target', { mode: 'gateway' }, { cookie });
+  });
+
+  it('直连时 baseUrl 已含 /v1 不会拼成 /v1/v1', async () => {
+    // 真实踩过的坑：上游填 https://host/v1 是常见写法，无脑拼 /v1 会变成
+    // https://host/v1/v1，Codex 直接 404 Not Found。
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '带 v1 的上游',
+        apiType: 'responses',
+        baseUrl: 'https://host.example.com/v1',
+        apiKey: 'sk-v1',
+        models: ['m-v1'],
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const providerId = (created.json().provider as { id: string }).id;
+
+    await call('PATCH', '/api/agents/codex/target', { mode: 'direct', directProviderId: providerId }, { cookie });
+    const preview = await call('POST', '/api/agents/codex/preview', undefined, { cookie });
+    const configPath = (
+      preview.json().files as Array<{ role: string; path: string }>
+    ).find((file) => file.role === 'config')!.path;
+
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const written = fs.readFileSync(configPath, 'utf8');
+    expect(written).toContain('base_url = "https://host.example.com/v1"');
+    expect(written).not.toContain('/v1/v1');
+
+    await call('PATCH', '/api/agents/codex/target', { mode: 'gateway' }, { cookie });
+  });
+
+  it('可把 Approve for me 的模型经网关映射到指定模型', async () => {
+    // 真实背景：Codex 在 API Key 认证下把审批模型硬编码成 gpt-5.6-luna，
+    // 没有任何配置项能改（auto_review_model_override 会被 ModelInfo→ModelPreset
+    // 的转换丢弃）。走网关时这个名字出现在请求体里，于是可以当占位名换掉。
+    //
+    // 这里同时钉住"两个条件缺一不可"的判定：
+    // - 审批请求 + 占位名 → 改写
+    // - 只有占位名、没有 turn_trigger → 不改写（用户可能真在用它聊天）
+    // 只测正向会把判定写成"模型名相等就改写"，那会误伤正常对话。
+    const set = await call(
+      'PATCH', '/api/settings/codex', { approvalReviewModel: 'gpt-6-luna' }, { cookie },
+    );
+    expect(set.statusCode).toBe(200);
+    expect(set.json().approvalReviewModel).toBe('gpt-6-luna');
+
+    const providers = (await call('GET', '/api/providers', undefined, { cookie })).json()
+      .providers as Array<{ id: string; apiType: string; models: string[] }>;
+    const responses = providers.find((item) => item.apiType === 'responses')!;
+    // 默认模型也设上：裸名会被默认模型覆盖，这会让"映射是否真的改了模型"变得不可分辨
+    await call('PUT', '/api/settings/default', { providerId: responses.id, model: responses.models[0] }, { cookie });
+
+    // 用共享的令牌：在这里重新生成会让后面用例里的令牌失效
+    const token = gatewayToken;
+    expect(token.length).toBeGreaterThan(20);
+
+    const send = async (extra: Record<string, string>): Promise<string> =>
+      (
+        await call(
+          'POST',
+          '/v1/responses',
+          { model: 'gpt-5.6-luna', input: 'hi', stream: false },
+          { ...extra, authorization: `Bearer ${token}` },
+        )
+      ).json().model as string;
+
+    // 审批请求（带 turn_trigger=guardian_review）→ 映射到 gpt-6-luna
+    const approved = await send({
+      'x-codex-turn-metadata': JSON.stringify({ turn_trigger: 'guardian_review' }),
+    });
+    expect(approved).toBe('gpt-6-luna');
+
+    // 同样的模型名、但不是审批请求 → 不能被改写（否则用户真的用这个模型时会错）
+    const normal = await send({});
+    expect(normal).not.toBe('gpt-6-luna');
+
+    // 清空映射后恢复默认行为
+    await call('PATCH', '/api/settings/codex', { approvalReviewModel: null }, { cookie });
+    const afterReset = await send({
+      'x-codex-turn-metadata': JSON.stringify({ turn_trigger: 'guardian_review' }),
+    });
+    expect(afterReset).not.toBe('gpt-6-luna');
+  });
+
+  it('开启跨协议转发后，Responses 请求可以落到 Chat 上游', async () => {
+    // 真实场景：Codex 只会发 /v1/responses，而很多上游只提供 Chat Completions。
+    // 打开开关后网关负责双向转换（含流式与工具调用）。
+    //
+    // 这条覆盖完整开关周期：关着 → 501 且错误信息可操作；打开 → 非流式与流式都成功；
+    // 再关掉 → 回到 501。只测"打开能用"会漏掉反向路径，而开关是要能关回去的
+    // （转换有信息损失，用户可能为了保留托管工具而关掉）。
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '只支持 chat 的上游',
+        apiType: 'openai',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-chat-only',
+        models: ['chat-only-model'],
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const providerKey = (created.json().provider as { providerKey: string }).providerKey;
+    const alias = `lam-${providerKey}/chat-only-model`;
+
+    // 显式关掉：这个实例里还有 responses 供应商，所以自动开启不会触发
+    // （触发条件是"只有 openai 供应商"）。这里要验的是手动关闭时的行为。
+    await call('PATCH', '/api/settings/codex', { protocolConversion: false }, { cookie });
+
+    // 开关关着：仍然拒绝，且错误信息要指出可以开启
+    const rejected = await call(
+      'POST', '/v1/responses',
+      { model: alias, input: 'hi', stream: false },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(rejected.statusCode).toBe(501);
+    expect(rejected.json().error.message).toContain('未开启协议转换');
+
+    // 打开开关
+    const enabled = await call(
+      'PATCH', '/api/settings/codex', { protocolConversion: true }, { cookie },
+    );
+    expect(enabled.statusCode).toBe(200);
+    expect(enabled.json().protocolConversion).toBe(true);
+
+    // 非流式：上游返 Chat 形状，网关要转成 Responses
+    const converted = await call(
+      'POST', '/v1/responses',
+      {
+        model: alias,
+        instructions: '你是助手',
+        input: [{ type: 'message', role: 'user', content: 'hi' }],
+        stream: false,
+      },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(converted.statusCode).toBe(200);
+    const body = converted.json() as { object: string; output: Array<Record<string, unknown>> };
+    expect(body.object).toBe('response');
+    // 上游假数据返回 'mock reply'，必须出现在 Responses 的 output 里
+    expect(JSON.stringify(body.output)).toContain('mock reply');
+
+    // 流式：必须产出 Responses 事件序列，而不是原样透传 Chat 的 delta
+    const streamed = await call(
+      'POST', '/v1/responses',
+      { model: alias, input: 'hi', stream: true },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(streamed.statusCode).toBe(200);
+    const sse = streamed.body;
+    // 必须是 Responses 的事件序列，而不是把 Chat 的 SSE 原样透传：
+    // Codex 只认 response.* 事件，收到 Chat 的 delta 会当成空响应。
+    expect(sse).toContain('event: response.created');
+    expect(sse).toContain('event: response.output_text.delta');
+    // 没有 response.completed 客户端会一直等（流不结束）
+    expect(sse).toContain('event: response.completed');
+    // 上游四个 chunk 拼起来是 "Hello from fake upstream"：
+    // 证明内容是跨 chunk 拼接的，不是只发了第一块
+    expect(sse).toContain('Hello');
+    // Chat 的结束标记不能泄漏给 Codex：它不是合法 Responses 事件，
+    // 而且转换层已经用 response.completed 表达了"结束"。
+    expect(sse).not.toContain('[DONE]');
+
+    // 关掉开关恢复原有行为
+    await call('PATCH', '/api/settings/codex', { protocolConversion: false }, { cookie });
+    const afterDisable = await call(
+      'POST', '/v1/responses',
+      { model: alias, input: 'hi', stream: false },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(afterDisable.statusCode).toBe(501);
+  });
+
+  it('跨协议转发时，会话状态类字段明确报错而不是静默丢弃', async () => {
+    await call('PATCH', '/api/settings/codex', { protocolConversion: true }, { cookie });
+    const providers = (await call('GET', '/api/providers', undefined, { cookie })).json()
+      .providers as Array<{ apiType: string; providerKey: string; models: string[] }>;
+    const chatOnly = providers.find((item) => item.apiType === 'openai')!;
+
+    const response = await call(
+      'POST', '/v1/responses',
+      {
+        model: `lam-${chatOnly.providerKey}/${chatOnly.models[0]}`,
+        input: 'hi',
+        previous_response_id: 'resp_1',
+        stream: false,
+      },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.message).toContain('previous_response_id');
+
+    await call('PATCH', '/api/settings/codex', { protocolConversion: false }, { cookie });
   });
 
   it('Claude Code 写入 env 段且保留其他设置', async () => {

@@ -46,7 +46,10 @@ describe('协议类型文案', () => {
 });
 
 describe('协议匹配', () => {
-  it('三条路径各自要求匹配的协议，均不做转换', () => {
+  // 注意：这条用例名里不要说"不做转换"。requiredApiType 只表达"路径与协议的对应表"，
+  // 是否允许跨协议转发由设置项 protocolConversion 决定，且只有 responses→openai
+  // 一个方向有转换器（见 gateway/convert/，端到端行为在 smoke 里）。
+  it('三条路径各自要求匹配的协议（定义映射，不涉及是否转换）', () => {
     expect(requiredApiType('/chat/completions')).toBe('openai');
     expect(requiredApiType('/messages')).toBe('anthropic');
     // responses 从"不限制"改为严格匹配：openai 上游不再被当成 responses 直通

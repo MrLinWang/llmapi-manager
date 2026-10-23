@@ -1,3 +1,10 @@
+/**
+ * Agent 配置下发（JSON/TOML 保值补丁 + 模型目录生成 + 应用/还原）的测试。
+ *
+ * 共同前提：我们写的是**用户自己的配置文件**，写坏了用户可能直接开不了工。
+ * 所以这里绝大多数用例都在守同一条底线——只动我们拥有的键、其余原样保留，
+ * 解析失败宁可报错也不能覆盖成空文件。
+ */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -57,12 +64,16 @@ describe('JSON 补丁', () => {
   });
 
   it('原文件损坏时抛错，不写空文件', () => {
+    // 这条守的是最危险的一种"看似容错"的写法：解析失败就当成空文件继续写。
+    // 那样用户的整个 Claude Code 配置会被一个 {} 覆盖掉，且无法恢复。
     expect(() => applyJsonWrites('{ broken', [{ path: 'a', value: 'b' }])).toThrow();
   });
 });
 
 describe('Agent 预览脱敏', () => {
   it('凭据类键只返回掩码，不返回完整令牌', () => {
+    // 预览是只读接口，最容易"顺手"把真实值返回给前端展示。
+    // 一旦漏了，完整网关令牌/上游 Key 就会经由 /preview 出接口（且会被浏览器缓存/日志记录）。
     const token = 'lam_abcdefghijklmnopqrstuvwxyz1234';
     const entries = buildPreviewEntries(AGENT_DEFINITIONS.codex, 'auth', null, [
       { path: 'OPENAI_API_KEY', value: token },
@@ -209,6 +220,12 @@ describe('TOML 补丁', () => {
 
 describe('Agent 应用与还原', () => {
   it('应用前备份、还原后保留用户改动', () => {
+    // 一条用例覆盖三件互相依赖的事，它们拆开测会失去意义：
+    // 1) 写前备份且落在同目录（数据目录丢了也能找回）
+    // 2) 无关键不被动（KEEP 必须还在）
+    // 3) 还原只撤销"仍等于我们写入值"的键，被手改过的保留为 conflicts
+    // 若第 3 点实现成"无条件删除"，用户手改的模型名会被悄悄抹掉；
+    // 若备份落到数据目录，本服务迁移/清空后就再也找不回原文件。
     const dir = tempDir();
     const settingsPath = path.join(dir, '.claude', 'settings.json');
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
@@ -221,18 +238,21 @@ describe('Agent 应用与还原', () => {
         { path: 'env.ANTHROPIC_MODEL', value: 'lam-alpha/gpt-x' },
       ],
     };
-    const backupsDir = path.join(dir, 'backups');
     const results = applyAgentWrites({
       agentId: 'claude-code',
       definition: AGENT_DEFINITIONS['claude-code'],
       paths: { config: settingsPath, auth: undefined },
       writes,
-      backupsDir,
     });
 
     expect(results).toHaveLength(1);
     expect(results[0].backupPath).toBeTruthy();
     expect(fs.readFileSync(results[0].backupPath as string, 'utf8')).toBe(original);
+    // 备份必须与被改文件同目录，且文件名带 .bak- 前缀，方便用户原地找回
+    expect(path.dirname(results[0].backupPath as string)).toBe(path.dirname(settingsPath));
+    expect(path.basename(results[0].backupPath as string)).toMatch(
+      /^settings\.json\.bak-\d{4}-\d{2}-\d{2}T/,
+    );
 
     const applied = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     expect(applied.env.KEEP).toBe('1');
@@ -268,7 +288,6 @@ describe('Agent 应用与还原', () => {
           { path: 'model', value: 'lam-alpha/gpt-x' },
         ],
       },
-      backupsDir: path.join(dir, 'backups'),
     });
 
     expect(results[0].created).toBe(true);
@@ -290,7 +309,6 @@ describe('Agent 应用与还原', () => {
         config: [{ path: 'model_provider', value: 'llmapi' }],
         auth: [{ path: 'OPENAI_API_KEY', value: 'lam_token' }],
       },
-      backupsDir: path.join(dir, 'backups'),
     });
     expect(results.every((item) => item.created)).toBe(true);
 
@@ -321,7 +339,6 @@ describe('Agent 应用与还原', () => {
       definition: AGENT_DEFINITIONS.codex,
       paths: { config: configPath, auth: undefined },
       writes: { config: [{ path: 'model_provider', value: 'llmapi' }] },
-      backupsDir: path.join(dir, 'backups'),
     });
     expect(results[0].created).toBe(false);
 

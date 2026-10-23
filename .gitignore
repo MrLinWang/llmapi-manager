@@ -91,3 +91,6 @@ Thumbs.db
 Desktop.ini
 .idea/
 .vscode/
+.cxtest
+.wt
+*.bak-*
