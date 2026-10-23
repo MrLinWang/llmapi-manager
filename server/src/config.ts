@@ -28,6 +28,15 @@ export interface AppConfig {
   /** 保留的滚动文件个数（不含当前写入的 app.log） */
   logMaxFiles: number;
   /**
+   * 是否开放 `/api/diagnostics/*` 诊断接口。默认关闭，需显式设
+   * `ENABLE_DIAGNOSTICS=1` 才开。
+   *
+   * 默认关闭的理由：这些接口会回显"转换后的上游请求体"，里面有用户 prompt 片段，
+   * 还能发起真实上游调用。它不是日常运维需要的，而是排查"跨协议转发到底有没有生效"
+   * 这类问题时临时打开的东西。默认开着等于给生产环境多一个探测面。
+   */
+  enableDiagnostics: boolean;
+  /**
    * Agent 配置文件的根目录（其下是 .codex/.claude）。
    * 默认取当前 OS 用户家目录；测试或多租户场景可覆盖。
    */
@@ -164,6 +173,7 @@ export function loadConfig(): AppConfig {
     logDir: resolveLogDir(repoRoot),
     logMaxBytes: positiveInt(optionalEnv('LOG_MAX_BYTES'), 5 * 1024 * 1024),
     logMaxFiles: positiveInt(optionalEnv('LOG_MAX_FILES'), 5),
+    enableDiagnostics: optionalEnv('ENABLE_DIAGNOSTICS') === '1',
     agentHomeDir: optionalEnv('AGENT_HOME_DIR'),
   };
 }

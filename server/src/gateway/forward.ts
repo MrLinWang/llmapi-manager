@@ -72,7 +72,20 @@ export function upstreamUrl(provider: ProviderRecord, path: GatewayPath): string
  * 只改 body 不改路径的话，Chat 上游会收到一个打到自己 `/responses` 端点的
  * Chat 请求体，返回 404 或奇怪的参数错误。
  */
-function upstreamPathFor(target: ForwardTarget, path: GatewayPath): GatewayPath {
+/**
+ * 上游实际要打的路径。
+ *
+ * 转换时**必须**改成 /chat/completions：只改请求体不改路径，就是把 Chat 形状的
+ * body 发到 /responses 端点，上游会报 404 或奇怪参数错误（真实踩过）。
+ *
+ * 导出是给诊断接口用的，让它算出的 URL 与实际转发一致——诊断自己拼一份路径
+ * 就会出现"诊断说打 A、实际打 B"，比没有诊断更误导。
+ */
+export function upstreamPathFor(
+  // 只取这一个字段：诊断接口传的是选路结果（Candidate），不是完整的 ForwardTarget
+  target: Pick<ForwardTarget, 'convertResponsesToChat'>,
+  path: GatewayPath,
+): GatewayPath {
   return target.convertResponsesToChat === true ? '/chat/completions' : path;
 }
 

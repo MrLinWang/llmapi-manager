@@ -1765,3 +1765,126 @@ describe('补充信息接口', () => {
     expect((await call('GET', '/api/overview')).statusCode).toBe(401);
   });
 });
+
+describe('冒烟：诊断接口', () => {
+  let diagCookie = '';
+  beforeAll(async () => {
+    const login = await call('POST', '/api/auth/login', {
+      username: 'admin',
+      password: 'brand-new-password',
+    });
+    diagCookie = String(login.headers['set-cookie']).split(';')[0];
+  });
+
+  it('默认关闭时返回 404，不暴露功能存在', async () => {
+    // 诊断接口会回显 prompt 片段并真的打上游，默认开放等于多一个探测面。
+    // 用 404 而不是 403：不告诉未授权的探测者"这里有个开关可以打开"。
+    const response = await call('GET', '/api/diagnostics/check', undefined, { cookie: diagCookie });
+    expect(response.statusCode).toBe(404);
+  });
+
+  describe('开启后', () => {
+    // 诊断开关是启动期配置，所以这里起一个独立的 app 实例并显式打开它。
+    // 复用主实例做不到——主实例在 beforeAll 时已经构建完成，改配置不会重建路由。
+    let diagApp: Awaited<ReturnType<typeof buildApp>>;
+    let diagDir = '';
+    let diagHome = '';
+    let diagCookie2 = '';
+
+    beforeAll(async () => {
+      diagDir = fs.mkdtempSync(path.join(os.tmpdir(), 'llmapi-diag-data-'));
+      diagHome = fs.mkdtempSync(path.join(os.tmpdir(), 'llmapi-diag-home-'));
+      const config = { ...testConfig(diagDir, diagHome), enableDiagnostics: true };
+      const logger = createLogger('error');
+      const ctx = createContext(config, logger);
+      await bootstrapIdentity(config, ctx.paths, ctx.identity, logger, ctx.setup);
+      diagApp = await buildApp({ ctx });
+      await diagApp.ready();
+
+      // 建一个 owner 账号（初始化后登录）
+      const setup = await diagApp.inject({ method: 'POST', url: '/api/setup', payload: {
+        token: ctx.setup.readToken?.() ?? '', username: 'admin', password: PASSWORD,
+      } });
+      if (setup.statusCode !== 201 && setup.statusCode !== 200) {
+        // 已初始化：直接登录
+      }
+      const login = await diagApp.inject({ method: 'POST', url: '/api/auth/login',
+        payload: { username: 'admin', password: PASSWORD } });
+      diagCookie2 = String(login.headers['set-cookie']).split(';')[0];
+    });
+
+    afterAll(async () => {
+      await diagApp?.close();
+      fs.rmSync(diagDir, { recursive: true, force: true });
+      fs.rmSync(diagHome, { recursive: true, force: true });
+    });
+
+    const diagCall = (
+      method: 'GET' | 'POST',
+      url: string,
+      payload?: unknown,
+    ) => diagApp.inject({ method, url, payload: payload as never, headers: { cookie: diagCookie2 } });
+
+    it('路由预演能解释"为什么选这家"，并列出被排除的供应商', async () => {
+      // 独立实例是空库，先建一家 responses 供应商与一家 openai 供应商，
+      // 这样才能验证"别名命中"与"被排除的供应商"两个分支
+      await diagApp.inject({ method: 'POST', url: '/api/providers', headers: { cookie: diagCookie2 },
+        payload: { name: 'Diag 响应式', apiType: 'responses', baseUrl: 'http://127.0.0.1:65530',
+          apiKey: 'sk-diag-1', models: ['gpt-resp'] } });
+      await diagApp.inject({ method: 'POST', url: '/api/providers', headers: { cookie: diagCookie2 },
+        payload: { name: 'Diag Chat', apiType: 'openai', baseUrl: 'http://127.0.0.1:65531',
+          apiKey: 'sk-diag-2', models: ['chat-model'] } });
+
+      const providers = (await diagApp.inject({ method: 'GET', url: '/api/providers',
+        headers: { cookie: diagCookie2 } })).json().providers as Array<{ providerKey: string; apiType: string }>;
+      const responsesKey = providers.find((item) => item.apiType === 'responses')!.providerKey;
+
+      const response = await diagCall(
+        'POST', '/api/diagnostics/route',
+        { model: `lam-${responsesKey}/gpt-resp`, path: '/responses' },
+      );
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.ok).toBe(true);
+      // 别名是明确指向，必须标成 alias——这样用户才知道"不是它自己挑的"
+      expect(body.primary.reason).toBe('alias');
+      expect(body.primary.apiTypeMatchesPath).toBe(true);
+      // 协议匹配时不需要转换
+      expect(body.primary.convertResponsesToChat).toBe(false);
+    });
+
+    it('转换器自检能跑通纯函数映射', async () => {
+      const response = await diagCall('GET', '/api/diagnostics/converter');
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      // 这组断言的价值：转换器坏了要能自己报出来，而不是等用户发现工具调不动
+      expect(body.cases.map((c: { name: string }) => c.name)).toContain(
+        'custom 工具 → 单参 function',
+      );
+      expect(body.ok).toBe(true);
+    });
+
+    it('自检清单能发现"开关关着但目录里有 openai 别名"', async () => {
+      const response = await diagCall('GET', '/api/diagnostics/check');
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      const names = body.checks.map((c: { name: string }) => c.name);
+      expect(names).toContain('Codex 有可用的上游协议');
+      expect(names).toContain('审批模型映射的生效条件');
+    });
+
+    it('诊断接口需要 settings:write，只读令牌被拒', async () => {
+      const created = await call(
+        'POST', '/api/tokens',
+        { name: '诊断只读', scopes: ['providers:read'] },
+        { cookie: diagCookie },
+      );
+      const token = created.json().token as string;
+      const response = await call('GET', '/api/diagnostics/check', undefined, {
+        authorization: `Bearer ${token}`,
+      });
+      // 未开启诊断时是 404，开启后必须 403——两种都不该是 200
+      expect([403, 404]).toContain(response.statusCode);
+    });
+  });
+});

@@ -15,6 +15,7 @@ import { registerLogRoutes } from './routes/logs';
 import { registerAgentRoutes } from './routes/agents';
 import { registerApiTokenRoutes } from './routes/apiTokens';
 import { registerApiInfoRoutes } from './routes/apiInfo';
+import { registerDiagnosticsRoutes } from './routes/diagnostics';
 import { registerGatewayRoutes } from './routes/gateway';
 import { DEFAULT_TENANT_ID } from './domain/identity';
 
@@ -134,6 +135,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   registerAgentRoutes(app, ctx, registry, repos);
   registerApiTokenRoutes(app, ctx, registry, repos);
   registerApiInfoRoutes(app, ctx, registry, repos);
+  registerDiagnosticsRoutes(app, ctx, registry, repos);
   registerGatewayRoutes(app, ctx, providerService);
 
   registry.assertAllDeclared();
