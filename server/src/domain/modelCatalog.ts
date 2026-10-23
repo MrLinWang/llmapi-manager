@@ -26,7 +26,9 @@ export interface CodexReasoningLevel {
 
 export interface CodexCatalogEntry {
   slug: string;
+  /** 我们生成的目录里恒等于 slug：/model 列表直接渲染它，必须与写进 config.toml 的 model 是同一个字符串 */
   display_name: string;
+  /** 来源说明（`供应商 提供的 上游模型`），允许与 display_name 不同；/model 列表作为条目上的次要文字展示 */
   description: string;
   priority: number;
   visibility: string;
@@ -98,7 +100,12 @@ export function buildModelCatalog(
     seen.add(alias.alias);
     entries.push({
       slug: alias.alias,
-      display_name: `${alias.providerName} · ${alias.upstreamModel}`,
+      // display_name 直接用别名本身（= slug），不再另拼一个「供应商 + 模型」的人类可读名：
+      // Codex 的 /model 列表渲染的就是这个字段，两者一致后，列表里看到的
+      // 与写进 config.toml 的 model 是同一个字符串，不会出现对不上号的情况。
+      display_name: alias.alias,
+      // description 仍是给人看的来源说明，与 display_name 不要求一致；
+      // /model 列表把它作为条目上的次要文字展示，用来补充"来自哪家、哪个上游模型"。
       description: `${alias.providerName} 提供的 ${alias.upstreamModel}`,
       priority: entries.length + 1,
       visibility: 'list',

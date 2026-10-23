@@ -11,7 +11,10 @@ export type AgentId = (typeof AGENT_IDS)[number];
 export type AgentFileRole = 'config' | 'auth' | 'catalog';
 
 export interface AgentFileSpec {
-  /** 逻辑角色：config 是主配置，auth 是凭据文件 */
+  /**
+   * 逻辑角色：config 是主配置、auth 是凭据文件，二者按键打补丁；
+   * catalog 是整份生成的模型目录，内容整体覆盖而非按键合并，语义与上两者不同。
+   */
   role: AgentFileRole;
   /** 相对解析出的 Agent 根目录的文件名，可含子目录 */
   relativePath: string;

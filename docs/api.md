@@ -290,7 +290,7 @@
 `claude-code` 只接受 `anthropic`。Codex 不再回落到 `openai` 供应商 —— `wire_api = "chat"` 已被 Codex 移除。
 没有匹配协议的启用供应商时预览返回 400，消息里会说明缺哪种协议。
 
-预览响应（Codex 有三个文件，`catalog` 的条目为空是因为它整份生成）：
+预览响应（Codex 有三个文件；`catalog` 是整份生成的，所以 `entries` 里只有一条汇总行）：
 
 ```json
 {
@@ -328,13 +328,18 @@
       "role": "catalog",
       "path": "/home/user/.codex/llmapi-model-catalog.json",
       "exists": false,
-      "entries": []
+      "entries": [
+        { "key": "（整份生成）", "next": "包含 2 个模型别名",
+          "current": null, "differs": true }
+      ]
     }
   ]
 }
 ```
 
-`catalog` 是整份生成的文件，没有"按 keys 打补丁"的语义，所以 `entries` 恒为空。
+`catalog` 是整份生成的文件，没有"按 keys 打补丁"的语义：`entries` 里只有一条汇总行
+（`key` 是 `（整份生成）`，`next` 是"包含 N 个模型别名"），不逐个列出 `slug`。
+文件已存在时 `current` 是"（将被覆盖，已自动备份）"。
 `model_catalog_json` 必须是顶层键（写进 `[model_providers.llmapi]` 会被 Codex 忽略并告警），
 它和 `model_catalog_url` 的分工见 [agents.md](./agents.md#模型目录model_catalog_json-与-model_catalog_url)。
 

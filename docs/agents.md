@@ -76,14 +76,22 @@ Codex 的「切换模型」列表读的是模型目录，而不是把 `/v1/model
 `/v1/models`：`model_catalog_json` 生效时 Codex 用本地目录（不再去拉 URL），
 `model_catalog_url` 留着是为了让「哪条上游提供模型」这件事对 Codex 也是显式的。
 
-目录结构是 Codex 原生的 `{ models: [{ slug, ... }] }`，不是 `/v1/models` 的 `{ object, data }`：
+目录结构是 Codex 原生的 `{ models: [{ slug, ... }] }`，不是 `/v1/models` 的 `{ object, data }`。
+
+`display_name` **等于 `slug`**，也就是别名本身（`lam-<providerKey>/<model>`）。原因：Codex 的
+`/model` 列表渲染的是 `display_name`，而真正标识模型、发请求用的是 `slug`。两者一致后，
+用户在列表里看到的、复制出来的、写进 `config.toml` 的就是同一个字符串，不会出现
+"列表里一个名字、配置文件里另一个名字"。
+
+`description` 是另一回事：它仍是给人看的说明 `${providerName} 提供的 ${upstreamModel}`
+（例子里是 `Mock Responses 提供的 gpt-resp`），**与 `display_name` 不同**，别把两者当成一回事。
 
 ```json
 {
   "models": [
     {
       "slug": "lam-mock-responses/gpt-resp",
-      "display_name": "Mock Responses · gpt-resp",
+      "display_name": "lam-mock-responses/gpt-resp",
       "description": "Mock Responses 提供的 gpt-resp",
       "priority": 1,
       "visibility": "list",
@@ -109,6 +117,8 @@ Codex 的「切换模型」列表读的是模型目录，而不是把 `/v1/model
 几个容易踩的点：
 
 - `slug` 必须与网关能解析的模型名完全一致（`lam-<key>/<model>`），否则 Codex 选中后发来的请求会被网关判为未知别名。
+- `display_name` 固定写 `slug`（不再拼「供应商 · 模型」），`description` 才是那句人类可读的说明。
+  改动这两者时不要互换：`display_name` 是 Codex 列表里直接显示的名字。
 - `supported_reasoning_levels` 是**对象数组**（`{ effort, description }`），写字符串数组会被判类型错误。
 - 每个模型至少要给 `base_instructions` 或 `model_messages.instructions_template` 之一，否则 Codex 拒绝加载。
   这里写一段简短说明而不是复制官方 21KB 系统提示词 —— 那些提示词描述的是官方模型的行为约定，套到第三方上游并不成立。
@@ -261,8 +271,8 @@ data/tenants/<tenantId>/backups/<agentId>/<ISO 时间戳>-<文件名>
    以及文件是否已存在。UI 用 `differs` 标记有变化的键。
    凭据类键（`OPENAI_API_KEY`、`ANTHROPIC_AUTH_TOKEN` 等）只返回掩码，完整令牌不会出现在预览响应里；
    完整值只在 `apply` 时写入目标文件。
-   Codex 的预览里有三个文件：`config`（9 个键）、`auth`（1 个键）、`catalog`（条目为空，因为它是整份生成的，
-   UI 显示"该文件无需写入"）。
+   Codex 的预览里有三个文件：`config`（最多 9 个键）、`auth`（1 个键）、`catalog`
+   （整份生成，只有一条汇总行「包含 N 个模型别名」，不逐个列出 `slug`）。
 2. **应用**（`POST /api/agents/:id/apply`）：备份 → 原子写入 → 记录快照。状态变为"已接管"。
 3. **重启 Agent**：配置只在进程启动时读取，应用后需要重启才能生效（UI 会提示）。
    Codex 可以直接用「退出 Codex 进程」按钮（见下节）。

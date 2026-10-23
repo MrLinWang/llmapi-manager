@@ -163,7 +163,10 @@ describe('TOML 补丁', () => {
     expect(parsed.models.map((m) => m.slug).sort()).toEqual(['lam-a/gpt-x', 'lam-b/claude-x']);
 
     for (const model of parsed.models) {
-      expect(typeof model.display_name).toBe('string');
+      // 显示名必须等于别名本身：用户在 /model 看到的、config.toml 里写的、
+      // 以及复制粘贴出去的应当是同一个字符串，不能一个中文名一个 slug。
+      expect(model.display_name).toBe(model.slug);
+      expect(String(model.slug)).toMatch(/^lam-[a-z0-9-]+\//);
       expect(model.visibility).toBe('list');
       expect(model.supported_in_api).toBe(true);
       expect(typeof model.shell_type).toBe('string');
