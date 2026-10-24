@@ -282,6 +282,65 @@ describe('前端页面装配', () => {
     expect(document.body.textContent ?? '').toContain('data/setup.json');
     setOverrides({});
   });
+  it('审批模型下拉能区分同名模型属于哪家供应商', async () => {
+    // 真实问题：用户的 gpt-6-luna 同时被 openai 与 responses 两家声明，
+    // 下拉里两行都写 "gpt-6-luna"，根本看不出区别，而两家结果不同
+    // （协议匹配的那家直通，另一家要转换）。
+    //
+    // 这里断言标签里带上了供应商与"直通/需转换"标记。
+    const providers = [
+      { id: 'p1', providerKey: 'wllapi', name: 'wllapi', apiType: 'openai', enabled: true,
+        baseUrl: 'http://a', models: ['gpt-6-luna', 'kimi-k3'], priority: 1,
+        apiKeyMasked: 'sk-***', apiKeyTail: 'abcd', lastTest: null, createdAt: '', updatedAt: '' },
+      { id: 'p2', providerKey: 'opendesign', name: 'opendesign', apiType: 'responses', enabled: true,
+        baseUrl: 'http://b', models: ['gpt-6-luna'], priority: 2,
+        apiKeyMasked: 'sk-***', apiKeyTail: 'efgh', lastTest: null, createdAt: '', updatedAt: '' },
+    ];
+    setOverrides({
+      '/api/providers': { providers },
+      '/api/settings': {
+        defaultProviderId: null, defaultModel: null, disableCodexWebSearch: true,
+        approvalReviewModel: null, protocolConversion: false,
+        agentTargets: { codex: { mode: 'gateway', directProviderId: null, directModel: null, autoReviewModel: null } },
+        gatewayBaseUrl: 'http://127.0.0.1:8787/v1',
+        token: { exists: true, prefix: 'lam_ab', tail: 'cd', masked: 'lam_ab**cd' },
+      },
+    });
+    const { render, cleanup, screen } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const AgentsPage = (await import('../src/pages/AgentsPage')).default;
+
+    // 先卸载之前用例留下的组件树：这个测试文件不逐个 cleanup，
+    // 残留的 AgentsPage 会让 findByLabelText 命中旧 DOM、读到上一份 providers。
+    cleanup();
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <AgentsPage />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // 等到下拉出现
+    const select = (await screen.findByLabelText(
+      'Approve for me 使用的模型',
+    )) as HTMLSelectElement;
+    const labels = [...select.options].map((o) => o.textContent ?? '');
+
+    const gptOption = labels.find((text) => text.includes('gpt-6-luna'));
+    expect(gptOption).toBeDefined();
+    // 必须能看出走哪家、是直通还是需转换
+    expect(gptOption).toContain('opendesign');
+    expect(gptOption).toContain('直通');
+    // 同名被两家声明也要提示，否则用户不知道还有一家
+    expect(gptOption).toContain('wllapi');
+    // 同名模型只出现一次（设置里只存模型名，重复行会让人以为能选供应商）
+    expect(labels.filter((text) => text.startsWith('gpt-6-luna'))).toHaveLength(1);
+    setOverrides({});
+  });
+
   it('设置页可管理 API 令牌：只能勾选自己拥有的权限', async () => {
     // 令牌是收窄授权，界面上若能勾选自己没有的权限，用户点下去只会撞 403。
     // 这里断言渲染时就按 can() 过滤——mock 的 me 只给了 settings/providers 等，

@@ -14,6 +14,42 @@ import {
   type IconName,
 } from '../components/ui';
 
+/**
+ * 审批模型候选。
+ *
+ * 必须带供应商信息，不能只给模型名：同一个模型名常被多家供应商声明
+ * （例如 gpt-6-luna 同时在 openai 与 responses 两家），下拉框里两行都写
+ * `gpt-6-luna` 的话，用户根本看不出选的是哪一家——而这两家的结果并不相同
+ * （协议匹配的那家能直通，另一家要经过转换）。
+ */
+interface ApprovalCandidate {
+  model: string;
+  /** 会承接这家（网关选路优先协议匹配，所以是"最能直通"的那家） */
+  providerName: string;
+  providerKey: string;
+  apiType: string;
+  /** 协议与 Codex 的 responses 一致 → 直通；否则网关会做协议转换 */
+  direct: boolean;
+  /** 还有哪些供应商也声明了同名模型 */
+  sharedWith: string[];
+}
+
+/**
+ * 下拉框里一项的显示文案。
+ *
+ * 只写模型名会重名，所以补上供应商与协议；加 `direct` 标记是因为
+ * "能直通"是用户做选择时最该知道的信息（转换有信息损失，且多一层可能失败）。
+ * 但两侧重名时仍可能看混，因此再带上 providerKey（唯一）。
+ */
+function approvalLabel(item: ApprovalCandidate): string {
+  const tag = item.direct ? '直通' : '需转换';
+  const base = `${item.model} — 走 ${item.providerName} (${item.providerKey}/${item.apiType}, ${tag})`;
+  // 同名模型被多家声明时说清楚：最终由网关按协议匹配挑，用户不必也不能指定
+  return item.sharedWith.length === 0
+    ? base
+    : `${base}；${item.sharedWith.join('、')} 也声明了同名模型`;
+}
+
 function agentIcon(id: string): IconName {
   return id === 'codex' ? 'terminal' : 'agents';
 }
@@ -239,18 +275,49 @@ export default function AgentsPage(): JSX.Element {
    * 真正的约束下沉到服务端：用户选定后由选路逻辑判断这家能不能承接本次路径，
    * 不能就在报错里说清原因，而不是在列表阶段就替用户把选项藏起来。
    */
-  const approvalCandidates = (): string[] => {
-    const seen = new Set<string>();
-    const out: string[] = [];
+  const approvalCandidates = (): ApprovalCandidate[] => {
+    // 按模型名聚合：设置里只存模型名，"选哪家供应商"由网关按协议匹配自动决定。
+    // 所以同一个名字在列表里只能出现一次——出现两次用户会以为能选供应商，
+    // 而实际选了也没区别（值相同）。把"会落到哪家"写进标签就行。
+    const byModel = new Map<string, ApprovalCandidate>();
     for (const provider of providers.data?.providers ?? []) {
       if (!provider.enabled) continue;
+      const direct = provider.apiType === 'responses';
       for (const model of provider.models) {
-        if (seen.has(model)) continue;
-        seen.add(model);
-        out.push(model);
+        const existing = byModel.get(model);
+        if (!existing) {
+          byModel.set(model, {
+            model,
+            providerName: provider.name,
+            providerKey: provider.providerKey,
+            apiType: provider.apiType,
+            direct,
+            // 还有别家也声明了这个模型——标签里要提示，因为最终选哪家由网关切定
+            sharedWith: [],
+          });
+        } else {
+          // 记下"还有谁声明了同一个名字"。必须排除自己：切换主供应商后
+          // 原主供应商也要补进 sharedWith，否则会漏掉（或重复记自己）。
+          const others = new Set(
+            [existing.providerName, ...existing.sharedWith].filter(
+              (name) => name !== provider.name,
+            ),
+          );
+          if (direct && !existing.direct) {
+            // 有一家能直通就以它为准：网关选路优先协议匹配
+            existing.providerName = provider.name;
+            existing.providerKey = provider.providerKey;
+            existing.apiType = provider.apiType;
+            existing.direct = true;
+          }
+          existing.sharedWith = [...others];
+        }
       }
     }
-    return out;
+    // 能直通的排前面，其余按名字
+    return [...byModel.values()].sort(
+      (a, b) => Number(b.direct) - Number(a.direct) || a.model.localeCompare(b.model),
+    );
   };
 
   /**
@@ -467,9 +534,9 @@ export default function AgentsPage(): JSX.Element {
                   onChange={(event) => void pickApprovalModel(event.target.value)}
                 >
                   <option value="">不映射（跟随 Codex 默认）</option>
-                  {approvalCandidates().map((model) => (
-                    <option key={model} value={model}>
-                      {model}
+                  {approvalCandidates().map((item) => (
+                    <option key={item.model} value={item.model}>
+                      {approvalLabel(item)}
                     </option>
                   ))}
                 </select>
@@ -478,6 +545,12 @@ export default function AgentsPage(): JSX.Element {
                   <code className="font-mono">gpt-5.6-luna</code>，无法配置。走网关时本服务
                   能识别审批请求（<code className="font-mono">turn_trigger=guardian_review</code>
                   ），把其中的模型名替换成这里选定的模型。只在走网关时生效。
+                </p>
+                <p className="mt-1 text-[11px] leading-4 text-muted">
+                  每项标注了会走哪家供应商：<strong className="text-ink">直通</strong>
+                  表示协议匹配、不转换；<strong className="text-ink">需转换</strong>
+                  表示要经过跨协议转换（有信息损失）。同名模型被多家声明时，
+                  由网关优先选协议匹配的那家——这里只锁定模型名，不锁定供应商。
                 </p>
               </div>
             )}
