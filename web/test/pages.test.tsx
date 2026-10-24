@@ -306,15 +306,12 @@ describe('前端页面装配', () => {
         token: { exists: true, prefix: 'lam_ab', tail: 'cd', masked: 'lam_ab**cd' },
       },
     });
-    const { render, cleanup, screen } = await import('@testing-library/react');
+    const { render, screen } = await import('@testing-library/react');
     const { MemoryRouter } = await import('react-router-dom');
     const { AuthProvider } = await import('../src/lib/auth');
     const AgentsPage = (await import('../src/pages/AgentsPage')).default;
 
-    // 先卸载之前用例留下的组件树：这个测试文件不逐个 cleanup，
-    // 残留的 AgentsPage 会让 findByLabelText 命中旧 DOM、读到上一份 providers。
-    cleanup();
-
+    // 不需要手动 cleanup：test/setup.ts 注册了全局 afterEach 清理。
     render(
       <MemoryRouter>
         <AuthProvider>
@@ -422,8 +419,9 @@ describe('前端页面装配', () => {
     const { AuthProvider } = await import('../src/lib/auth');
     const { ProviderForm } = await import('../src/components/ProviderForm');
 
-    // 注意：vitest globals 关闭时 RTL 不会自动 cleanup，前面用例的 DOM 还在，
-    // 所以所有查询都限定在本用例的 container 内。
+    // 全局 afterEach 已经会 cleanup（见 test/setup.ts），但这里仍用 within(container)
+    // 限定查询范围：ProviderForm 里有多个同名 label，限定作用域能让断言更明确地
+    // 指向本次渲染的实例，不依赖"document 里恰好只有一份"这个前提。
     const { container } = render(
       <MemoryRouter>
         <AuthProvider>

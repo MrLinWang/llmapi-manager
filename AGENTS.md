@@ -308,6 +308,9 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
   并确认 smoke 里三条都在："自动开启后打通 Chat 上游"、"有 responses 供应商时不自动开"、
   "转换解决不了时仍 501 且不改设置"。
 - 改到模型拉取 → 补 `server/test/smoke.test.ts`（三种协议、`/v1` 拼接、借用已保存 Key、上游不可达不 500）。
+- 改 web 测试 → 记住 `globals: false` 让 RTL **不自动 cleanup**，清理靠
+  `web/test/setup.ts` 的 `afterEach(cleanup)`。少了它，上一个用例的 DOM 会留到下一个，
+  症状是"单独跑通过、整个文件跑失败"或读到上一条用例的 mock 数据。
 - 改了品牌名 / 对外文案 → 同步 `README.md`、`web/index.html`、登录页与侧边栏。
 
 ## 明确不做的事
