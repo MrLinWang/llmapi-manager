@@ -6,6 +6,8 @@ import type { AgentsData, AgentBindingState, AgentId } from '../domain/agent';
 import { defaultAgentsData } from '../domain/agent';
 import type { RequestLogRecord } from '../domain/requestLog';
 import type { ApiTokenRecord } from '../domain/apiToken';
+import type { SyncConflict, SyncConflictsData } from '../domain/sync';
+import { defaultSyncConflictsData } from '../domain/sync';
 import { createJsonFile, appendJsonLine, readJsonLines, type JsonFile } from './jsonFile';
 import type { StorePaths } from './paths';
 import type { IdentityRepo } from './identityRepo';
@@ -37,6 +39,12 @@ export interface ApiTokenRepo {
   saveAll(tokens: ApiTokenRecord[]): void;
 }
 
+export interface SyncConflictRepo {
+  list(): SyncConflict[];
+  saveAll(conflicts: SyncConflict[]): void;
+  clear(): void;
+}
+
 export interface RequestLogRepo {
   append(record: RequestLogRecord): void;
   recent(limit: number): RequestLogRecord[];
@@ -50,6 +58,7 @@ export interface TenantRepos {
   readonly agents: AgentRepo;
   readonly requestLog: RequestLogRepo;
   readonly apiTokens: ApiTokenRepo;
+  readonly syncConflicts: SyncConflictRepo;
 }
 
 export interface Store {
@@ -132,12 +141,25 @@ export function createStore(
       saveAll: (next) => apiTokensFile.write({ tokens: next }),
     };
 
+    const syncConflictsFile = createJsonFile<SyncConflictsData>({
+      filePath: paths.syncConflictsFile(tenantId),
+      schemaVersion: 1,
+      defaultValue: defaultSyncConflictsData,
+      logger,
+    });
+
+    const syncConflicts: SyncConflictRepo = {
+      list: () => syncConflictsFile.read().conflicts ?? [],
+      saveAll: (next) => syncConflictsFile.write({ conflicts: next }),
+      clear: () => syncConflictsFile.write({ conflicts: [] }),
+    };
+
     const requestLog: RequestLogRepo = {
       append: (record) => appendJsonLine(logFile, record),
       recent: (limit) => readJsonLines<RequestLogRecord>(logFile, limit).reverse(),
     };
 
-    return { tenantId, providers, settings, agents, requestLog, apiTokens };
+    return { tenantId, providers, settings, agents, requestLog, apiTokens, syncConflicts };
   };
 
   return {

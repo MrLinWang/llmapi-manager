@@ -588,6 +588,172 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 - 令牌按租户分文件存放：当前只有默认租户，所以鉴权时直接查 `t_default`。
   做多租户需要一张全局 `hash → tenantId` 索引，否则得遍历所有租户。
 
+## 配置同步
+
+多设备配置同步：一台机器当 master 导出配置，其余 follower 拉取。设计与取舍见
+[sync.md](./sync.md)。
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/sync/status` | `settings:read` | 当前角色、可选范围、冲突数、永不同步项 |
+| PATCH | `/api/sync/config` | `settings:write` | 修改角色 / master 地址 / 同步范围 |
+| GET | `/api/sync/snapshot` | **`sync:read`** | master 导出快照（**含上游 Key 明文**） |
+| POST | `/api/sync/pull` | **`sync:write`** | follower 主动拉取并应用 |
+| GET | `/api/sync/conflicts` | `settings:read` | 待仲裁冲突列表 |
+| POST | `/api/sync/conflicts/:id/resolve` | **`sync:write`** | 用本地版或远端版了结一条冲突 |
+
+`sync:read` 与 `sync:write` 刻意不对称：前者能把全部上游 API Key 明文导出，默认不授予
+任何角色（`admin` 也不含），需要显式创建含该 scope 的 API 令牌；后者只改本机自己的配置
+（风险与改设置同级），`admin` 有。`status` / `config` / `conflicts` 三个接口仍用 `settings:*`。
+
+### GET /api/sync/status
+
+权限 `settings:read`。
+
+```json
+{
+  "config": {
+    "role": "follower",
+    "masterUrl": "https://box.example.com:8787",
+    "scopes": ["providers", "settings"],
+    "lastPullAt": "2026-01-01T00:00:00.000Z",
+    "lastPullResult": "从 https://box.example.com:8787 拉取完成：应用 4 项，产生 0 条冲突待仲裁（180ms）"
+  },
+  "availableScopes": [
+    { "scope": "providers", "label": "供应商与模型（含上游 API Key，跨机重新加密）" },
+    { "scope": "settings", "label": "网关设置（默认模型、跨协议转发、审批模型等）" },
+    { "scope": "agentTargets", "label": "Agent 连接方式（走网关 / 直连）" }
+  ],
+  "conflictCount": 0,
+  "neverSynced": ["登录口令", "会话 cookie", "DATA_ENCRYPTION_KEY", "网关令牌"]
+}
+```
+
+`availableScopes` 与 `neverSynced` 都是给界面直接渲染的，避免前端另维护一份清单与文案。
+
+### PATCH /api/sync/config
+
+权限 `settings:write`。
+
+```json
+{ "role": "follower", "masterUrl": "https://box.example.com:8787", "scopes": ["providers"] }
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `role` | `standalone` / `master` / `follower`，其余值 400 |
+| `masterUrl` | follower 的拉取地址；`null` 或空串清除；保存时去掉尾部 `/` |
+| `scopes` | `providers` / `settings` / `agentTargets` 的子集，重复项被去重，未知值 400 |
+
+字段均可省略（省略即不修改）。`role` 为 `follower` 时 `masterUrl` 不能为空，否则 400。
+返回 `{ config }`。
+
+### GET /api/sync/snapshot
+
+权限 **`sync:read`**。master 专用，非 master 返回 400。查询参数 `scopes`（逗号分隔，
+省略时用设置里的；两者都为空则视为全部范围）。
+
+响应体就是快照本身：
+
+```json
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-01-01T00:00:00.000Z",
+  "masterId": "http://127.0.0.1:8787",
+  "scopes": ["providers"],
+  "providers": [
+    { "id": "p_...", "name": "wllapi", "providerKey": "wllapi", "apiType": "openai",
+      "baseUrl": "https://api.example.com/v1", "apiKey": "sk-...（明文）",
+      "models": ["gpt-6-luna"], "enabled": true, "priority": 1,
+      "createdBy": "u_owner", "createdAt": "...", "updatedAt": "..." }
+  ]
+}
+```
+
+`settings` 与 `agentTargets` 只在对应 scope 勾选时出现。`settings` **不含 `gatewayToken`**。
+
+> **`apiKey` 在这里是明文。** `enc:v1:` 密文绑定本机的 `DATA_ENCRYPTION_KEY`，
+> 传过去解不开，所以只能明文过网、由对方重新加密。因此：非回环地址强制 HTTPS
+> （否则 403，`SYNC_ALLOW_INSECURE=1` 可显式豁免）、响应头带 `cache-control: no-store`
+> 与 `pragma: no-cache`、日志只记"谁导出了几个范围、多少条"而不记内容。
+
+### POST /api/sync/pull
+
+权限 **`sync:write`**。非 follower 返回 400。
+
+```json
+{ "token": "api_...（master 的 API 令牌，需含 sync:read）" }
+```
+
+令牌前缀必须是 `api_`，否则 400。服务端用它请求 master 的 snapshot 接口（30 秒超时），
+再应用到本地；令牌只这一次使用，**不落盘**。
+
+```json
+{
+  "applied": 4,
+  "conflicts": [{ "id": "c_ab12cd34ef56", "scope": "providers", "targetId": "p_...",
+                  "targetLabel": "wllapi (wllapi)", "changedFields": ["apiKey", "models"] }],
+  "summary": "从 https://box.example.com:8787 拉取完成：应用 4 项，产生 1 条冲突待仲裁（180ms）"
+}
+```
+
+`conflicts` 是本次新产生的项（已追加进冲突文件，未覆盖历史冲突）。失败时返回 400，
+`master 返回 <status>：<响应体前 200 字>` 或 `拉取超时（30 秒）…`。
+
+### GET /api/sync/conflicts
+
+权限 `settings:read`。
+
+```json
+{
+  "conflicts": [
+    {
+      "id": "c_ab12cd34ef56",
+      "scope": "providers",
+      "targetId": "p_...",
+      "targetLabel": "wllapi (wllapi)",
+      "localUpdatedAt": "2026-06-01T00:00:00.000Z",
+      "remoteUpdatedAt": "2026-01-01T00:00:00.000Z",
+      "changedFields": ["apiKey", "models"],
+      "localValue": { "id": "p_...", "name": "wllapi", "models": ["gpt-6-luna"],
+                      "apiKeyMasked": "***wxyz", "updatedAt": "..." },
+      "remoteValue": { "id": "p_...", "name": "wllapi", "models": ["gpt-5"],
+                       "apiKeyMasked": "***abcd", "updatedAt": "..." },
+      "detectedAt": "2026-01-02T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+- `changedFields` 只给字段名（`name` / `baseUrl` / `apiType` / `enabled` / `priority` /
+  `models` / `apiKey`；`settings` 则是五个设置字段名），不含完整值。
+- `localValue` / `remoteValue` 是**打码后**的可比较形态，Key 只留 `***` + 末 4 位。
+- 完整远端值加密保存在 `sync-conflicts.json` 的 `remoteValueSealed` 里，**不出接口**
+  （路由会把它剔除，因为只需要 `settings:read` 的人不该拿到凭据副本）。
+  本机未配置 `DATA_ENCRYPTION_KEY` 时该字段为 `null`。
+- 冲突判定用 `Date.parse` 比较时间数值（不是字符串比较），所以带不同时区偏移的
+  `updatedAt` 不会误判。**时间戳相同但内容不同也算冲突**，不静默让远端覆盖。
+
+### POST /api/sync/conflicts/:id/resolve
+
+权限 **`sync:write`**。
+
+```json
+{ "choice": "remote" }
+```
+
+`choice` 只能是 `local` 或 `remote`，否则 400。
+
+- `local`：不改数据（本地版就是现值），只移除这条冲突。
+- `remote`：解封 `remoteValueSealed` 并用远端版覆盖该条。
+
+返回 `{ "ok": true, "conflictCount": 0 }`；未知 id 返回 400。
+
+本机未配置 `DATA_ENCRYPTION_KEY` 时冲突里没有封存值（`sealRemoteValue` 拒绝把明文
+落进冲突文件），选 `remote` 会返回 400 并提示"请先设置 `DATA_ENCRYPTION_KEY` 并重启，
+再重新拉取以重建冲突记录；或者改选『用本地』"。这与「未知冲突」是两种不同原因，
+报错文案刻意分开。
+
 ## 信息接口
 
 | 方法 | 路径 | 权限 | 说明 |

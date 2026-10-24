@@ -9,6 +9,14 @@ export interface AppConfig {
   port: number;
   /** 写进 Agent 配置的网关地址（不带 /v1） */
   publicBaseUrl: string;
+  /**
+   * `publicBaseUrl` 是用户显式配置的，还是按监听地址推导出来的。
+   *
+   * 这个区分是安全判断需要的：推导值时 `HOST=0.0.0.0` 会回落成
+   * `http://127.0.0.1:8787`，看起来"是回环所以安全"，但服务其实对外监听。
+   * 把推导值当成安全证据，等于用"我不知道真实地址"来自证清白。
+   */
+  publicBaseUrlIsExplicit: boolean;
   dataDir: string;
   webDistDir: string;
   adminUsername: string;
@@ -36,6 +44,29 @@ export interface AppConfig {
    * 这类问题时临时打开的东西。默认开着等于给生产环境多一个探测面。
    */
   enableDiagnostics: boolean;
+  /**
+   * 允许同步快照走明文 HTTP。
+   *
+   * 快照里是上游 API Key 的**明文**（对端机器的加密密钥不同，密文传过去解不开），
+   * 所以默认要求 HTTPS。仅在明确可信的内网（例如已经跑在 EasyTier 的加密隧道里）
+   * 才应该打开。
+   */
+  syncAllowInsecure: boolean;
+  /**
+   * Fastify 的 trustProxy 设置。
+   *
+   * `'loopback'` 表示只信任来自本机回环的 `X-Forwarded-Proto` 等转发头——
+   * 这是 nginx 回源的常态。**不能设成 true**：那样任何客户端都能伪造
+   * `X-Forwarded-Proto: https` 绕过 HTTPS 检查。
+   */
+  trustProxy: boolean | 'loopback';
+  /**
+   * 本实例的稳定标识，首次启动时生成并保存到 `instance.json`。
+   *
+   * 用途：同步时让 follower 判断"master 是不是换了一台机器"。不能用
+   * `publicBaseUrl` 代替——反代部署下两台机器可能配同一个对外地址。
+   */
+  instanceId: string;
   /**
    * Agent 配置文件的根目录（其下是 .codex/.claude）。
    * 默认取当前 OS 用户家目录；测试或多租户场景可覆盖。
@@ -120,6 +151,35 @@ function resolveSessionSecret(dataDir: string): {
 }
 
 /**
+ * 读取或生成实例标识。
+ *
+ * 与 `sessionSecret` 共用 `instance.json`：两者都是"本机实例的本地状态"，
+ * 放一起可以少一个文件。**不能**用 `publicBaseUrl` 当实例标识——反代部署下
+ * 两台机器可能配置同一个对外地址，那样"master 换机检测"会失效。
+ */
+function readOrCreateInstanceId(dataDir: string): string {
+  const file = path.join(dataDir, 'instance.json');
+  try {
+    if (fs.existsSync(file)) {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { instanceId?: string };
+      if (typeof parsed.instanceId === 'string' && parsed.instanceId.length >= 8) {
+        return parsed.instanceId;
+      }
+      // 老版本文件没有这个字段：补写进去，保留已有的 sessionSecret
+      const id = `inst_${randomBytes(8).toString('hex')}`;
+      fs.writeFileSync(file, JSON.stringify({ ...parsed, instanceId: id }, null, 2), {
+        mode: 0o600,
+      });
+      return id;
+    }
+  } catch {
+    // 损坏时重新生成；instance.json 只是可重建的本地状态
+  }
+  // 走不到这里（sessionSecret 的生成逻辑会先创建文件），但保留兜底
+  return `inst_${randomBytes(8).toString('hex')}`;
+}
+
+/**
  * 解析日志目录。
  * 默认落在仓库根的 log/（与 web/dist 用同一套 __dirname 推导，server/src 与 server/dist 都成立），
  * 这样 npm workspaces 把 cwd 切到 server/ 后，日志仍然只在一个固定位置。
@@ -154,14 +214,16 @@ export function loadConfig(): AppConfig {
   const resolvedPort = Number.isFinite(port) ? port : 8787;
   const repoRoot = path.resolve(__dirname, '..', '..');
   // 下发给 Agent 的地址：优先显式配置，否则按监听地址推导（0.0.0.0 对客户端无意义，回落本机）
+  const explicitBaseUrl = optionalEnv('PUBLIC_BASE_URL')?.replace(/\/+$/, '');
   const publicBaseUrl =
-    optionalEnv('PUBLIC_BASE_URL')?.replace(/\/+$/, '') ??
+    explicitBaseUrl ??
     `http://${host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host}:${resolvedPort}`;
 
   return {
     host,
     port: resolvedPort,
     publicBaseUrl,
+    publicBaseUrlIsExplicit: explicitBaseUrl !== undefined,
     dataDir,
     webDistDir: path.resolve(repoRoot, 'web', 'dist'),
     adminUsername: optionalEnv('ADMIN_USERNAME') ?? 'admin',
@@ -174,6 +236,10 @@ export function loadConfig(): AppConfig {
     logMaxBytes: positiveInt(optionalEnv('LOG_MAX_BYTES'), 5 * 1024 * 1024),
     logMaxFiles: positiveInt(optionalEnv('LOG_MAX_FILES'), 5),
     enableDiagnostics: optionalEnv('ENABLE_DIAGNOSTICS') === '1',
+    syncAllowInsecure: optionalEnv('SYNC_ALLOW_INSECURE') === '1',
+    // 只在显式开启时信任转发头，且只信任回环来源
+    trustProxy: optionalEnv('TRUST_PROXY') === '1' ? 'loopback' : false,
+    instanceId: readOrCreateInstanceId(dataDir),
     agentHomeDir: optionalEnv('AGENT_HOME_DIR'),
   };
 }

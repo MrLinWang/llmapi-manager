@@ -65,7 +65,7 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 
 ## 权限
 
-11 个权限位，集中定义在 `server/src/domain/permissions.ts`：
+13 个权限位，集中定义在 `server/src/domain/permissions.ts`：
 
 | 权限 | 含义 |
 | --- | --- |
@@ -73,16 +73,22 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 | `gateway:read` / `gateway:write` | 查看网关信息 / 生成与重置网关令牌 |
 | `agents:read` / `agents:apply` | 预览 / 应用与还原 Agent 配置；`agents:apply` 还能**结束本机 Codex 进程** |
 | `logs:read` | 查看请求日志与统计 |
-| `settings:read` / `settings:write` | 查看 / 修改默认供应商与模型、Codex 行为开关；**API 令牌的查看 / 创建 / 吊销**也归这里 |
+| `settings:read` / `settings:write` | 查看 / 修改默认供应商与模型、Codex 行为开关、同步角色与范围；**API 令牌的查看 / 创建 / 吊销**也归这里 |
+| `sync:read` | **导出同步快照（含全部上游 API Key 明文）**，见「同步快照的威胁模型」 |
+| `sync:write` | 拉取 master 快照、仲裁同步冲突（不导出凭据，风险与改设置同级） |
 | `users:manage` / `tenants:manage` | 预留给多用户与多租户管理（当前无对应接口，也不可授予 API 令牌） |
 
 角色映射：
 
 | 角色 | 权限 |
 | --- | --- |
-| `owner` | 全部 11 项 |
-| `admin` | 除 `gateway:write`、`users:manage`、`tenants:manage` 外的管理权限 |
+| `owner` | 全部 13 项 |
+| `admin` | 除 `gateway:write`、`sync:read`、`users:manage`、`tenants:manage` 外的管理权限（**含 `sync:write`**） |
 | `member` | 仅 `gateway:read` |
+
+> `admin` 刻意**不含** `sync:read`：那个权限能把全部上游 Key 明文导出去，应当由 owner
+> 显式授予，而不是随 admin 一起扩散。但它**有** `sync:write`——拉取与仲裁改的是本机
+> 自己的配置，风险与改设置同级。这个不对称就是"只收窄、不提权"的具体形态。
 
 > `member` 是网关令牌解析出的角色，它只够消费模型。**API 令牌不是这个角色**：
 > 令牌解析出的 `role` 虽然也是 `member`，但判定时只看 `scopes`、忽略角色
@@ -136,6 +142,75 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
   （300ms 后仍在的补 `SIGKILL`）。它只认可执行文件名恰好是 `codex` 的进程，
   不碰 `mycodex`、编辑器插件、`codex --version` 这类一次性命令；Claude Code 不受影响。
   这意味着"点一个按钮"就可能中断你正在跑的 Codex 会话。
+
+## 同步快照的威胁模型
+
+多设备配置同步（[sync.md](./sync.md)）会跨机传输**上游 API Key 的明文**。这不是疏忽，
+是唯一可行的做法：`enc:v1:` 密文绑定本机 `DATA_ENCRYPTION_KEY`，换个密钥解不开。
+于是设计上必须承认"快照本身就是一份凭据"，并据此收紧三处。
+
+### 为什么 `sync:read` 单独成权限
+
+`GET /api/sync/snapshot` 是**唯一**能把全部上游 Key 明文导出的接口。如果它复用
+`settings:write`，就等于把两件风险差着数量级的事绑成一个授权项：
+
+- "能改默认模型" —— 改错了再改回来即可；
+- "能一次性导走我所有付费凭据" —— 导走之后无法追溯、无法撤回。
+
+拆开后可以把"改设置的人"与"能导出凭据的人"分开授权。代价是 `admin` 默认没有它，
+需要 owner 显式创建带 `sync:read` 的 API 令牌。
+
+它**可以**授予 API 令牌（不在 `UNGRANTABLE` 里），因为 follower 拉取必须用令牌而不是
+登录会话；但仍受"只收窄、不提权"约束——只有本身持有 `sync:read` 的账号才能创建它。
+这意味着一个 `sync:read` 令牌等价于"全部上游 Key 的离线副本"，要像对待 root 凭据一样
+对待它：设 `expiresAt`，用完吊销。
+
+### 为什么强制 HTTPS
+
+`assertSecureTransport` 检查**本次请求的实际协议**（`request.protocol`）：非 `https:`
+且 Host 不是回环时返回 **403**。理由是快照在链路上就是明文 Key，走明文 HTTP 等于把它
+扔进同一网段的抓包范围。
+
+两处必须知道的细节：
+
+- **它刻意不看 `ctx.config.publicBaseUrl`。** 那个值在未配置时由监听地址推导，
+  `HOST=0.0.0.0` 会得到 `http://127.0.0.1:8787`——看起来是回环于是放行，而服务其实
+  对外监听，明文请求照样能取走全部上游 Key。即便显式配了 `https://…`，那也只是用户声明，
+  与实际链路无关。用"我不知道真实地址"来自证清白是不成立的。
+- **依赖 `TRUST_PROXY=1` 才能识别反代后的 HTTPS。** 反向代理回源本身是 HTTP，
+  不开这个开关时 Fastify 看不到 `X-Forwarded-Proto`，检查会把正常的 HTTPS 部署判成明文。
+  它只把 `trustProxy` 设成 `'loopback'`（只信任来自本机回环的转发头），
+  **不能设成 `true`**——那样任何客户端都能伪造该头绕过检查。
+
+follower 侧有一道对称的检查：`assertMasterUrlAllowed` 在保存配置与 `pull` 时都校验
+`masterUrl` 协议，非回环的 `http://` 直接 403。少了它，follower 会把 master 的 API 令牌
+与拉回的明文 Key 一起走明文 HTTP 送出去。
+
+`SYNC_ALLOW_INSECURE=1` 是给可信内网（如 EasyTier 隧道）留的显式逃生门：默认必须由人
+主动设置，而不是猜测"这可能是内网所以放过"。配套的还有 `cache-control: no-store`，
+以及日志只记"谁导出了几个范围、多少条"而绝不记 body。
+
+### 为什么冲突文件里脱敏
+
+`sync-conflicts.json` 是普通 JSON 文件（不在 `secrets.encode()` 的保护范围内），
+还会经 `GET /api/sync/conflicts` 返回给前端。若把两版的 Key 原值写进去，冲突文件就变成
+凭据的第二份副本，而且生命周期不受控——用户解决完冲突也不会想到去删它。
+
+所以落盘与出接口的 `localValue` / `remoteValue` 都只保留 `***` + 末 4 位
+（`toComparable` / `pickSettings`）。但"用远端版"必须能真正写回对方的密钥，于是另存
+`remoteValueSealed`——远端完整值的本机密文。它既能还原，又不会成为明文副本，
+且**不出现在任何接口响应里**（`GET /api/sync/conflicts` 不含该字段）。
+
+> 打码尾部对本地版来自密文、对远端版来自明文，本来就不对应。它只够做
+> "看起来是不是同一个"的粗判断，不能当相等性依据。
+
+### 已知残留风险
+
+- **快照导出没有频率限制，也不留独立审计**：只有一行 info 日志（`by` / `via` /
+  `scopes` / 条数）。导出过的数据无法召回。
+- **follower 侧令牌只在前缀上被校验**（必须以 `api_` 开头），不落盘、不进设置文件。
+- **没有传输重试与完整性校验**：快照没有签名，链路被中间人替换内容时无法察觉
+  （HTTPS 是唯一防线）。
 
 ## 部署风险清单
 

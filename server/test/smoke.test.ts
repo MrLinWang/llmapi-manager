@@ -9,6 +9,7 @@ import { createContext } from '../src/context';
 import { createLogger } from '../src/logger';
 import { bootstrapIdentity } from '../src/bootstrap';
 import { loadConfig, type AppConfig } from '../src/config';
+import { SyncService } from '../src/services/sync';
 import { resetWarnings } from '../src/resilience';
 import {
   portOf,
@@ -2076,5 +2077,169 @@ describe('冒烟：诊断接口', () => {
       // 未开启诊断时是 404，开启后必须 403——两种都不该是 200
       expect([403, 404]).toContain(response.statusCode);
     });
+  });
+});
+
+describe('冒烟：配置同步的端到端链路', () => {
+  // 用两个真实 app 实例（各自独立数据目录）验证 master→follower 的完整链路。
+  // 单元测试（sync.test.ts）覆盖了 applySnapshot 的逻辑，这里验证 HTTP 层：
+  // 权限、传输校验、快照内容、以及"拉回来的 Key 能真的用"。
+
+  async function makeInstance(options: {
+    encryptionKey: string;
+    syncAllowInsecure?: boolean;
+  }) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sync-e2e-'));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sync-e2e-h-'));
+    const config = {
+      ...testConfig(dir, home),
+      encryptionKey: options.encryptionKey,
+      syncAllowInsecure: options.syncAllowInsecure ?? true,
+    };
+    const logger = createLogger('error');
+    const ctx = createContext(config, logger);
+    await bootstrapIdentity(config, ctx.paths, ctx.identity, logger, ctx.setup);
+    const instance = await buildApp({ ctx });
+    await instance.ready();
+    const login = await instance.inject({
+      method: 'POST', url: '/api/auth/login',
+      payload: { username: 'admin', password: PASSWORD },
+    });
+    const cookie = String(login.headers['set-cookie']).split(';')[0];
+    return { app: instance, cookie, config, dir, home, ctx };
+  }
+
+  it('master 导出 → follower 拉取 → Key 在 follower 上可用', async () => {
+    // 两台机器用**不同的** DATA_ENCRYPTION_KEY，这是真实场景
+    const master = await makeInstance({ encryptionKey: 'master-key-AAA' });
+    const follower = await makeInstance({ encryptionKey: 'follower-key-BBB' });
+
+    try {
+      // master 配一个供应商
+      await master.app.inject({
+        method: 'POST', url: '/api/providers', headers: { cookie: master.cookie },
+        payload: {
+          name: '共享供应商', apiType: 'openai',
+          baseUrl: 'http://127.0.0.1:65530/v1',
+          apiKey: 'sk-shared-upstream-key', models: ['shared-model'],
+        },
+      });
+      await master.app.inject({
+        method: 'PATCH', url: '/api/sync/config', headers: { cookie: master.cookie },
+        payload: { role: 'master', scopes: ['providers'] },
+      });
+
+      // master 侧生成一个含 sync:read 的令牌供 follower 使用
+      const created = await master.app.inject({
+        method: 'POST', url: '/api/tokens', headers: { cookie: master.cookie },
+        payload: { name: 'follower 拉取用', scopes: ['sync:read'] },
+      });
+      expect(created.statusCode).toBe(200);
+      const syncToken = (created.json() as { token: string }).token;
+
+      // 直接用 master 实例的 snapshot 接口验证内容（follower 的 fetch 需要真实端口，
+      // 这里通过 inject 走同一套鉴权与校验逻辑）
+      const snapshot = await master.app.inject({
+        method: 'GET', url: '/api/sync/snapshot?scopes=providers',
+        headers: { authorization: `Bearer ${syncToken}`, host: '127.0.0.1:8787' },
+      });
+      expect(snapshot.statusCode).toBe(200);
+      const body = snapshot.json() as {
+        providers: Array<{ apiKey: string; name: string }>;
+        masterId: string;
+      };
+      // 快照里必须是**明文**：对端要用自己的密钥重新加密
+      expect(body.providers[0].apiKey).toBe('sk-shared-upstream-key');
+      expect(body.providers[0].apiKey).not.toContain('enc:v1:');
+      // masterId 是真正的实例标识，不是 publicBaseUrl
+      expect(body.masterId).toMatch(/^inst_/);
+      expect(body.masterId).not.toContain('http');
+
+      // follower 应用这个快照
+      const applied = await follower.app.inject({
+        method: 'PATCH', url: '/api/sync/config', headers: { cookie: follower.cookie },
+        payload: { role: 'master', scopes: ['providers'] },
+      });
+      expect(applied.statusCode).toBe(200);
+      // follower 侧没有现成接口能"应用给定快照"，所以直接调服务层验证跨机重加密
+      const repos = follower.ctx.store.forTenant('t_default');
+      const service = new SyncService(repos, follower.ctx.secrets, 'follower');
+      const result = service.applySnapshot(body as never);
+      expect(result.conflicts).toHaveLength(0);
+
+      // 关键：follower 用自己的密钥解出的明文与 master 一致
+      const followerRecord = repos.providers.list()[0];
+      expect(follower.ctx.secrets.decode(followerRecord.apiKey)).toBe('sk-shared-upstream-key');
+      // 且落盘是 follower 自己的密文形态
+      expect(followerRecord.apiKey.startsWith('enc:v1:')).toBe(true);
+      expect(followerRecord.apiKey).not.toContain('master-key-AAA');
+    } finally {
+      await master.app.close();
+      await follower.app.close();
+      for (const dir of [master.dir, follower.dir, master.home, follower.home]) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('没有 sync:read 的令牌不能导出快照', async () => {
+    const master = await makeInstance({ encryptionKey: 'k-m' });
+    try {
+      await master.app.inject({
+        method: 'PATCH', url: '/api/sync/config', headers: { cookie: master.cookie },
+        payload: { role: 'master', scopes: ['providers'] },
+      });
+      // settings:write 令牌（不含 sync:read）
+      const created = await master.app.inject({
+        method: 'POST', url: '/api/tokens', headers: { cookie: master.cookie },
+        payload: { name: '只能改设置', scopes: ['settings:write'] },
+      });
+      const token = (created.json() as { token: string }).token;
+
+      const response = await master.app.inject({
+        method: 'GET', url: '/api/sync/snapshot?scopes=providers',
+        headers: { authorization: `Bearer ${token}` },
+      });
+      // 导出全部上游 Key 的能力不该跟着 settings:* 扩散
+      expect(response.statusCode).toBe(403);
+    } finally {
+      await master.app.close();
+      fs.rmSync(master.dir, { recursive: true, force: true });
+      fs.rmSync(master.home, { recursive: true, force: true });
+    }
+  });
+
+  it('非 master 角色没有可导出的快照', async () => {
+    const instance = await makeInstance({ encryptionKey: 'k' });
+    try {
+      const response = await instance.app.inject({
+        method: 'GET', url: '/api/sync/snapshot?scopes=providers',
+        headers: { cookie: instance.cookie, host: '127.0.0.1:8787' },
+      });
+      expect(response.statusCode).toBe(400);
+    } finally {
+      await instance.app.close();
+      fs.rmSync(instance.dir, { recursive: true, force: true });
+      fs.rmSync(instance.home, { recursive: true, force: true });
+    }
+  });
+
+  it('未选任何同步范围时拒绝导出（空 ≠ 全部）', async () => {
+    const instance = await makeInstance({ encryptionKey: 'k' });
+    try {
+      await instance.app.inject({
+        method: 'PATCH', url: '/api/sync/config', headers: { cookie: instance.cookie },
+        payload: { role: 'master', scopes: [] },
+      });
+      const response = await instance.app.inject({
+        method: 'GET', url: '/api/sync/snapshot',
+        headers: { cookie: instance.cookie, host: '127.0.0.1:8787' },
+      });
+      expect(response.statusCode).toBe(400);
+    } finally {
+      await instance.app.close();
+      fs.rmSync(instance.dir, { recursive: true, force: true });
+      fs.rmSync(instance.home, { recursive: true, force: true });
+    }
   });
 });

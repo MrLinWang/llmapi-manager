@@ -25,6 +25,8 @@
 | `AGENT_HOME_DIR` | OS 家目录 | Agent 配置根目录（其下为 `.codex`、`.claude`） |
 | `CODEX_HOME` | 无 | 仅用于定位 Codex 配置目录（结束 Codex 进程时设进子进程环境）。设了就优先于 `AGENT_HOME_DIR/.codex` |
 | `ENABLE_DIAGNOSTICS` | 无（关闭） | 设为 `1` 才开启 `/api/diagnostics/*`；未开启时这四个接口返回 404 |
+| `TRUST_PROXY` | 无（关闭） | 设为 `1` 才采信 `X-Forwarded-Proto` 等转发头，且只信任来自回环的代理。**部署在反向代理后必须开**，否则同步快照的 HTTPS 检查会把代理回源当成明文请求 |
+| `SYNC_ALLOW_INSECURE` | 无（关闭） | 设为 `1` 允许同步快照与 follower 拉取走明文 HTTP。仅用于可信内网（如 EasyTier 隧道内） |
 
 `CODEX_HOME` 是 Codex 自己的约定变量，本服务只读不算：它决定 `codex app-server daemon stop`
 在哪个目录下执行。目录不存在时不会强行设置（codex 会对不存在的路径报错，而"本机还没配过 Codex"
@@ -32,6 +34,10 @@
 
 `PUBLIC_BASE_URL` 的特殊处理：当 `HOST` 是 `0.0.0.0` 或 `::` 时，推导结果会回落成 `127.0.0.1`，
 因为监听地址对客户端没有意义。此时若客户端不在本机，必须显式设置。
+
+注意这个推导值**不能当作"本机访问"的安全证据**：服务其实对外监听，明文请求照样能进来。
+同步快照的 HTTPS 检查因此读的是请求实际协议（`request.protocol`），不看这个配置项；
+需要反向代理配合时开 `TRUST_PROXY=1`。`publicBaseUrlIsExplicit` 记录了它是不是用户显式配的。
 
 ## 运行日志
 
@@ -91,11 +97,16 @@ data/                                # 默认即 server/data，见上表 DATA_DI
     ├── settings.json                 默认供应商/模型、网关令牌、Codex 行为开关
     ├── agents.json                   下发快照
     ├── api-tokens.json               程序化访问用的 API 令牌（只存 sha256）
+    ├── sync-conflicts.json           待仲裁的同步冲突（凭据已打码）
     └── requests.jsonl                请求日志
 ```
 
 Agent 文件的写前备份**不在数据目录**，而是落在被改文件的同目录
 （`~/.codex/config.toml.bak-<时间戳>`），避免数据目录被清空后无法恢复。
+
+`sync-conflicts.json` 单独成文件而不是塞进 `settings.json`：冲突可能累积很多条，
+混进设置会让设置文件变成一个还在变大的列表，而两者的生命周期也不同（冲突解决完就该清空）。
+它里面的凭据只保留打码形态，完整远端值另存为本机加密的 `remoteValueSealed`。
 
 所有 JSON 文件的外层结构：
 

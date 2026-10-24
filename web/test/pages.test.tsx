@@ -338,6 +338,91 @@ describe('前端页面装配', () => {
     setOverrides({});
   });
 
+  it('同步页展示角色、同步范围、永不互传项与冲突仲裁', async () => {
+    // 这是「多设备配置同步」的前端门面。三个点必须在页面上看得见：
+    // 1. 三种角色，且 master 的代价（对外提供含上游 Key 明文的快照）写出来；
+    // 2. 关闭同步时行为不变（默认 standalone）；
+    // 3. "口令/会话/网关令牌/密钥永远不同步"这条必须显式展示，
+    //    用户最担心的就是它 —— 靠 availableScopes 推是推不出来的。
+    setOverrides({
+      '/api/sync/status': {
+        config: {
+          role: 'follower',
+          masterUrl: 'https://box.example.com:8787',
+          scopes: ['providers'],
+          lastPullAt: '2026-01-01T00:00:00.000Z',
+          lastPullResult: '从 https://box.example.com:8787 拉取完成：应用 2 项，产生 1 条冲突待仲裁',
+        },
+        availableScopes: [
+          { scope: 'providers', label: '供应商与模型（含上游 API Key，跨机重新加密）' },
+          { scope: 'settings', label: '网关设置（默认模型、跨协议转发、审批模型等）' },
+          { scope: 'agentTargets', label: 'Agent 连接方式（走网关 / 直连）' },
+        ],
+        conflictCount: 1,
+        neverSynced: ['登录口令', '会话 cookie', 'DATA_ENCRYPTION_KEY', '网关令牌'],
+      },
+      '/api/sync/conflicts': {
+        conflicts: [
+          {
+            id: 'c_1',
+            scope: 'providers',
+            targetId: 'p_1',
+            targetLabel: 'Mock OpenAI',
+            localUpdatedAt: '2026-01-01T00:00:00.000Z',
+            remoteUpdatedAt: '2026-01-02T00:00:00.000Z',
+            changedFields: ['models', 'priority'],
+            localValue: { name: 'Mock OpenAI', baseUrl: 'http://a', apiKey: 'sk-***cret', models: ['gpt-x'] },
+            remoteValue: { name: 'Mock OpenAI', baseUrl: 'http://b', apiKey: 'sk-***cret', models: ['gpt-x', 'gpt-y'] },
+            detectedAt: '2026-01-02T00:00:00.000Z',
+          },
+        ],
+      },
+    });
+    const { render, screen } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const SyncPage = (await import('../src/pages/SyncPage')).default;
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <SyncPage />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // 角色三选一都渲染出来，且 master 的代价写清楚。
+    // follower 会出现两次：页头徽标 + 角色卡片，所以用 getAllByText。
+    expect(await screen.findByText('主设备（master）')).toBeTruthy();
+    expect(screen.getAllByText('跟随设备（follower）').length).toBeGreaterThan(0);
+    expect(screen.getByText('不参与同步')).toBeTruthy();
+    expect(document.body.textContent ?? '').toContain('含上游 API Key');
+
+    // 永远不会同步的项必须显式列出
+    expect(document.body.textContent ?? '').toContain('永远不会同步');
+    expect(document.body.textContent ?? '').toContain('DATA_ENCRYPTION_KEY');
+
+    // follower 才有拉取入口：master 地址已预填，令牌框是 password 型（不回显）
+    const tokenInput = (await screen.findByLabelText('Master 的 API 令牌')) as HTMLInputElement;
+    expect(tokenInput.type).toBe('password');
+    expect((screen.getByLabelText('Master 地址') as HTMLInputElement).value).toBe(
+      'https://box.example.com:8787',
+    );
+    expect(screen.getByRole('button', { name: '立即同步' })).toBeTruthy();
+
+    // 冲突仲裁：差异字段、本地/远端两版、两个按钮
+    expect(screen.getByText('models')).toBeTruthy();
+    expect(screen.getByText('priority')).toBeTruthy();
+    expect(screen.getByText('本地版')).toBeTruthy();
+    expect(screen.getByText('远端版')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '用本地' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '用远端' })).toBeTruthy();
+
+    // 有待仲裁项时顶部常驻提醒
+    expect(document.body.textContent ?? '').toContain('尚未仲裁');
+    setOverrides({});
+  });
+
   it('设置页可管理 API 令牌：只能勾选自己拥有的权限', async () => {
     // 令牌是收窄授权，界面上若能勾选自己没有的权限，用户点下去只会撞 403。
     // 这里断言渲染时就按 can() 过滤——mock 的 me 只给了 settings/providers 等，

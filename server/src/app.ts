@@ -16,6 +16,8 @@ import { registerAgentRoutes } from './routes/agents';
 import { registerApiTokenRoutes } from './routes/apiTokens';
 import { registerApiInfoRoutes } from './routes/apiInfo';
 import { registerDiagnosticsRoutes } from './routes/diagnostics';
+import { registerSyncRoutes } from './routes/sync';
+import { registerNetworkingRoutes } from './routes/networking';
 import { registerGatewayRoutes } from './routes/gateway';
 import { DEFAULT_TENANT_ID } from './domain/identity';
 
@@ -33,6 +35,10 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     logger: false,
     bodyLimit: 32 * 1024 * 1024,
     disableRequestLogging: true,
+    // 只信任来自本机回环的 X-Forwarded-* 头（nginx 回源的常态）。
+    // **不能设成 true**：那会让任何客户端伪造 `X-Forwarded-Proto: https`，
+    // 从而绕过下面的 HTTPS 检查——同步快照里是上游 Key 的明文。
+    trustProxy: ctx.config.trustProxy,
   });
 
   await app.register(cookie);
@@ -136,6 +142,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   registerApiTokenRoutes(app, ctx, registry, repos);
   registerApiInfoRoutes(app, ctx, registry, repos);
   registerDiagnosticsRoutes(app, ctx, registry, repos);
+  registerSyncRoutes(app, ctx, registry, repos);
+  registerNetworkingRoutes(app, ctx, registry, repos);
   registerGatewayRoutes(app, ctx, providerService);
 
   registry.assertAllDeclared();

@@ -10,6 +10,7 @@ import ProvidersPage from './pages/ProvidersPage';
 import ModelsPage from './pages/ModelsPage';
 import AgentsPage from './pages/AgentsPage';
 import SettingsPage from './pages/SettingsPage';
+import SyncPage from './pages/SyncPage';
 import { Spinner } from './components/ui';
 
 function Guarded({ children }: { children: JSX.Element }): JSX.Element {
@@ -78,6 +79,7 @@ export default function App(): JSX.Element {
         <Route path="models" element={<ModelsPage />} />
         <Route path="agents" element={<AgentsPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="sync" element={<SyncPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

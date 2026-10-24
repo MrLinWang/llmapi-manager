@@ -220,3 +220,48 @@ export interface GatewayOverview {
   }>;
   todayStats: { total: number; success: number; successRate: number; avgLatencyMs: number };
 }
+
+/** 多设备配置同步：角色。standalone 表示不参与同步。 */
+export type SyncRole = 'standalone' | 'master' | 'follower';
+
+/** 可同步的内容范围，与 `server/src/domain/sync.ts` 的 SYNC_SCOPES 一一对应。 */
+export type SyncScope = 'providers' | 'settings' | 'agentTargets';
+
+export interface SyncConfig {
+  role: SyncRole;
+  /** follower 要拉取的 master 地址；master 角色下不用 */
+  masterUrl: string | null;
+  /** 勾选同步哪些内容；空数组表示什么都不动（安全的默认） */
+  scopes: SyncScope[];
+  /** 上次成功拉取的时间 */
+  lastPullAt: string | null;
+  /** 上次拉取的结果摘要（不含凭据内容） */
+  lastPullResult: string | null;
+}
+
+/** 一条待仲裁的冲突：同一记录本地与远端都被改过。 */
+export interface SyncConflict {
+  id: string;
+  scope: SyncScope;
+  targetId: string;
+  /** 给人看的名字，例如供应商名 */
+  targetLabel: string;
+  localUpdatedAt: string | null;
+  remoteUpdatedAt: string | null;
+  /** 两版的差异字段名列表（不含完整值） */
+  changedFields: string[];
+  /** 本地版的可比较形态（凭据已打码） */
+  localValue: unknown;
+  /** 远端版的可比较形态（凭据已打码） */
+  remoteValue: unknown;
+  detectedAt: string;
+}
+
+export interface SyncStatus {
+  config: SyncConfig;
+  /** 前端据此渲染勾选项，避免两处维护范围清单与文案 */
+  availableScopes: Array<{ scope: SyncScope; label: string }>;
+  conflictCount: number;
+  /** 永远不会同步的内容，直接展示给用户 */
+  neverSynced: string[];
+}

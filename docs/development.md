@@ -47,6 +47,7 @@ npm run dev -w web        # vite，热更新
 | `server/test/convert.test.ts` | Responses ←→ Chat 的请求 / 响应 / 流式三向映射，含工具调用与有损字段 |
 | `server/test/apiToken.test.ts` | API 令牌生成与校验：`api_` 前缀区分、sha256 比对与 `timingSafeEqual`、空 scopes / 过期 / 吊销一律拒绝、`lastUsedAt` 60 秒节流、对外视图不含 hash |
 | `server/test/agents.test.ts` | JSON/TOML 补丁（含 `raw` 布尔）、Codex 模型目录生成、备份、还原冲突、空壳文件清理 |
+| `server/test/sync.test.ts` | 配置同步：快照导出 Key 为明文且不含网关令牌、只导出勾选范围、跨机重新加密后能解出原文、冲突判定（本地更晚 / 远端更晚 / 内容相同 / 时间戳相同但内容不同 / 时区偏移）、冲突文件无明文 Key、不删远端没有的供应商、不覆盖本机网关令牌、两种仲裁选择、未配置加密密钥时不封存远端值 |
 | `server/test/processes.test.ts` | Codex 进程识别（TUI / `exec` / 不误伤 `mycodex` 与一次性命令）、`etime` 解析 |
 | `server/test/security.test.ts` | 权限矩阵、租户隔离、凭据编解码、路由登记 |
 | `server/test/storage.test.ts` | 原子写、损坏隔离、未来版本隔离 |
@@ -62,7 +63,7 @@ Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真
 `processes.test.ts` 只测纯函数（命令行分类与 `etime` 解析），不会真的给任何进程发信号。
 日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**。
 
-当前基线：225 项（server 214 + web 11）。
+当前基线：282 项（server 270 + web 12）。
 
 ```bash
 npm test                                # 全部

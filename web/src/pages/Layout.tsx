@@ -23,6 +23,8 @@ const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
       { to: '/providers', label: '供应商', permission: 'providers:read', icon: 'providers' },
       { to: '/models', label: '模型聚合', permission: 'providers:read', icon: 'models' },
       { to: '/agents', label: 'Agent 配置', permission: 'agents:read', icon: 'agents' },
+      // 同步页归在「配置」组：它用的是 settings:read 权限，与"设置"同级
+      { to: '/sync', label: '配置同步', permission: 'settings:read', icon: 'refresh' },
       { to: '/settings', label: '设置', permission: 'settings:read', icon: 'settings' },
     ],
   },
@@ -33,6 +35,7 @@ const PAGE_META: Record<string, { group: string; label: string }> = {
   '/providers': { group: '配置', label: '供应商' },
   '/models': { group: '配置', label: '模型聚合' },
   '/agents': { group: '配置', label: 'Agent 配置' },
+  '/sync': { group: '配置', label: '配置同步' },
   '/settings': { group: '配置', label: '设置' },
 };
 

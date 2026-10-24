@@ -47,4 +47,13 @@ export class StorePaths {
     return path.join(this.tenantDir(tenantId), 'api-tokens.json');
   }
 
+  /**
+   * 同步冲突文件。单独一个文件而不是塞进 settings：
+   * 冲突可能很多条，混进设置会让设置文件变成一个还在变大的列表，
+   * 而且它的生命周期不同（解决完就该清空）。
+   */
+  syncConflictsFile(tenantId: string): string {
+    return path.join(this.tenantDir(tenantId), 'sync-conflicts.json');
+  }
+
 }

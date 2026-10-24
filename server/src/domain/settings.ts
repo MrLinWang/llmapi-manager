@@ -1,4 +1,6 @@
 import type { AgentId } from './agent';
+import { defaultSyncConfig, type SyncConfig } from './sync';
+import { defaultNetworkingConfig, type NetworkingConfig } from './networking';
 
 /**
  * Codex 在 API Key 认证下使用的审批模型名（`model-provider/src/provider.rs` 的
@@ -102,6 +104,20 @@ export interface TenantSettings {
    * 一个全局开关会强迫两者同步切换。
    */
   agentTargets: Partial<Record<AgentId, AgentTargetPreference>>;
+  /**
+   * 多设备配置同步。
+   *
+   * 默认 `role: 'standalone'` —— 不开启时行为与没有这个功能时完全一致。
+   * 这一点很重要：升级不该让一个单机部署突然开始对外提供快照接口。
+   */
+  sync: SyncConfig;
+  /**
+   * 设备互联（EasyTier 组网）。默认关闭，见 `domain/networking.ts` 的说明。
+   *
+   * 注意 `networkSecret` 在这里是**加密后**的字符串（与 apiKey 同样处理）：
+   * 它是网络准入门槛，明文落盘等于把加入权限交给任何能读数据目录的人。
+   */
+  networking: NetworkingConfig;
   updatedAt: string;
 }
 
@@ -115,6 +131,8 @@ export function defaultTenantSettings(): TenantSettings {
     // 默认关闭：绝大多数聚合上游会因此报错，关掉才是能直接跑通的配置。
     disableCodexWebSearch: true,
     agentTargets: {},
+    sync: defaultSyncConfig(),
+    networking: defaultNetworkingConfig(),
     updatedAt: new Date().toISOString(),
   };
 }

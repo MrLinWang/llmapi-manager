@@ -12,6 +12,11 @@ import type {
   RequestLog,
   RequestStats,
   SetupStatus,
+  SyncConflict,
+  SyncConfig,
+  SyncRole,
+  SyncScope,
+  SyncStatus,
   TestResult,
   TokenView,
 } from './types';
@@ -210,6 +215,31 @@ export const api = {
 
   stopAgentProcesses: (id: string) =>
     request<StopProcessesResult>(`/api/agents/${id}/stop-processes`, { method: 'POST' }),
+
+  /**
+   * 多设备配置同步。
+   *
+   * 注意 pull 的 token 是 **master 的 API 令牌**（`api_` 前缀且含 `sync:read`），
+   * 不是本机的登录会话，也不是网关令牌 —— 它只在这一处使用，不落盘。
+   */
+  syncStatus: () => request<SyncStatus>('/api/sync/status'),
+  setSyncConfig: (body: { role?: SyncRole; masterUrl?: string | null; scopes?: SyncScope[] }) =>
+    request<{ config: SyncConfig }>('/api/sync/config', {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  /** 立即从 master 拉取并应用；conflicts 是本次新产生的待仲裁项。 */
+  syncPull: (token: string) =>
+    request<{ applied: number; conflicts: SyncConflict[]; summary: string }>(
+      '/api/sync/pull',
+      json({ token }),
+    ),
+  syncConflicts: () => request<{ conflicts: SyncConflict[] }>('/api/sync/conflicts'),
+  resolveSyncConflict: (id: string, choice: 'local' | 'remote') =>
+    request<{ ok: boolean; conflictCount: number }>(
+      `/api/sync/conflicts/${id}/resolve`,
+      json({ choice }),
+    ),
 
   logs: (providerId?: string, limit = 50) => {
     const params = new URLSearchParams({ limit: String(limit) });
