@@ -1148,15 +1148,43 @@ describe('冒烟：Agent 下发', () => {
     // - 审批请求 + 占位名 → 改写
     // - 只有占位名、没有 turn_trigger → 不改写（用户可能真在用它聊天）
     // 只测正向会把判定写成"模型名相等就改写"，那会误伤正常对话。
+    const providers = (await call('GET', '/api/providers', undefined, { cookie })).json()
+      .providers as Array<{ id: string; apiType: string; models: string[] }>;
+    const responses = providers.find((item) => item.apiType === 'responses')!;
+
+    // 先让该供应商**声明** gpt-6-luna：审批映射的目标必须真实存在于某家已启用
+    // 供应商的模型列表里。不校验的话，用户配了个不存在的模型，请求会照常发出去、
+    // 由上游报一个含糊的模型不存在错误——比在网关侧明确报错难查得多。
+    // PUT 是全量更新，必须带齐字段（apiKey 留空表示沿用已保存的）
+    const target = (
+      (await call('GET', '/api/providers', undefined, { cookie })).json().providers as Array<{
+        id: string;
+        name: string;
+        apiType: string;
+        baseUrl: string;
+        models: string[];
+      }>
+    ).find((item) => item.id === responses.id)!;
+    if (!target.models.includes('gpt-6-luna')) {
+      const patched = await call(
+        'PUT', `/api/providers/${target.id}`,
+        {
+          name: target.name,
+          apiType: target.apiType,
+          baseUrl: target.baseUrl,
+          apiKey: '',
+          models: [...target.models, 'gpt-6-luna'],
+        },
+        { cookie },
+      );
+      expect(patched.statusCode).toBe(200);
+    }
+
     const set = await call(
       'PATCH', '/api/settings/codex', { approvalReviewModel: 'gpt-6-luna' }, { cookie },
     );
     expect(set.statusCode).toBe(200);
     expect(set.json().approvalReviewModel).toBe('gpt-6-luna');
-
-    const providers = (await call('GET', '/api/providers', undefined, { cookie })).json()
-      .providers as Array<{ id: string; apiType: string; models: string[] }>;
-    const responses = providers.find((item) => item.apiType === 'responses')!;
     // 默认模型也设上：裸名会被默认模型覆盖，这会让"映射是否真的改了模型"变得不可分辨
     await call('PUT', '/api/settings/default', { providerId: responses.id, model: responses.models[0] }, { cookie });
 
@@ -1190,6 +1218,77 @@ describe('冒烟：Agent 下发', () => {
       'x-codex-turn-metadata': JSON.stringify({ turn_trigger: 'guardian_review' }),
     });
     expect(afterReset).not.toBe('gpt-6-luna');
+  });
+
+  it('审批占位名必须出现在 Codex 模型目录里，否则映射永不生效', async () => {
+    // 真实 bug（用户报"设置了审批模型但不生效"）：
+    // Codex 在 API Key 认证下把审批模型硬编码成 gpt-5.6-luna，然后去**模型目录**里找它。
+    // 目录里没有这个名字时它不报错，而是静默回退到父模型（当前对话模型），
+    // 于是网关永远收不到 gpt-5.6-luna，那套"识别占位名再改写"的逻辑一次都不触发。
+    // 症状就是配了没效果，而且日志里连一条审批请求都看不到。
+    //
+    // 修法是把占位名放进目录。这条测试钉住"目录里必须有它"这个前提。
+    const providers = (await call('GET', '/api/providers', undefined, { cookie })).json()
+      .providers as Array<{ id: string; name: string; apiType: string; baseUrl: string; models: string[] }>;
+    const responses = providers.find((item) => item.apiType === 'responses')!;
+    if (!responses.models.includes('gpt-6-luna')) {
+      await call('PUT', `/api/providers/${responses.id}`, {
+        name: responses.name, apiType: responses.apiType, baseUrl: responses.baseUrl,
+        apiKey: '', models: [...responses.models, 'gpt-6-luna'],
+      }, { cookie });
+    }
+
+    // 配好审批模型，apply 一次
+    await call('PATCH', '/api/settings/codex', { approvalReviewModel: 'gpt-6-luna' }, { cookie });
+    await call('PATCH', '/api/agents/codex/target', { mode: 'gateway' }, { cookie });
+    const applied = await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    expect(applied.statusCode).toBe(200);
+
+    const catalogPath = path.join(agentHome, '.codex', 'llmapi-model-catalog.json');
+    const slugs = (JSON.parse(fs.readFileSync(catalogPath, 'utf8')) as {
+      models: Array<{ slug: string }>;
+    }).models.map((item) => item.slug);
+
+    expect(slugs).toContain('gpt-5.6-luna');
+
+    // 取消审批模型后不应再注入，避免给没用这个功能的用户多一个看不懂的条目
+    await call('PATCH', '/api/settings/codex', { approvalReviewModel: null }, { cookie });
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const afterReset = (JSON.parse(fs.readFileSync(catalogPath, 'utf8')) as {
+      models: Array<{ slug: string }>;
+    }).models.map((item) => item.slug);
+    expect(afterReset).not.toContain('gpt-5.6-luna');
+  });
+
+  it('同一模型被多家供应商声明时，审批映射优先选协议匹配的那家', async () => {
+    // 用户真实情况：gpt-6-luna 同时在 openai（wllapi）与 responses（opendesign）两家。
+    // 早先的实现随便 find 第一个，可能挑到需要转换的那家，甚至在有直通供应商时
+    // 报"未开启跨协议转发"——明明能直通。能直通就别转换（转换有信息损失）。
+    const providers = (await call('GET', '/api/providers', undefined, { cookie })).json()
+      .providers as Array<{ id: string; apiType: string; models: string[] }>;
+    const responses = providers.find((item) => item.apiType === 'responses')!;
+    // 只需保证 responses 那家也声明它
+    if (!responses.models.includes('gpt-6-luna')) {
+      const full = (await call('GET', '/api/providers', undefined, { cookie })).json()
+        .providers as Array<{ id: string; name: string; apiType: string; baseUrl: string; models: string[] }>;
+      const t = full.find((item) => item.id === responses.id)!;
+      await call('PUT', `/api/providers/${t.id}`, {
+        name: t.name, apiType: t.apiType, baseUrl: t.baseUrl, apiKey: '',
+        models: [...t.models, 'gpt-6-luna'],
+      }, { cookie });
+    }
+    await call('PATCH', '/api/settings/codex', { approvalReviewModel: 'gpt-6-luna', protocolConversion: true }, { cookie });
+
+    // 请求返回的 model 是上游模型名，无法区分供应商；用诊断接口看选了谁
+    await call('PATCH', '/api/settings/codex', { protocolConversion: false }, { cookie });
+    const approved = await call(
+      'POST', '/v1/responses',
+      { model: 'gpt-5.6-luna', input: 'hi', stream: false },
+      { authorization: `Bearer ${gatewayToken}`, 'x-codex-turn-metadata': JSON.stringify({ turn_trigger: 'guardian_review' }) },
+    );
+    // 能直通就不该被 501/400 挡住
+    expect([200]).toContain(approved.statusCode);
+    expect(approved.json().model).toBe('gpt-6-luna');
   });
 
   it('开启跨协议转发后，Responses 请求可以落到 Chat 上游', async () => {

@@ -11,6 +11,7 @@ import type {
 } from '../domain/agent';
 import { AGENT_DEFINITIONS, getAgentDefinition } from './registry';
 import { buildDirectModelCatalog, buildModelCatalog } from '../domain/modelCatalog';
+import { APPROVAL_REVIEW_MODEL_NAME } from '../domain/settings';
 import { findCodexClients, stopCodexProcesses } from './processes';
 import { listAliases } from '../domain/aliases';
 import { AgentPathResolver } from './registry';
@@ -377,7 +378,17 @@ export class AgentService {
                   (requiredTypes as readonly string[]).includes(item.apiType) ||
                   (settings.protocolConversion && item.apiType === 'openai'),
               ),
-              { preferredClientModel: clientModel },
+              {
+                preferredClientModel: clientModel,
+                // 仅网关模式：审批请求要经过网关才能被改写，直连时没有拦截点。
+                // 不把这个占位名放进目录，Codex 会找不到它并**静默回退到父模型**，
+                // 于是"配了审批模型却不生效"，且日志里看不到任何审批请求。
+                approvalPlaceholder:
+                  settings.approvalReviewModel !== null &&
+                  settings.approvalReviewModel !== ''
+                    ? APPROVAL_REVIEW_MODEL_NAME
+                    : undefined,
+              },
             )
         : undefined;
 

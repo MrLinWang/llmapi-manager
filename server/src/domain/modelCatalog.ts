@@ -80,6 +80,19 @@ const REASONING_LEVELS: CodexReasoningLevel[] = [
 export interface BuildCatalogOptions {
   /** 当前选中的默认模型，排在最前面 */
   preferredClientModel?: string;
+  /**
+   * 「Approve for me」的占位模型名，需要出现在目录里。
+   *
+   * 为什么必须放进来：Codex 在 API Key 认证下把审批模型硬编码成 `gpt-5.6-luna`，
+   * 并到**模型目录**里找它（`select_review_model` 拿 `&[ModelPreset]` 做 `find`）。
+   * 目录里没有这个名字时不会报错，而是**静默回退到父模型**——审批请求于是带着
+   * 用户当前的对话模型发出去，网关那套"识别占位名再改写"的逻辑永远不命中。
+   * 症状就是"配了审批模型但不生效"，且日志里连一条审批请求都看不到。
+   *
+   * 注意不能改用目录条目的 `auto_review_model_override`：`From<ModelInfo> for
+   * ModelPreset` 没搬那个字段，而 `select_review_model` 收的正是 ModelPreset。
+   */
+  approvalPlaceholder?: string;
 }
 
 /**
@@ -165,6 +178,16 @@ function buildCatalogEntries(
     if (preferred) push(preferred);
   }
   for (const input of inputs) push(input);
+
+  // 审批占位名必须真的出现在目录里（原因见 BuildCatalogOptions.approvalPlaceholder）。
+  // 放在最后并单独 push，不参与"默认模型排最前"的排序——它不是给用户日常选的模型，
+  // 只是让 Codex 的 select_review_model 能找到它，从而让它把真实的模型名发出来。
+  if (options.approvalPlaceholder) {
+    push({
+      model: options.approvalPlaceholder,
+      description: 'Approve for me：由网关映射到你在控制台选定的审批模型',
+    });
+  }
 
   const catalog: CodexCatalog = { models: entries };
   return `${JSON.stringify(catalog, null, 2)}\n`;

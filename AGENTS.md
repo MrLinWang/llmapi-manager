@@ -218,11 +218,28 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
 - `review_model`（config.toml）→ 只给 `/review` 用，guardian 路径不读它。
 - `model_providers.*` → 没有相关字段。
 
+- **目录里没有这个占位名 → 静默回退到父模型**（最容易漏的一环）：
+  `select_review_model` 拿 `available_models: &[ModelPreset]` 做 `find`，
+  找不到 `gpt-5.6-luna` 时不报错，而是取 `parent_model.slug`——审批请求于是带着
+  **用户当前的对话模型**发出去，网关那套"识别占位名"的判定一次都不命中。
+  症状：配了审批模型毫无效果，且**请求日志里看不到任何审批请求**。
+  所以生成 Codex 目录时必须把占位名注进去（`BuildCatalogOptions.approvalPlaceholder`），
+  Codex 才找得到它、才会真的发这个名字。
+
 可行做法是**在网关侧改写**：走网关时 `model` 会原样出现在请求体里，把它当占位名换掉。
 判定必须两个条件同时满足——请求头 `x-codex-turn-metadata` 的
 `turn_trigger === "guardian_review"`，且 `model === APPROVAL_REVIEW_MODEL_NAME`。
 只看模型名会误伤"用户真拿这个模型聊天"，只看 turn_trigger 会在占位名随版本变化时改错。
 改写后不做故障转移（换家供应商多半没同名模型）。
+- 目标模型必须真实存在于某家**已启用**供应商的 `models` 里，否则 400 并说清原因：
+  放过去只会让上游报一个含糊的"模型不存在"。
+- **同一模型名可能被多家声明**（用户的 `gpt-6-luna` 就同时属于 openai 与 responses 两家）。
+  选供应商时优先协议匹配的那家——能直通就别转换；随便 `find` 一个可能挑到需要转换的，
+  甚至在明明有直通供应商时误报"未开启转换"。自动开启转换的判定同理：
+  只有当**没有 responses 供应商也声明该模型**时才开。
+- 后端接口的候选列表要列**所有已启用供应商**的模型，不能只列 responses：
+  Codex 只能绑 responses，而用户常常只有 openai 供应商，只列 responses 会让列表空着、
+  功能等于不可用。能不能承接由选路判断并报错，不该在列表阶段就把选项藏起来。
 
 ### 13. 向上游查模型列表
 
@@ -273,7 +290,7 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
 
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 212 + web 10 = 222 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 214 + web 10 = 224 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。

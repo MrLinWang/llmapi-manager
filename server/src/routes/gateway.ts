@@ -87,33 +87,6 @@ export function registerGatewayRoutes(
       const stream = body.stream === true;
       const startedAt = Date.now();
 
-      let selection = selectCandidates(
-        requestedModel,
-        records,
-        settings,
-        path,
-        isApprovalReviewRequest(request.headers),
-      );
-      if (selection.mode === 'invalid') {
-        logService.append(
-          {
-            path: `/v1${path}`,
-            requestedModel,
-            upstreamModel: requestedModel,
-            providerId: null,
-            providerName: null,
-            mode: 'invalid',
-            stream,
-            status: 400,
-            latencyMs: Date.now() - startedAt,
-            fallback: false,
-            error: selection.reason,
-          },
-          (error) => ctx.logger.warn('写入请求日志失败', error),
-        );
-        throw badRequest(selection.reason);
-      }
-
       // 自动开启跨协议转发。
       //
       // 放在这里而不是更早，是因为更早的位置（body 校验之前）会让一个缺 `model`
@@ -141,18 +114,31 @@ export function registerGatewayRoutes(
         reply.raw.setHeader('x-llmapi-auto-conversion', '1');
       }
 
-      // selection 是在自动开启之前算的，里面的 convertResponsesToChat 还是 false。
-      // 开启后必须重新选择一次，否则设置改了、本次请求却仍按"不转换"发出去，
-      // 用户下次还得再碰一次才生效。
-      if (autoEnabledConversion) {
-        selection = selectCandidates(
-          requestedModel,
-          records,
-          settings,
-          path,
-          isApprovalReviewRequest(request.headers),
+      let selection = selectCandidates(
+        requestedModel,
+        records,
+        settings,
+        path,
+        isApprovalReviewRequest(request.headers),
+      );
+      if (selection.mode === 'invalid') {
+        logService.append(
+          {
+            path: `/v1${path}`,
+            requestedModel,
+            upstreamModel: requestedModel,
+            providerId: null,
+            providerName: null,
+            mode: 'invalid',
+            stream,
+            status: 400,
+            latencyMs: Date.now() - startedAt,
+            fallback: false,
+            error: selection.reason,
+          },
+          (error) => ctx.logger.warn('写入请求日志失败', error),
         );
-        if (selection.mode === 'invalid') throw badRequest(selection.reason);
+        throw badRequest(selection.reason);
       }
 
       // 兜底再校验一次：别名模式是直接按 providerId 取供应商，不走上面的协议过滤，

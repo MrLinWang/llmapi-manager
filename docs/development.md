@@ -61,7 +61,7 @@ Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真
 `processes.test.ts` 只测纯函数（命令行分类与 `etime` 解析），不会真的给任何进程发信号。
 日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**。
 
-当前基线：222 项（server 212 + web 10）。
+当前基线：224 项（server 214 + web 10）。
 
 ```bash
 npm test                                # 全部

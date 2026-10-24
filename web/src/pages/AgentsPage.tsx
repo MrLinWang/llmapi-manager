@@ -229,17 +229,28 @@ export default function AgentsPage(): JSX.Element {
   };
 
   /**
-   * 可映射的审批模型：只取 responses 供应商声明的模型。
+   * 可映射的审批模型：**所有已启用供应商**声明的模型，不限协议。
    *
-   * 为什么限定 responses：审批请求走的是 Codex 的 /v1/responses 路径，映射目标若来自
-   * 一家 openai 供应商，网关还得再做一次协议转换，等于给用户多埋一层可能失败的环节。
-   * 宁可不列出，也别给一个大概率走不通的选项。
+   * 这里原先只列 responses 供应商，理由是"审批请求走 /v1/responses，目标若来自
+   * openai 供应商还得再转换一次"。这个理由站不住：Codex 只能绑定 responses 协议，
+   * 用户手里常常只有 openai（Chat）供应商——那样列表就空着，功能等于不可用。
+   * 而网关本来就有跨协议转发（且协议不匹配时还会自动开启），转换是常规能力，不是隐患。
+   *
+   * 真正的约束下沉到服务端：用户选定后由选路逻辑判断这家能不能承接本次路径，
+   * 不能就在报错里说清原因，而不是在列表阶段就替用户把选项藏起来。
    */
   const approvalCandidates = (): string[] => {
-    const needed = 'responses';
-    return (providers.data?.providers ?? [])
-      .filter((provider) => provider.enabled && provider.apiType === needed)
-      .flatMap((provider) => provider.models);
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const provider of providers.data?.providers ?? []) {
+      if (!provider.enabled) continue;
+      for (const model of provider.models) {
+        if (seen.has(model)) continue;
+        seen.add(model);
+        out.push(model);
+      }
+    }
+    return out;
   };
 
   /**

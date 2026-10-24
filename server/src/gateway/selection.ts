@@ -42,7 +42,16 @@ export type Selection =
       /** 被排除的供应商及原因，诊断时能解释"为什么不是它" */
       excluded?: ExcludedProvider[];
     }
-  | { mode: 'invalid'; reason: string; excluded?: ExcludedProvider[] };
+  | {
+      mode: 'invalid';
+      reason: string;
+      excluded?: ExcludedProvider[];
+      /**
+       * 仅审批映射失败时出现：目标供应商是 openai，而本次路径要 responses。
+       * 上层据此知道"开启跨协议转发就能解决"，而不是笼统报错。
+       */
+      approvalNeedsConversion?: boolean;
+    };
 
 export interface ExcludedProvider {
   providerId: string;
@@ -92,6 +101,81 @@ export function selectCandidates(
         reason: 'alias',
       },
       // 别名是明确指向，不做故障转移
+      fallbacks: [],
+    };
+  }
+
+  // 「Approve for me」的模型映射必须**先于**协议过滤。
+  //
+  // 这里是踩过的坑：原实现把审批改写放在协议过滤之后，于是"只有 openai 供应商"
+  // 的用户一配审批模型就必然 400（"没有启用的 responses 供应商"），
+  // 因为过滤阶段已经把 openai 全排除了，审批分支永远走不到。
+  // 但审批请求的 model 是个占位名（`gpt-5.6-luna`），用户配的 approvalReviewModel
+  // 才是真实目标——按占位名的协议去过滤，等于用错的东西做判断。
+  //
+  // 正确顺序：先用真实目标模型定位供应商，再判断这个供应商能不能承接本次路径。
+  const approvalModel = settings.approvalReviewModel;
+  const isApprovalPlaceholder =
+    approvalReview &&
+    approvalModel !== null &&
+    approvalModel !== '' &&
+    resolution.upstreamModel === APPROVAL_REVIEW_MODEL_NAME;
+
+  if (isApprovalPlaceholder) {
+    // 在所有已启用供应商里找声明了这个模型的那一家。
+    //
+    // 必须**优先协议匹配的那家**：同一个模型名可能被多家供应商声明
+    // （例如 gpt-6-luna 同时在 openai 与 responses 两家），随便 `find` 一个
+    // 可能挑到需要转换的那家，甚至在有直通供应商时报"未开启转换"。
+    // 能直通就别转换——转换有信息损失，且多一层可能失败。
+    const requiredForApproval = requiredApiType(path);
+    const owners = providers.filter(
+      (item) => item.enabled && item.models.includes(approvalModel as string),
+    );
+    const owner =
+      owners.find(
+        (item) => requiredForApproval === null || item.apiType === requiredForApproval,
+      ) ??
+      // 没有协议匹配的，退而选能转换的（openai + responses 路径）
+      owners.find(
+        (item) =>
+          requiredForApproval === 'responses' &&
+          item.apiType === 'openai' &&
+          needsConversion(item, path, settings),
+      );
+    if (!owner) {
+      if (owners.length > 0) {
+        const first = owners[0];
+        return {
+          mode: 'invalid',
+          reason:
+            `审批模型 ${approvalModel} 属于 ${first.apiType} 供应商 ${first.name}，` +
+            `但本次请求走 ${path}（需要 ${requiredForApproval}），当前未开启跨协议转发`,
+          approvalNeedsConversion:
+            first.apiType === 'openai' && requiredForApproval === 'responses',
+        };
+      }
+      return {
+        mode: 'invalid',
+        reason:
+          `已设置的审批模型 ${approvalModel} 不在任何已启用供应商的模型列表里，` +
+          '请检查供应商配置或重新选择审批模型',
+      };
+    }
+    // 走到这里 owner 一定存在（两个分支都已 return）
+
+    const needsConvert = needsConversion(owner, path, settings);
+
+    return {
+      mode: 'default',
+      primary: {
+        provider: owner,
+        upstreamModel: approvalModel as string,
+        modelRewritten: true,
+        convertResponsesToChat: needsConvert,
+        reason: 'approval-placeholder',
+      },
+      // 审批请求不做故障转移：换个供应商大概率没同名模型，白白多打一次上游
       fallbacks: [],
     };
   }
@@ -149,40 +233,6 @@ export function selectCandidates(
   const primaryProvider = defaultProvider ?? usable[0];
   const useDefaultModel =
     defaultProvider !== undefined && Boolean(settings.defaultModel);
-
-  // 「Approve for me」的模型映射。
-  //
-  // Codex 用 API Key 认证时把审批模型硬编码成 `gpt-5.6-luna`，且没有任何配置项能改
-  // （详见 APPROVAL_REVIEW_MODEL_NAME 的注释）。走网关时这个名字会原样出现在请求体里，
-  // 所以可以把它当占位名换掉——前提是用户没把它当成真实模型在别处使用。
-  //
-  // 只认"裸模型名"形态：`lam-` 别名是用户明确指定的，不该被这段改写。
-  const approvalModel = settings.approvalReviewModel;
-  // 两个条件都满足才改写：
-  // 1) 请求确实来自审批流程（turn_trigger=guardian_review）
-  // 2) 模型名就是 Codex 硬编码的占位名
-  // 只靠其一会误伤（用户真用这个模型）或漏改（占位名换了）。
-  const isApprovalPlaceholder =
-    approvalReview &&
-    approvalModel !== null &&
-    approvalModel !== '' &&
-    resolution.upstreamModel === APPROVAL_REVIEW_MODEL_NAME;
-
-  if (isApprovalPlaceholder) {
-    return {
-      mode: 'default',
-      primary: {
-        provider: primaryProvider,
-        upstreamModel: approvalModel as string,
-        modelRewritten: true,
-        convertResponsesToChat: needsConversion(primaryProvider, path, settings),
-        reason: 'approval-placeholder',
-      },
-      // 审批请求不做故障转移：换个供应商大概率没有同名模型，白白多打一次上游
-      fallbacks: [],
-      excluded,
-    };
-  }
 
   return {
     mode: 'default',
@@ -250,11 +300,27 @@ export function wouldAutoEnableConversion(
   settings: TenantSettings,
   path: GatewayPath,
 ): boolean {
-  return (
-    !settings.protocolConversion &&
-    requiredApiType(path) === 'responses' &&
-    !records.some((item) => item.enabled && item.apiType === 'responses') &&
-    records.some((item) => item.enabled && item.apiType === 'openai')
+  if (settings.protocolConversion) return false;
+  if (requiredApiType(path) !== 'responses') return false;
+  if (!records.some((item) => item.enabled && item.apiType === 'openai')) return false;
+
+  // 常规情况：没有能直通 responses 的供应商
+  if (!records.some((item) => item.enabled && item.apiType === 'responses')) return true;
+
+  // 审批映射是第二个触发点：用户把审批模型指向了某家 openai 供应商的模型。
+  //
+  // 但只有当**没有 responses 供应商也声明这个模型**时才需要开——同一模型名
+  // 可能被多家声明（例如 gpt-6-luna 同时在 openai 与 responses 两家），
+  // 那种情况能直通，开转换纯属多余的语义改变。
+  const approvalModel = settings.approvalReviewModel;
+  if (approvalModel === null || approvalModel === '') return false;
+  const declaredByResponses = records.some(
+    (item) => item.enabled && item.apiType === 'responses' && item.models.includes(approvalModel),
+  );
+  if (declaredByResponses) return false;
+  return records.some(
+    (item) =>
+      item.enabled && item.apiType === 'openai' && item.models.includes(approvalModel),
   );
 }
 
