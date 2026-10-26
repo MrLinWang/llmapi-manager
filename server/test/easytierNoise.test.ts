@@ -38,7 +38,9 @@ import {
 import { decodeFields } from '../src/networking/easytier/protobuf';
 import {
   CompressionAlgo,
+  buildWrappedRpcResponse,
   buildingRpcResponse,
+  decodeRpcResponse,
   encodeRpcPacket,
   type RpcPacket,
 } from '../src/networking/easytier/rpc';
@@ -713,5 +715,83 @@ describe('RPC：compression_info 必须显式带 algo', () => {
     );
     const fields = decodeFields(encodeRpcPacket(response));
     expect(fields.some((f) => f.fieldNumber === 10)).toBe(true);
+  });
+});
+
+describe('RPC 响应的正确包装（业务消息要先包进 RpcResponse）', () => {
+  const request: RpcPacket = {
+    fromPeer: 100,
+    toPeer: 200,
+    transactionId: 42,
+    descriptor: {
+      domainName: 'net',
+      protoName: 'OspfRouteRpc',
+      serviceName: 'OspfRouteRpc',
+      methodIndex: 1,
+    },
+    body: Buffer.from('req'),
+    isRequest: true,
+    totalPieces: 0,
+    pieceIdx: 0,
+    traceId: 0,
+    compressionInfo: { algo: CompressionAlgo.None, acceptedAlgo: CompressionAlgo.None },
+  };
+
+  it('buildWrappedRpcResponse 把业务消息包进 RpcResponse', () => {
+    const business = Buffer.from('route-response-bytes');
+    const packet = buildWrappedRpcResponse(request, business);
+
+    // body 不是业务消息本身
+    expect(packet.body.equals(business)).toBe(false);
+
+    // 解一层 RpcResponse，才拿到业务消息
+    const unwrapped = decodeRpcResponse(packet.body);
+    expect(unwrapped.response.equals(business)).toBe(true);
+    expect(unwrapped.error).toBeNull();
+  });
+
+  it('直接把业务消息放进 body 是错的（会让对端解出错的东西）', () => {
+    // 客户端是 `RpcResponse::decode(rpc_packet.body)`（rpc/client.rs:387），
+    // 所以 body 必须是 RpcResponse 的编码。把业务消息直接放进去时，
+    // 对端要么解出错误的字段，要么在长度校验上直接失败——
+    // 两种结果都不是我们想要的业务响应。
+    const business = Buffer.from('route-response-bytes');
+    const wrong = buildingRpcResponse(request, business);
+
+    let unwrappedResponse: Buffer | null = null;
+    let threw = false;
+    try {
+      unwrappedResponse = decodeRpcResponse(wrong.body).response;
+    } catch {
+      threw = true;
+    }
+
+    // 要么抛错，要么解出的内容不等于业务消息 —— 无论哪种，都说明必须包装
+    const correct = buildWrappedRpcResponse(request, business);
+    expect(decodeRpcResponse(correct.body).response.equals(business)).toBe(true);
+
+    if (threw) {
+      expect(unwrappedResponse).toBeNull();
+    } else {
+      expect(unwrappedResponse?.equals(business)).toBe(false);
+    }
+  });
+
+  it('from/to/transaction_id/descriptor 在包装后仍正确', () => {
+    const packet = buildWrappedRpcResponse(request, Buffer.from('x'));
+    expect(packet.fromPeer).toBe(200);
+    expect(packet.toPeer).toBe(100);
+    expect(packet.transactionId).toBe(42);
+    expect(packet.isRequest).toBe(false);
+    expect(packet.descriptor?.serviceName).toBe('OspfRouteRpc');
+  });
+
+  it('错误响应能正确往返', () => {
+    const packet = buildWrappedRpcResponse(request, Buffer.alloc(0), {
+      error: { kind: 'executeError', message: 'handler failed' },
+    });
+    const unwrapped = decodeRpcResponse(packet.body);
+    expect(unwrapped.response).toHaveLength(0);
+    expect(unwrapped.error).toEqual({ kind: 'executeError', message: 'handler failed' });
   });
 });

@@ -36,11 +36,11 @@
  */
 
 import {
-  buildingRpcResponse,
   decodeRpcPacket,
   decodeSyncRouteInfoRequest,
   encodeRpcPacket,
   encodeSyncRouteInfoResponse,
+  buildWrappedRpcResponse,
   type RpcPacket,
 } from './rpc';
 import { PacketType, hasFlag, PeerManagerHeaderFlags } from './protocol';
@@ -245,7 +245,11 @@ export class SecureChannel {
     // 踩过的坑：我先用了连接级 peer_id 当 to，对端在解密前检查
     // `hdr.to_peer_id == 自己的 my_peer_id` 不通过就**直接放行不解密**，
     // 于是加密包被当明文丢掉，表现为"响应已发但对端仍超时"且无任何错误日志。
-    this.sendRpcTo(buildingRpcResponse(rpc, responseBody), rpc.fromPeer);
+    // **必须用 buildWrappedRpcResponse**：业务消息要先包进 RpcResponse
+    // 再放进 RpcPacket.body。直接放业务消息会让对端解出空 response
+    // （`rpc/client.rs:387` 是 `RpcResponse::decode(rpc_packet.body)`），
+    // 表现为"对端收到了但当作空响应"。
+    this.sendRpcTo(buildWrappedRpcResponse(rpc, responseBody), rpc.fromPeer);
     return true;
   }
 }
