@@ -1,0 +1,113 @@
+{
+  "_comment": "由 native/protocol-oracle 从官方 easytier-core 生成，供 TS 协议实现对照",
+  "default_header_hex": "00000000000000000000000000000000",
+  "easytier_version": "0.1.0",
+  "flags": {
+    "COMPRESSED": {
+      "header_hex": "00000000000000000010000000000000",
+      "hex": "10",
+      "value": 16
+    },
+    "ENCRYPTED": {
+      "header_hex": "00000000000000000001000000000000",
+      "hex": "01",
+      "value": 1
+    },
+    "EXIT_NODE": {
+      "header_hex": "00000000000000000004000000000000",
+      "hex": "04",
+      "value": 4
+    },
+    "LATENCY_FIRST": {
+      "header_hex": "00000000000000000002000000000000",
+      "hex": "02",
+      "value": 2
+    },
+    "NO_PROXY": {
+      "header_hex": "00000000000000000008000000000000",
+      "hex": "08",
+      "value": 8
+    }
+  },
+  "header_layout": {
+    "offset_0_4": "from_peer_id (u32 LE)",
+    "offset_10": "forward_counter (u8)",
+    "offset_11": "reserved (u8, Rust 私有字段但仍然占位)",
+    "offset_12_16": "len (u32 LE)",
+    "offset_4_8": "to_peer_id (u32 LE)",
+    "offset_8": "packet_type (u8)",
+    "offset_9": "flags (u8)"
+  },
+  "header_sample": {
+    "bytes": [
+      4,
+      3,
+      2,
+      1,
+      13,
+      12,
+      11,
+      10,
+      1,
+      3,
+      3,
+      0,
+      120,
+      5,
+      0,
+      0
+    ],
+    "hex": "040302010d0c0b0a0103030078050000",
+    "input": {
+      "flags": [
+        "ENCRYPTED",
+        "LATENCY_FIRST"
+      ],
+      "forward_counter": 3,
+      "from_peer_id": 16909060,
+      "len": 1400,
+      "packet_type": 1,
+      "to_peer_id": 168496141
+    }
+  },
+  "header_size": 16,
+  "noise_handshake": {
+    "handshake_finished": {
+      "initiator": true,
+      "responder": true
+    },
+    "msg1_prefix": "9fcd24061d284e9d",
+    "msg_lengths": {
+      "msg1": 32,
+      "msg2": 96,
+      "msg3": 64
+    },
+    "ok": true,
+    "pattern": "Noise_XX_25519_ChaChaPoly_SHA256",
+    "prologue": "easytier-peerconn-noise"
+  },
+  "packet_types": {
+    "Data": 1,
+    "DataWithKcpSrcModified": 18,
+    "DataWithQuicSrcModified": 19,
+    "ForeignNetworkPacket": 10,
+    "HandShake": 2,
+    "Invalid": 0,
+    "KcpDst": 12,
+    "KcpSrc": 11,
+    "NoiseHandshakeMsg1": 13,
+    "NoiseHandshakeMsg2": 14,
+    "NoiseHandshakeMsg3": 15,
+    "Ping": 4,
+    "Pong": 5,
+    "QuicDst": 17,
+    "QuicSrc": 16,
+    "RelayHandshake": 20,
+    "RelayHandshakeAck": 21,
+    "Route": 7,
+    "RoutePacket": 3,
+    "RpcReq": 8,
+    "RpcResp": 9,
+    "TaRpc": 6
+  }
+}

@@ -1,0 +1,25 @@
+[package]
+name = "protocol-oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 这个 crate 不是产品代码，是**测试基准**。
+#
+# 它直接链接官方的 easytier-core，把真实的结构体字节序列化出来，供 TypeScript
+# 那份"自研协议实现"做逐字节对照。有了它，"我们理解的协议"就不是靠读源码猜的，
+# 而是与官方实现对过的。
+#
+# 为什么单独一个 crate 而不是加在 easytier-node 里：
+# 1. 它是构建期工具，不该进 Node 原生模块的产物
+# 2. 只依赖 easytier-core（不需要 tun/wireguard 那些 heavyweight feature），
+#    编译很快
+[dependencies]
+easytier-core = { git = "https://github.com/EasyTier/EasyTier.git", tag = "v2.7.0", default-features = false }
+zerocopy = { version = "0.7", features = ["derive"] }
+serde_json = "1"
+
+# snow：与 easytier-core 完全相同的 Noise 实现与版本（0.10.0）。
+# 用它跑真实握手，验证 TS 侧给出的 pattern / prologue 参数是可行的。
+snow = { version = "0.10.0", features = ["default-resolver"] }
+hex = "0.4"
