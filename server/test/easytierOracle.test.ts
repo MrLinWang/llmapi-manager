@@ -36,6 +36,11 @@ import {
 } from '../src/networking/easytier/route';
 import { CompressionAlgo } from '../src/networking/easytier/rpc';
 import {
+  buildConnBitmap,
+  decodeConnBitmap,
+  encodeConnBitmap,
+  getBitmapBit,
+  getConnectedPeers,
   NatType,
   SocketType,
   decodeIpv4Addr,
@@ -883,5 +888,115 @@ describe('拓扑结构：SocketAddr / Url / TunnelInfo', () => {
     expect(decoded.tunnelType).toBe(topo.tunnel_info.input.tunnel_type);
     expect(decoded.localAddr).toBe(topo.tunnel_info.input.local_addr);
     expect(decoded.remoteAddr).toBe(topo.tunnel_info.input.remote_addr);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 连接位图（OSPF 拓扑同步的核心结构）
+// ══════════════════════════════════════════════════════════════════
+
+interface OracleConnBitmap {
+  layout: { formula: string; bit_order: string; byte_count_formula: string };
+  sample: {
+    peer_ids: Array<{ peer_id: number; version: number }>;
+    edges: Array<[number, number]>;
+    bits: number[];
+    bitmap_hex: string;
+    protobuf_hex: string;
+    expected_adjacency: Record<string, number[]>;
+  };
+  field_numbers: Record<string, number>;
+}
+
+describe('连接位图：展平顺序与位序', () => {
+  const cb = (oracle as unknown as { conn_bitmap: OracleConnBitmap }).conn_bitmap;
+  const sample = cb.sample;
+
+  it('从边构造出的位图与官方逐字节相同', () => {
+    const built = buildConnBitmap(
+      sample.peer_ids.map((p) => ({ peerId: p.peer_id, version: p.version })),
+      sample.edges,
+    );
+    expect(built.bitmap.toString('hex')).toBe(sample.bitmap_hex);
+  });
+
+  it('编码后的 protobuf 与官方相同', () => {
+    const built = buildConnBitmap(
+      sample.peer_ids.map((p) => ({ peerId: p.peer_id, version: p.version })),
+      sample.edges,
+    );
+    expect(encodeConnBitmap(built).toString('hex')).toBe(sample.protobuf_hex);
+  });
+
+  it('解码官方字节后，每个节点的邻居与官方 API 的反解一致', () => {
+    // 这是最强的一条：oracle 用官方的 `get_connected_peers()` 反解出邻接，
+    // 我们的实现必须得出完全相同的结果。
+    const decoded = decodeConnBitmap(Buffer.from(sample.protobuf_hex, 'hex'));
+    expect(decoded.peerIds.map((p) => p.peerId)).toEqual(
+      sample.peer_ids.map((p) => p.peer_id),
+    );
+
+    for (let i = 0; i < decoded.peerIds.length; i += 1) {
+      const peerId = decoded.peerIds[i].peerId;
+      const expected = sample.expected_adjacency[String(peerId)];
+      expect(getConnectedPeers(decoded, i), `节点 ${peerId} 的邻居`).toEqual(expected);
+    }
+  });
+
+  it('位序是 LSB 优先（不是 MSB）', () => {
+    // 位序搞反时，相邻节点的位置会镜像——拓扑"有连接但连错了人"。
+    // 用官方样本坐实：bitmap=0x524a，bits 数组是 16 个 0/1。
+    const expectedBits = sample.bits;
+    const bitmap = Buffer.from(sample.bitmap_hex, 'hex');
+    for (let idx = 0; idx < expectedBits.length; idx += 1) {
+      expect(getBitmapBit(bitmap, idx), `第 ${idx} 位`).toBe(expectedBits[idx] === 1);
+    }
+  });
+
+  it('展平顺序是行优先 i*n+j（不是列优先 j*n+i）', () => {
+    // 用"有向"边区分行优先与列优先：只有 0→1，没有 1→0。
+    const peerIds = [
+      { peerId: 10, version: 1 },
+      { peerId: 20, version: 1 },
+    ];
+    const oneWay = buildConnBitmap(peerIds, [[0, 1]]);
+
+    const decoded = decodeConnBitmap(encodeConnBitmap(oneWay));
+    // 10 能到 20
+    expect(getConnectedPeers(decoded, 0)).toEqual([20]);
+    // 20 到不了 10 —— 若是列优先，这里会反过来
+    expect(getConnectedPeers(decoded, 1)).toEqual([]);
+  });
+
+  it('字节数按 ceil(n*n/8) 计算', () => {
+    // 4 个节点 → 16 位 → 2 字节（官方样本正是 2 字节 "524a"）
+    expect(Buffer.from(sample.bitmap_hex, 'hex')).toHaveLength(2);
+    // 3 个节点 → 9 位 → 2 字节
+    const three = buildConnBitmap(
+      [
+        { peerId: 1, version: 1 },
+        { peerId: 2, version: 1 },
+        { peerId: 3, version: 1 },
+      ],
+      [[0, 1]],
+    );
+    expect(three.bitmap).toHaveLength(2);
+  });
+
+  it('往返：encode → decode 保持节点与邻接', () => {
+    const built = buildConnBitmap(
+      sample.peer_ids.map((p) => ({ peerId: p.peer_id, version: p.version })),
+      sample.edges,
+    );
+    const roundTrip = decodeConnBitmap(encodeConnBitmap(built));
+    expect(roundTrip.peerIds).toEqual(built.peerIds);
+    for (let i = 0; i < built.peerIds.length; i += 1) {
+      expect(getConnectedPeers(roundTrip, i)).toEqual(getConnectedPeers(built, i));
+    }
+  });
+
+  it('字段号与 proto 定义一致', () => {
+    expect(cb.field_numbers.peer_ids).toBe(1);
+    expect(cb.field_numbers.bitmap).toBe(2);
   });
 });

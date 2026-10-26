@@ -114,6 +114,8 @@ fn main() {
     let enums = enum_vectors();
     let addresses = address_vectors();
     let topology = topology_vectors();
+    let conn_bitmap = conn_bitmap_vectors();
+    let peer_conn_info = peer_conn_info_vectors();
 
     let output = json!({
         "_comment": "由 native/protocol-oracle 从官方 easytier-core 生成，供 TS 协议实现对照",
@@ -141,6 +143,8 @@ fn main() {
         "enums": enums,
         "addresses": addresses,
         "topology": topology,
+        "conn_bitmap": conn_bitmap,
+        "peer_conn_info": peer_conn_info,
         "packet_types": packet_types,
         "flags": flags,
     });
@@ -787,6 +791,133 @@ fn topology_vectors() -> serde_json::Value {
                 "resolved_remote_addr": "tcp://10.126.126.1:43201",
             },
             "protobuf_hex": tunnel_hex,
+        },
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 连接位图（RouteConnBitmap）
+// ══════════════════════════════════════════════════════════════════
+
+/// 导出 `RouteConnBitmap` 的位序规则与可验证样本。
+///
+/// ## 这是 OSPF 拓扑同步的核心数据结构
+///
+/// 它用位图压缩"谁和谁相连"的邻接矩阵：
+///
+/// ```ignore
+/// // peer_ospf_route.rs:1434 / peer_rpc.rs:233
+/// peer_ids[i] 连接到 peer_ids[j]  ⟺  bit[i * peer_ids.len() + j] == 1
+/// ```
+///
+/// 位序是**字节内 LSB 优先**（`peer_rpc.rs:226`）：
+///
+/// ```rust
+/// let byte_idx = idx / 8;
+/// let bit_idx = idx % 8;
+/// (bitmap[byte_idx] >> bit_idx) & 1 == 1
+/// ```
+///
+/// 这两点任一搞错，"网络里有谁连谁"就全错了，而且不会报错——只会得到
+/// 一张看似合理但完全错误的拓扑图。
+fn conn_bitmap_vectors() -> serde_json::Value {
+    use easytier_proto::peer_rpc::{PeerIdVersion, RouteConnBitmap};
+    use prost::Message;
+
+    // 4 个节点，构造一个已知的邻接关系：
+    //   0 连 1
+    //   1 连 0, 2
+    //   2 连 1, 3
+    //   3 连 2
+    let peer_ids = vec![
+        PeerIdVersion { peer_id: 1001, version: 1 },
+        PeerIdVersion { peer_id: 1002, version: 1 },
+        PeerIdVersion { peer_id: 1003, version: 1 },
+        PeerIdVersion { peer_id: 1004, version: 1 },
+    ];
+    let n = peer_ids.len();
+
+    // 按 bit[i*n + j] 置位
+    // 注意 key 由 (i,j) 组成，用 64 位整数承载
+    let mut bits = vec![false; n * n];
+    let edges = [(0usize, 1usize), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2)];
+    for (i, j) in edges {
+        bits[i * n + j] = true;
+    }
+
+    // 按 LSB 优先打包
+    let byte_count = (bits.len() + 7) / 8;
+    let mut bitmap = vec![0u8; byte_count];
+    for (idx, on) in bits.iter().enumerate() {
+        if *on {
+            bitmap[idx / 8] |= 1 << (idx % 8);
+        }
+    }
+
+    let conn = RouteConnBitmap { peer_ids: peer_ids.clone(), bitmap: bitmap.clone() };
+    let encoded = conn.encode_to_vec();
+    let encoded_hex: String = encoded.iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 用官方 API 反解，确认我们构造的位图表达的就是预期邻接
+    let decoded = RouteConnBitmap::decode(&encoded[..]).unwrap();
+    let mut adjacency = serde_json::Map::new();
+    for (i, pv) in peer_ids.iter().enumerate() {
+        let peers: Vec<u32> = decoded
+            .get_connected_peers(i)
+            .into_iter()
+            .collect();
+        adjacency.insert(
+            pv.peer_id.to_string(),
+            json!(peers),
+        );
+    }
+
+    json!({
+        "layout": {
+            "formula": "peer_ids[i] connected to peer_ids[j] <=> bit[i * n + j]",
+            "bit_order": "LSB first within each byte: (bitmap[idx/8] >> (idx%8)) & 1",
+            "source": "peer_rpc.rs:226 get_bit / :233 get_connected_peers",
+            "byte_count_formula": "ceil(n*n / 8)",
+        },
+        "sample": {
+            "peer_ids": peer_ids.iter().map(|p| json!({"peer_id": p.peer_id, "version": p.version})).collect::<Vec<_>>(),
+            "edges": edges.iter().map(|(i, j)| json!([i, j])).collect::<Vec<_>>(),
+            "bits": bits.iter().map(|b| if *b { 1 } else { 0 }).collect::<Vec<u8>>(),
+            "bitmap_hex": hex::encode(&bitmap),
+            "protobuf_hex": encoded_hex,
+            "expected_adjacency": adjacency,
+        },
+        "field_numbers": { "peer_ids": 1, "bitmap": 2 },
+        "peer_id_version_fields": { "peer_id": 1, "version": 2 },
+    })
+}
+
+/// 导出 `PeerConnInfo`（节点列表里的一项）的编码。
+fn peer_conn_info_vectors() -> serde_json::Value {
+    use easytier_proto::peer_rpc::{route_conn_peer_list::PeerConnInfo, PeerIdVersion, RouteConnPeerList};
+    use prost::Message;
+
+    let info = PeerConnInfo {
+        peer_id: Some(PeerIdVersion { peer_id: 2001, version: 3 }),
+        connected_peer_ids: vec![2002, 2003],
+    };
+    let info_hex: String = info.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    let list = RouteConnPeerList { peer_conn_infos: vec![info.clone()] };
+    let list_hex: String = list.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    json!({
+        "field_numbers": {
+            "peer_conn_info": { "peer_id": 1, "connected_peer_ids": 2 },
+            "route_conn_peer_list": { "peer_conn_infos": 1 },
+        },
+        "sample": {
+            "input": {
+                "peer_id": { "peer_id": 2001, "version": 3 },
+                "connected_peer_ids": [2002, 2003],
+            },
+            "protobuf_hex": info_hex,
+            "list_protobuf_hex": list_hex,
         },
     })
 }

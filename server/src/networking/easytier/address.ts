@@ -26,6 +26,7 @@ import {
   encodeBytesField,
   encodeStringField,
   encodeVarintField,
+  getAllBytes,
   getBytes,
   getVarint,
 } from './protobuf';
@@ -213,3 +214,102 @@ export const NatType = {
  * 这一点容易混淆，因为它们看起来是同一类概念。
  */
 export const SocketType = { TCP: 0, UDP: 1 } as const;
+
+/**
+ * 连接位图（`RouteConnBitmap`）。
+ *
+ * ## 这是 OSPF 拓扑同步的核心结构
+ *
+ * 它把"谁和谁相连"的邻接矩阵压缩成位图：
+ *
+ * ```
+ * peer_ids[i] 连到 peer_ids[j]  ⟺  bit[i * n + j] == 1
+ * 位序：字节内 LSB 优先  →  (bitmap[idx/8] >> (idx%8)) & 1
+ * ```
+ *
+ * 对照 `peer_rpc.rs:226`（`get_bit`）与 `:233`（`get_connected_peers`）。
+ *
+ * ## 两处都极易搞错，且错了不会报错
+ *
+ * 1. **展平顺序**：`i * n + j` 是行优先的邻接矩阵。若误用 `j * n + i`
+ *    （列优先），得到的是转置矩阵——在对称的连通关系里看起来"差不多对"，
+ *    但有向连接（如 A 能看到 B 而 B 看不到 A）会完全颠倒。
+ * 2. **位序**：LSB 优先而非 MSB 优先。搞反时相邻节点的位置会镜像，
+ *    拓扑图看起来"有连接但连错了人"。
+ *
+ * 这类错误不会抛异常，只会给出一张错误但自洽的拓扑——所以必须靠
+ * 官方向量对照（本文件的测试就是这么做的）。
+ */
+export interface RouteConnBitmap {
+  /** 节点列表；位图的行列都对应这个列表的索引 */
+  peerIds: Array<{ peerId: number; version: number }>;
+  /** 位图原始字节 */
+  bitmap: Buffer;
+}
+
+/** 读取第 idx 位（LSB 优先）。 */
+export function getBitmapBit(bitmap: Buffer, idx: number): boolean {
+  const byteIdx = Math.floor(idx / 8);
+  if (byteIdx >= bitmap.length) return false;
+  return ((bitmap[byteIdx] >> (idx % 8)) & 1) === 1;
+}
+
+/** 设置第 idx 位（LSB 优先）。 */
+export function setBitmapBit(bitmap: Buffer, idx: number): void {
+  const byteIdx = Math.floor(idx / 8);
+  bitmap[byteIdx] |= 1 << (idx % 8);
+}
+
+/** 解码 `RouteConnBitmap`。*/
+export function decodeConnBitmap(buffer: Buffer): RouteConnBitmap {
+  const fields = decodeFields(buffer);
+  const peerIds = getAllBytes(fields, 1).map((item) => {
+    const f = decodeFields(item);
+    return { peerId: getVarint(f, 1) ?? 0, version: getVarint(f, 2) ?? 0 };
+  });
+  return { peerIds, bitmap: getBytes(fields, 2) ?? Buffer.alloc(0) };
+}
+
+/** 编码 `RouteConnBitmap`。*/
+export function encodeConnBitmap(bitmap: RouteConnBitmap): Buffer {
+  const parts: Buffer[] = [];
+  for (const pv of bitmap.peerIds) {
+    const inner: Buffer[] = [];
+    if (pv.peerId !== 0) inner.push(encodeVarintField(1, pv.peerId));
+    if (pv.version !== 0) inner.push(encodeVarintField(2, pv.version));
+    parts.push(encodeBytesField(1, Buffer.concat(inner)));
+  }
+  if (bitmap.bitmap.length > 0) {
+    parts.push(encodeBytesField(2, bitmap.bitmap));
+  }
+  return Buffer.concat(parts);
+}
+
+/**
+ * 解出某个节点连接了哪些节点。
+ *
+ * `peerIdx * peerIds.length + idx` —— 行优先展平的邻接矩阵。
+ */
+export function getConnectedPeers(state: RouteConnBitmap, peerIdx: number): number[] {
+  const result: number[] = [];
+  const n = state.peerIds.length;
+  for (let idx = 0; idx < n; idx += 1) {
+    if (getBitmapBit(state.bitmap, peerIdx * n + idx)) {
+      result.push(state.peerIds[idx].peerId);
+    }
+  }
+  return result;
+}
+
+/** 从一组边构造位图（便于测试与构造自己的拓扑）。 */
+export function buildConnBitmap(
+  peerIds: Array<{ peerId: number; version: number }>,
+  edges: Array<[number, number]>,
+): RouteConnBitmap {
+  const n = peerIds.length;
+  const bitmap = Buffer.alloc(Math.ceil((n * n) / 8));
+  for (const [i, j] of edges) {
+    setBitmapBit(bitmap, i * n + j);
+  }
+  return { peerIds, bitmap };
+}
