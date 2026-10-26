@@ -87,6 +87,30 @@ pub struct NodeOptions {
     /// `None` 交给 EasyTier 自己分配（DHCP 语义）。
     /// 对应 `TomlConfig::set_ipv4(Option<cidr::Ipv4Inet>)`（`toml.rs:698`）。
     pub ipv4: Option<String>,
+    /// 是否禁用内核 TUN 设备、改走用户态协议栈（smoltcp）。
+    ///
+    /// 用途一：**容器/无特权环境**。没有 `CAP_NET_ADMIN` 或 `/dev/net/tun` 时，
+    /// 建内核网卡会失败；`no_tun = true` 让它走 smoltcp（`instance/config.rs:324`
+    /// 的 `force_smoltcp` 分支），从而不需要任何特权就能跑起一个可建连的节点。
+    /// 代价是只有本进程能使用该虚拟网络，无法给系统里的其它程序提供网卡。
+    ///
+    /// 用途二：**测试**。要验证"两个节点能否互相发现并建连"时，TUN 设备是
+    /// 无关变量；关掉它才能在没有网络权限的环境里做真实的端到端测试。
+    ///
+    /// 默认 `false`（保持给系统提供网卡的常规行为）。
+    pub no_tun: Option<bool>,
+    /// 本地监听端口（TCP）。`None` 或 `0` 表示不监听。
+    ///
+    /// **这个不是可选项，是功能缺口**：EasyTier 的"组网"是双向的——
+    /// 一台机器要能主动连别人（`peers`），别人也要能连它。
+    /// 早先的实现一律 `set_listeners(Vec::new())`，结果只能做纯客户端：
+    /// 拿不到入站连接，也就无法给对端提供中继、无法被直连，
+    /// 两端都在 NAT 后时还容易连不上。
+    ///
+    /// 另外这也是**唯一能在无外网环境里做端到端测试**的方式：
+    /// 本机起一个节点监听、另一个节点连 127.0.0.1，就能验证真实握手，
+    /// 而不必依赖公共中继（当前开发环境里 `public.easytier.cn` 解析不了）。
+    pub listen_port: Option<u32>,
 }
 
 #[napi(object)]
@@ -225,16 +249,41 @@ fn build_config(options: &NodeOptions) -> anyhow::Result<TomlConfig> {
     //
     // `set_flags` 是 `ConfigLoader` trait 的方法（toml.rs:234），
     // 该 trait 已在本文件顶部 import，因此可以直接调。
+    // 初始化 EasyTier 自己的日志（只生效一次；重复调用是安全的）。
+    //
+    // 为什么必须做：EasyTier 的故障几乎全是**静默**的——两个节点都
+    // `running: true`、却永远 peerCount=0。原因可能是握手失败、路由没收敛、
+    // 中继不可达、NAT 类型不兼容……这些只在它内部日志里说。
+    // 不打日志的话上层完全无从判断，只能看到"启动了但没用"。
+    //
+    // 日志级别由 RUST_LOG 控制（默认 info）。写 stderr，不落文件——
+    // 落盘交给本服务自己的 logger，避免出现第二套日志文件。
+    let _ = easytier::common::log::init_console();
+
     let mut flags = easytier::common::config::gen_default_flags();
     flags.dev_name = TUN_DEVICE_NAME.to_owned();
+    // no_tun：关掉内核网卡、走用户态协议栈。见 NodeOptions.no_tun 的说明。
+    flags.no_tun = options.no_tun.unwrap_or(false);
     config.set_flags(flags);
 
-    // 不监听任何本地入站地址。对"只作为客户端加入别人的网络"这个用途来说，
-    // 开监听会占用端口并把自己暴露成中继候选，超出用户预期。
+    // 监听端口。见 `NodeOptions.listen_port` 的说明——这不是可选项：
+    // 不监听就只能做纯客户端，无法被直连、也无法给对端当中继。
+    //
+    // 踩过的坑：早先这里一律 `set_listeners(Vec::new())`，结果两个本机节点
+    // 无论如何都连不上——A 只注册了内部的 `ring` 监听器，
+    // 而 B 反复连 `tcp://127.0.0.1:<port>` 并 2 秒超时。
+    // 日志里表现为 `manual reconnect ... connect timeout`，
+    // 而这个错误看起来像网络问题、实际是"对端根本没监听"。
+    //
     // `set_listeners(&self, listeners: Vec<url::Url>)`（toml.rs:96）。
-    // 传空 Vec 即为"不监听"（注意 `get_listeners` 返回 `Option<Vec<Url>>`，
-    // 空列表与 None 语义不同，这里明确给空列表）。
-    config.set_listeners(Vec::new());
+    match options.listen_port {
+        Some(port) if port > 0 => {
+            let url = url::Url::parse(&format!("tcp://0.0.0.0:{port}"))
+                .map_err(|e| napi::Error::from_reason(format!("监听地址不合法: {e}")))?;
+            config.set_listeners(vec![url]);
+        }
+        _ => config.set_listeners(Vec::new()),
+    }
 
     Ok(config)
 }

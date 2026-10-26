@@ -1272,6 +1272,7 @@ dependencies = [
  "napi-derive",
  "once_cell",
  "tokio",
+ "url",
 ]
 
 [[package]]

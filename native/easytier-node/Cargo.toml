@@ -51,11 +51,26 @@ crate-type = ["cdylib"]
 #   easytier-core/src/config/toml.rs:21   pub use {Flags, FlagsPatch}
 
 [dependencies]
+# url：构造监听地址（`TomlConfig::set_listeners` 收 `Vec<url::Url>`）。
+# 版本与 easytier 内部使用的保持一致，避免出现两个 url crate。
+url = "2"
 easytier = { git = "https://github.com/EasyTier/EasyTier.git", tag = "v2.7.0", default-features = false, features = [
   "tun",
   "wireguard",
   "quic",
   "aes-gcm",
+  # logging 必须开：EasyTier 的故障几乎全是**静默**的（两个节点都 running
+  # 却永远 peerCount=0），原因可能是握手失败/路由没收敛/中继不可达/NAT 不兼容，
+  # 这些只在它内部日志里说。不开这个 feature 时连 `common::log` 模块都不存在，
+  # 上层只能看到"启动了但没用"，完全无从定位。
+  "logging",
+  # smoltcp：**必需**。`no_tun = true` 时 EasyTier 走用户态协议栈
+  # （`instance/config.rs:324` 的 `force_smoltcp` 分支）。没有这个 feature，
+  # 关掉 TUN 就等于关掉网络层——节点会显示 running 但连不上任何人。
+  "smoltcp",
+  # tcp-hole-punch：TCP 打洞。两端都在 NAT 后时靠它建连；
+  # 缺了它就只能等对端直连或走中继。
+  "tcp-hole-punch",
 ] }
 
 # napi 3.x：与 `@napi-rs/cli` 3.x 配套（已核实 crates.io：napi 3.15.0、
