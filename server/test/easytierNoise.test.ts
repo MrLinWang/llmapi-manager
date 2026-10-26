@@ -36,6 +36,12 @@ import {
   shouldSkipEncrypt,
 } from '../src/networking/easytier/dataPlane';
 import { decodeFields } from '../src/networking/easytier/protobuf';
+import {
+  CompressionAlgo,
+  buildingRpcResponse,
+  encodeRpcPacket,
+  type RpcPacket,
+} from '../src/networking/easytier/rpc';
 import { framePacket, extractFrame } from '../src/networking/easytier/framing';
 import { PacketType, decodeHeader } from '../src/networking/easytier/protocol';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -649,5 +655,63 @@ describe('数据面：AES-GCM 加解密', () => {
     // RPC 必须加密
     expect(shouldSkipEncrypt(PacketType.RpcReq)).toBe(false);
     expect(shouldSkipEncrypt(PacketType.RpcResp)).toBe(false);
+  });
+});
+
+describe('RPC：compression_info 必须显式带 algo', () => {
+  it('CompressionAlgo 的 None 是 1 而不是 0', () => {
+    // 这是 proto 里最容易踩的枚举陷阱：`Invalid = 0`、`None = 1`、`Zstd = 2`。
+    // 所以"用 None"不等于"省略字段"——省略会得到 Invalid(0)，
+    // 而对端的 `accepted_compression_algo()` 从不返回 Invalid。
+    expect(CompressionAlgo.Invalid).toBe(0);
+    expect(CompressionAlgo.None).toBe(1);
+    expect(CompressionAlgo.Zstd).toBe(2);
+  });
+
+  it('构造响应时自动带上 compression_info(algo=None)', () => {
+    const request: RpcPacket = {
+      fromPeer: 100,
+      toPeer: 200,
+      transactionId: 42,
+      descriptor: {
+        domainName: 'net',
+        protoName: 'OspfRouteRpc',
+        serviceName: 'OspfRouteRpc',
+        methodIndex: 1,
+      },
+      body: Buffer.from('req'),
+      isRequest: true,
+      totalPieces: 0,
+      pieceIdx: 0,
+      traceId: 0,
+      compressionInfo: { algo: CompressionAlgo.None, acceptedAlgo: CompressionAlgo.None },
+    };
+
+    const response = buildingRpcResponse(request, Buffer.from('resp'));
+    // from/to 反向
+    expect(response.fromPeer).toBe(200);
+    expect(response.toPeer).toBe(100);
+    // transaction_id 与 descriptor 保持
+    expect(response.transactionId).toBe(42);
+    expect(response.descriptor?.serviceName).toBe('OspfRouteRpc');
+    // 不是请求
+    expect(response.isRequest).toBe(false);
+    // 必须带 compression_info，且 algo=None(1)
+    expect(response.compressionInfo).not.toBeNull();
+    expect(response.compressionInfo?.algo).toBe(CompressionAlgo.None);
+  });
+
+  it('编码后的响应里确实有 compression_info 字段（字段号 10）', () => {
+    const response = buildingRpcResponse(
+      {
+        fromPeer: 1, toPeer: 2, transactionId: 9,
+        descriptor: { domainName: '', protoName: 'OspfRouteRpc', serviceName: 'OspfRouteRpc', methodIndex: 1 },
+        body: Buffer.alloc(0), isRequest: true, totalPieces: 0, pieceIdx: 0, traceId: 0,
+        compressionInfo: null,
+      },
+      Buffer.alloc(0),
+    );
+    const fields = decodeFields(encodeRpcPacket(response));
+    expect(fields.some((f) => f.fieldNumber === 10)).toBe(true);
   });
 });

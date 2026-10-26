@@ -316,7 +316,7 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
 
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 361 + web 12 = 373 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 364 + web 12 = 376 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。

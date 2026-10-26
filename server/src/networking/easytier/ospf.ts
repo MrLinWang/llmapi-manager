@@ -230,6 +230,14 @@ export class SecureChannel {
       missingConnPeerIds: [],
     });
 
+    // 响应的包头 to 用**对端的 my_peer_id**——它可以从对端的 Ping 包
+    // 或它 RPC 请求的 from 字段里得到，两者一致。
+    //
+    // 对端在解密前会检查 `hdr.to_peer_id == 自己的 my_peer_id`，
+    // 不等就直接放行不解密（`peer_conn.rs:214`），而解密失败又被静默丢弃
+    // （`:229` 的 `return None`），所以配错时**完全没有日志**——
+    // 表现为"响应已发但对端一直超时"。这是最难定位的一类问题。
+    //
     // 响应的包头 from/to **直接由请求的 to/from 反转得到**，
     // 这样无论对端用哪个 id（连接级还是 my_peer_id），回程都能对上——
     // 因为对端自己发的请求里 from 就是"它希望被回复的地址"。

@@ -94,6 +94,19 @@ export interface RpcPacket {
   totalPieces: number;
   pieceIdx: number;
   traceId: number;
+  /**
+   * 压缩信息。
+   *
+   * **不能省略**：`CompressionAlgoPb` 里 `Invalid = 0`、`None = 1`、`Zstd = 2`，
+   * 所以 proto3 的"默认值不写"在这里会写出 `Invalid`（=0）——
+   * 对端看到 algo 是 Invalid 会直接拒掉整个包
+   * （`rpc/packet.rs:16` 的 `accepted_compression_algo` 永远返回 None 或 Zstd，
+   * 从不返回 Invalid）。
+   *
+   * 这是"响应已发出但对端毫无反应"的又一个原因：包结构看起来完整，
+   * 但 algo=Invalid 让它在更早的解析阶段就被丢掉了。
+   */
+  compressionInfo: { algo: number; acceptedAlgo: number } | null;
 }
 
 /** 编码 `RpcDescriptor`。 */
@@ -155,6 +168,9 @@ export function encodeRpcPacket(packet: RpcPacket): Buffer {
   if (packet.traceId !== 0) {
     parts.push(encodeVarintField(RpcPacketField.traceId, packet.traceId));
   }
+  if (packet.compressionInfo !== null) {
+    parts.push(encodeBytesField(RpcPacketField.compressionInfo, encodeCompressionInfo(packet.compressionInfo)));
+  }
   return Buffer.concat(parts);
 }
 
@@ -172,6 +188,43 @@ export function decodeRpcPacket(buffer: Buffer): RpcPacket {
     totalPieces: getVarint(fields, RpcPacketField.totalPieces) ?? 0,
     pieceIdx: getVarint(fields, RpcPacketField.pieceIdx) ?? 0,
     traceId: getVarint(fields, RpcPacketField.traceId) ?? 0,
+    compressionInfo: decodeCompressionInfoOrNull(getBytes(fields, RpcPacketField.compressionInfo)),
+  };
+}
+
+/** `CompressionAlgoPb` 取值（`common.proto:136`）。 */
+export const CompressionAlgo = {
+  Invalid: 0,
+  None: 1,
+  Zstd: 2,
+} as const;
+
+/** `RpcCompressionInfo` 字段号（`common.proto:142`）。 */
+export const RpcCompressionInfoField = { algo: 1, acceptedAlgo: 2 } as const;
+
+export interface RpcCompressionInfo {
+  /** 本包内容用的压缩算法。**必须是 None(1) 或 Zstd(2)，不能是 Invalid(0)** */
+  algo: number;
+  /** 我方能接受的算法 */
+  acceptedAlgo: number;
+}
+
+export function encodeCompressionInfo(info: RpcCompressionInfo): Buffer {
+  const parts: Buffer[] = [];
+  // 即使为 0 也要显式写出——见 compressionInfo 字段的说明
+  parts.push(encodeVarintField(RpcCompressionInfoField.algo, info.algo));
+  if (info.acceptedAlgo !== 0) {
+    parts.push(encodeVarintField(RpcCompressionInfoField.acceptedAlgo, info.acceptedAlgo));
+  }
+  return Buffer.concat(parts);
+}
+
+function decodeCompressionInfoOrNull(buffer: Buffer | null): RpcCompressionInfo | null {
+  if (buffer === null) return null;
+  const fields = decodeFields(buffer);
+  return {
+    algo: getVarint(fields, RpcCompressionInfoField.algo) ?? 0,
+    acceptedAlgo: getVarint(fields, RpcCompressionInfoField.acceptedAlgo) ?? 0,
   };
 }
 
@@ -210,6 +263,7 @@ export function buildOspfSyncRouteRequest(options: {
     totalPieces: 0,
     pieceIdx: 0,
     traceId: 0,
+    compressionInfo: { algo: CompressionAlgo.None, acceptedAlgo: CompressionAlgo.None },
   };
 }
 
@@ -312,5 +366,8 @@ export function buildingRpcResponse(request: RpcPacket, body: Buffer): RpcPacket
     totalPieces: 0,
     pieceIdx: 0,
     traceId: request.traceId,
+    // 必须带 compression_info，且 algo 用 None(1) 而不是 Invalid(0)。
+    // 见 RpcPacket.compressionInfo 的说明。
+    compressionInfo: { algo: CompressionAlgo.None, acceptedAlgo: CompressionAlgo.None },
   };
 }

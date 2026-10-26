@@ -111,14 +111,33 @@ body: 12ab0108b49bfce00f10efa1ec8ee4dab8fed30118012a150a06...
 - 加密 vs 不加密 —— 都试过，对端**都没有任何相关日志**
 - `transaction_id` 回显、`ENCRYPTED` 标志、seq 起点（从 0 递增）
 
-**最有价值的线索**：发未加密响应后，对端日志里连
-"Received non-response packet"（`rpc/client.rs:183`）都没出现。
-说明**响应包根本没有到达对端的 RPC 处理层**，被更早的环节丢弃了。
+**这一轮新查明的事实**：
 
-下一步该查的方向（留给后续）：
-1. 响应包是否被 `after_received` 的某项检查提前 return（`peer_conn.rs:178`）
-2. 对端是否要求先收到一次我发起的 `SyncRouteInfoRequest` 才建立 inflight 记录
-3. `conn_bitmap` 之类 oneof 字段是否需要按拓扑内容回填
+1. **`compression_info` 必须显式带 `algo`**
+   `CompressionAlgoPb` 里 `Invalid=0 / None=1 / Zstd=2`，所以"用 None"
+   **不等于**"省略字段"——省略会得到 Invalid(0)，而对端的
+   `accepted_compression_algo()`（`rpc/packet.rs:16`）从不返回 Invalid。
+   已修复并加了回归测试。
+
+2. **对端的 `my_peer_id` 可以从 Ping 包的 `from` 字段读到**
+   Ping 是明文不加密的，包头里 `from` 就是它的 `my_peer_id`。
+   这解决了"to_peer_id 该填什么"的疑问（但填对了仍不成功）。
+
+3. **解密失败会被静默丢弃，完全没有日志**
+   `peer_conn.rs:229` 的 `return None`。这解释了为什么所有失败尝试都是
+   "响应已发但无任何反应"——**这类问题只能靠对照成功案例排查**，
+   不能靠看日志。
+
+4. **官方响应确实是 `from=请求的 to`、`to=请求的 from`**
+   `rpc/server.rs:291` 明确如此，我的实现正确。
+
+**仍未能解决**：用 Ping 学到的对端 my_peer_id 作为 `to` 仍超时；
+补上 `compression_info` 后仍超时；发畸形的加密包、发未加密的合法
+RpcResp，对端都**不产生任何日志**。
+
+结论：响应包在对端的 `after_received` 或更早的管道环节被丢弃，
+而该处的丢弃是静默的。要继续必须读通 `peer_conn.rs` 的接收管道
+与 `peer_manager` 的 filter 链——这不是靠试探能完成的。
 
 ## 还没实现
 
