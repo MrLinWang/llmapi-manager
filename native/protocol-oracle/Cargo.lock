@@ -1913,9 +1913,14 @@ dependencies = [
 name = "protocol-oracle"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "easytier-core",
+ "easytier-proto",
  "hex",
+ "hmac 0.12.1",
+ "prost",
  "serde_json",
+ "sha2 0.10.9",
  "snow",
  "zerocopy 0.7.35",
 ]

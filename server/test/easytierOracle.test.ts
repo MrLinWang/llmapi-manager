@@ -15,6 +15,31 @@ import {
   X25519_PUBLIC_KEY_BYTES,
   createHandshakeParams,
 } from '../src/networking/easytier/noise';
+import {
+  CREDENTIAL_HMAC_PREFIX,
+  credentialHmac,
+  generateCredentialKeyPair,
+  publicKeyFromPrivate,
+  decodeCredential,
+  encodeCredential,
+  isCredentialExpired,
+  signCredential,
+  verifyCredential,
+  type TrustedCredential,
+} from '../src/networking/easytier/credential';
+import {
+  RoutePeerInfoField,
+  decodeRoutePeerInfo,
+  encodeRoutePeerInfo,
+  pickBestRoute,
+  type RoutePeerInfo,
+} from '../src/networking/easytier/route';
+import {
+  decodeFields,
+  decodeVarint,
+  encodeVarint,
+  getVarint,
+} from '../src/networking/easytier/protobuf';
 
 /**
  * 用**官方实现**做 oracle，逐字节验证我们的协议理解。
@@ -44,6 +69,54 @@ interface OracleNoise {
   msg_lengths: { msg1: number; msg2: number; msg3: number };
 }
 
+interface OracleCredentials {
+  hmac_formula: { mac: string; key: string; prefix: string };
+  pubkey_fields: Record<string, number>;
+  vector: {
+    network_secret: string;
+    credential: {
+      pubkey_hex: string;
+      groups: string[];
+      allow_relay: boolean;
+      expiry_unix: number;
+      allowed_proxy_cidrs: string[];
+      reusable: boolean;
+    };
+    protobuf_hex: string;
+    hmac_hex: string;
+    api_self_verify: boolean;
+  };
+  tamper: { changed_field: string; protobuf_hex: string; protobuf_differs: boolean };
+  edge_cases: {
+    empty_protobuf_hex: string;
+    empty_len: number;
+    reusable_false_protobuf_hex: string;
+    without_reusable_protobuf_hex: string;
+    reusable_presence_matters: boolean;
+  };
+}
+
+interface OracleRoutes {
+  field_numbers: Record<string, number>;
+  sample: {
+    input: {
+      peer_id: number;
+      cost: number;
+      version: number;
+      hostname: string;
+      easytier_version: string;
+      proxy_cidrs: string[];
+      peer_route_id: number;
+      network_length: number;
+      noise_static_pubkey_hex: string;
+    };
+    protobuf_hex: string;
+    decoded: Record<string, unknown>;
+  };
+  minimal: { input: { peer_id: number }; protobuf_hex: string };
+  default_protobuf_hex: string;
+}
+
 interface Oracle {
   header_size: number;
   header_sample: {
@@ -62,6 +135,8 @@ interface Oracle {
   packet_types: Record<string, number>;
   flags: Record<string, OracleFlag>;
   noise_handshake: OracleNoise;
+  credentials: OracleCredentials;
+  routes: OracleRoutes;
 }
 
 const oracle: Oracle = JSON.parse(
@@ -227,5 +302,388 @@ describe('协议对照：Noise 握手参数', () => {
     const params = createHandshakeParams();
     expect(params.localPrivateKey).toHaveLength(X25519_PUBLIC_KEY_BYTES);
     expect(X25519_PUBLIC_KEY_BYTES).toBe(32);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 凭证：X25519 + HMAC-SHA256 over protobuf
+// ══════════════════════════════════════════════════════════════════
+
+/** 把 oracle 的样本转成我们的类型。 */
+function oracleCredential(): TrustedCredential {
+  const c = oracle.credentials.vector.credential;
+  return {
+    pubkey: Buffer.from(c.pubkey_hex, 'hex'),
+    groups: c.groups,
+    allowRelay: c.allow_relay,
+    expiryUnix: c.expiry_unix,
+    allowedProxyCidrs: c.allowed_proxy_cidrs,
+    reusable: c.reusable,
+  };
+}
+
+describe('协议对照：凭证的 protobuf 编码', () => {
+  it('编码结果与官方逐字节相同', () => {
+    // 这条是凭证互操作的基础：官方对 protobuf 编码结果签名，
+    // 所以只要字节差一个，HMAC 就完全不同、对方验签失败。
+    const encoded = encodeCredential(oracleCredential());
+    expect(encoded.toString('hex')).toBe(oracle.credentials.vector.protobuf_hex);
+  });
+
+  it('签名前缀与官方一致', () => {
+    // 前缀改一个字符 → 验签失败，而对方只会说"验签失败"，不会说前缀错了
+    expect(CREDENTIAL_HMAC_PREFIX.toString('utf8')).toBe(
+      oracle.credentials.hmac_formula.prefix,
+    );
+  });
+
+  it('HMAC 与官方完全相同', () => {
+    const hmac = credentialHmac(
+      oracleCredential(),
+      oracle.credentials.vector.network_secret,
+    );
+    expect(hmac.toString('hex')).toBe(oracle.credentials.vector.hmac_hex);
+  });
+
+  it('自己签发的凭证能通过自己的验签，且官方也能验（同一公式）', () => {
+    const secret = oracle.credentials.vector.network_secret;
+    const proof = signCredential(oracleCredential(), secret);
+
+    expect(verifyCredential(proof, secret)).toBe(true);
+    // 换一个密钥必须验签失败
+    expect(verifyCredential(proof, `${secret}-wrong`)).toBe(false);
+    // oracle 报告官方 API 自校验通过，说明两边用的是同一条公式
+    expect(oracle.credentials.vector.api_self_verify).toBe(true);
+  });
+
+  it('篡改任一字段都会改变编码（因此改变 HMAC）', () => {
+    const original = encodeCredential(oracleCredential()).toString('hex');
+    expect(oracle.credentials.tamper.protobuf_differs).toBe(true);
+    expect(oracle.credentials.tamper.protobuf_hex).not.toBe(original);
+  });
+
+  it('解码能还原所有字段', () => {
+    const decoded = decodeCredential(Buffer.from(oracle.credentials.vector.protobuf_hex, 'hex'));
+    const c = oracle.credentials.vector.credential;
+    expect(decoded.pubkey.toString('hex')).toBe(c.pubkey_hex);
+    expect(decoded.groups).toEqual(c.groups);
+    expect(decoded.allowRelay).toBe(c.allow_relay);
+    expect(decoded.expiryUnix).toBe(c.expiry_unix);
+    expect(decoded.allowedProxyCidrs).toEqual(c.allowed_proxy_cidrs);
+    expect(decoded.reusable).toBe(c.reusable);
+  });
+
+  it('字段号与 proto 定义一致', () => {
+    const expected = oracle.credentials.pubkey_fields;
+    // 这些数字是线上格式；集中断言避免将来改 proto 时漏改一侧
+    expect(expected.pubkey).toBe(1);
+    expect(expected.groups).toBe(2);
+    expect(expected.allow_relay).toBe(3);
+    expect(expected.expiry_unix).toBe(4);
+    expect(expected.allowed_proxy_cidrs).toBe(5);
+    expect(expected.reusable).toBe(6);
+  });
+});
+
+describe('协议对照：凭证的 proto3 边界行为', () => {
+  it('全默认值的凭证编码成空字节（proto3 不写默认值）', () => {
+    const empty: TrustedCredential = {
+      pubkey: Buffer.alloc(0),
+      groups: [],
+      allowRelay: false,
+      expiryUnix: 0,
+      allowedProxyCidrs: [],
+      reusable: null,
+    };
+    const encoded = encodeCredential(empty);
+    expect(encoded.toString('hex')).toBe(oracle.credentials.edge_cases.empty_protobuf_hex);
+    expect(encoded.length).toBe(oracle.credentials.edge_cases.empty_len);
+  });
+
+  it('reusable 的 presence 有意义：false 与"未设置"编码不同', () => {
+    // 这是最容易错的一处：proto 里 `optional bool reusable = 6`，
+    // 显式设为 false 必须写出来（0x30 0x00），而"未设置"什么都不写。
+    // 若把 reusable 当普通 bool 处理（false 不写），HMAC 就会与官方不同。
+    const base: TrustedCredential = {
+      pubkey: Buffer.alloc(0),
+      groups: [],
+      allowRelay: false,
+      expiryUnix: 0,
+      allowedProxyCidrs: [],
+      reusable: null,
+    };
+
+    // oracle 给的是两批不同来源的数据，要按各自的基准对照：
+    //   reusable_false_protobuf_hex  = 空凭证 + reusable=false  → '3000'
+    //   without_reusable_protobuf_hex = **完整**凭证去掉 reusable
+    const explicitFalse = encodeCredential({ ...base, reusable: false });
+    const unset = encodeCredential({ ...base, reusable: null });
+
+    // 空凭证 + 显式 false → 只有字段 6 的两个字节（tag 0x30 + 值 0x00）
+    expect(explicitFalse.toString('hex')).toBe(
+      oracle.credentials.edge_cases.reusable_false_protobuf_hex,
+    );
+    // 空凭证 + 未设置 → 空
+    expect(unset.toString('hex')).toBe('');
+
+    // 完整凭证去掉 reusable，应当等于"完整编码去掉末尾的 30 01"
+    const full = encodeCredential(oracleCredential()).toString('hex');
+    expect(full.endsWith('3001')).toBe(true);
+    const fullWithoutReusable = full.slice(0, -4);
+    expect(fullWithoutReusable).toBe(
+      oracle.credentials.edge_cases.without_reusable_protobuf_hex,
+    );
+    expect(oracle.credentials.edge_cases.reusable_presence_matters).toBe(true);
+    expect(explicitFalse.toString('hex')).not.toBe(unset.toString('hex'));
+  });
+
+  it('解码时能区分未设置与 false', () => {
+    const base: TrustedCredential = {
+      pubkey: Buffer.alloc(0),
+      groups: [],
+      allowRelay: false,
+      expiryUnix: 0,
+      allowedProxyCidrs: [],
+      reusable: null,
+    };
+    expect(decodeCredential(encodeCredential({ ...base, reusable: null })).reusable).toBeNull();
+    expect(decodeCredential(encodeCredential({ ...base, reusable: false })).reusable).toBe(false);
+    expect(decodeCredential(encodeCredential({ ...base, reusable: true })).reusable).toBe(true);
+  });
+
+  it('过期判断：expiry 为 0 视为不过期', () => {
+    const base = oracleCredential();
+    // 0 = 不过期（proto 默认值语义）
+    expect(isCredentialExpired({ ...base, expiryUnix: 0 }, 2_000_000_000)).toBe(false);
+    // 已过期
+    expect(isCredentialExpired({ ...base, expiryUnix: 1_000 }, 2_000_000_000)).toBe(true);
+    // 未过期
+    expect(isCredentialExpired({ ...base, expiryUnix: 3_000_000_000 }, 2_000_000_000)).toBe(false);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 路由：RoutePeerInfo
+// ══════════════════════════════════════════════════════════════════
+
+function oracleRoute(): RoutePeerInfo {
+  const i = oracle.routes.sample.input;
+  return {
+    peerId: i.peer_id,
+    cost: i.cost,
+    version: i.version,
+    hostname: i.hostname,
+    easytierVersion: i.easytier_version,
+    proxyCidrs: i.proxy_cidrs,
+    peerRouteId: i.peer_route_id,
+    networkLength: i.network_length,
+    noiseStaticPubkey: Buffer.from(i.noise_static_pubkey_hex, 'hex'),
+  };
+}
+
+describe('协议对照：路由条目编码', () => {
+  it('编码结果与官方逐字节相同', () => {
+    const encoded = encodeRoutePeerInfo(oracleRoute());
+    expect(encoded.toString('hex')).toBe(oracle.routes.sample.protobuf_hex);
+  });
+
+  it('解码官方字节能还原所有字段', () => {
+    const decoded = decodeRoutePeerInfo(Buffer.from(oracle.routes.sample.protobuf_hex, 'hex'));
+    const expected = oracle.routes.sample.decoded;
+
+    expect(decoded.peerId).toBe(expected.peer_id);
+    expect(decoded.cost).toBe(expected.cost);
+    expect(decoded.version).toBe(expected.version);
+    expect(decoded.hostname).toBe(expected.hostname);
+    expect(decoded.easytierVersion).toBe(expected.easytier_version);
+    expect(decoded.proxyCidrs).toEqual(expected.proxy_cidrs);
+    expect(decoded.peerRouteId).toBe(expected.peer_route_id);
+    expect(decoded.networkLength).toBe(expected.network_length);
+    expect(decoded.noiseStaticPubkey?.toString('hex')).toBe(expected.noise_static_pubkey_hex);
+  });
+
+  it('往返编解码保持字段', () => {
+    const original = oracleRoute();
+    expect(decodeRoutePeerInfo(encodeRoutePeerInfo(original))).toEqual(original);
+  });
+
+  it('只有 peer_id 时编码为两个字节（proto3 不写默认值）', () => {
+    // 官方 oracle 实测：peer_id=1 → 08 01
+    const minimal: RoutePeerInfo = {
+      peerId: oracle.routes.minimal.input.peer_id,
+      cost: 0,
+      version: 0,
+      hostname: null,
+      easytierVersion: '',
+      proxyCidrs: [],
+      peerRouteId: 0,
+      networkLength: 0,
+      noiseStaticPubkey: null,
+    };
+    expect(encodeRoutePeerInfo(minimal).toString('hex')).toBe(
+      oracle.routes.minimal.protobuf_hex,
+    );
+  });
+
+  it('字段号与 proto 定义一致', () => {
+    // 直接对照官方 proto 里的编号，防止将来改 schema 时只改一侧
+    const official = oracle.routes.field_numbers;
+    expect(RoutePeerInfoField.peerId).toBe(official.peer_id);
+    expect(RoutePeerInfoField.cost).toBe(official.cost);
+    expect(RoutePeerInfoField.proxyCidrs).toBe(official.proxy_cidrs);
+    expect(RoutePeerInfoField.hostname).toBe(official.hostname);
+    expect(RoutePeerInfoField.version).toBe(official.version);
+    expect(RoutePeerInfoField.easytierVersion).toBe(official.easytier_version);
+    expect(RoutePeerInfoField.peerRouteId).toBe(official.peer_route_id);
+    expect(RoutePeerInfoField.networkLength).toBe(official.network_length);
+    expect(RoutePeerInfoField.noiseStaticPubkey).toBe(official.noise_static_pubkey);
+  });
+
+  it('未知字段被跳过而不是报错（前向兼容）', () => {
+    // 将来上游加字段时，我们不该因此拒绝解析整条路由
+    const known = encodeRoutePeerInfo(oracleRoute());
+    // 追加一个字段号 99、varint 值的字段
+    const unknownField = Buffer.concat([encodeVarint((99 << 3) | 0), encodeVarint(123)]);
+    const withUnknown = Buffer.concat([known, unknownField]);
+
+    const decoded = decodeRoutePeerInfo(withUnknown);
+    expect(decoded.peerId).toBe(oracleRoute().peerId);
+  });
+});
+
+describe('协议对照：路由选择辅助', () => {
+  it('同目标多条路由时取 cost 最小', () => {
+    const base: RoutePeerInfo = {
+      peerId: 7,
+      cost: 0,
+      version: 1,
+      hostname: 'x',
+      easytierVersion: '2.7.0',
+      proxyCidrs: [],
+      peerRouteId: 1,
+      networkLength: 2,
+      noiseStaticPubkey: null,
+    };
+    const routes = [
+      { ...base, cost: 5, peerRouteId: 1 },
+      { ...base, cost: 2, peerRouteId: 2 },
+      { ...base, cost: 9, peerRouteId: 3 },
+    ];
+    expect(pickBestRoute(routes, 7)?.cost).toBe(2);
+  });
+
+  it('cost 相同时结果稳定（不依赖输入顺序）', () => {
+    const base: RoutePeerInfo = {
+      peerId: 7,
+      cost: 3,
+      version: 1,
+      hostname: 'x',
+      easytierVersion: '2.7.0',
+      proxyCidrs: [],
+      peerRouteId: 0,
+      networkLength: 2,
+      noiseStaticPubkey: null,
+    };
+    const a = { ...base, peerRouteId: 2 };
+    const b = { ...base, peerRouteId: 1 };
+    // 两种输入顺序都该选中 peerRouteId 更小的那条
+    expect(pickBestRoute([a, b], 7)?.peerRouteId).toBe(1);
+    expect(pickBestRoute([b, a], 7)?.peerRouteId).toBe(1);
+  });
+
+  it('目标不存在时返回 null', () => {
+    expect(pickBestRoute([], 1)).toBeNull();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// protobuf 基础编码
+// ══════════════════════════════════════════════════════════════════
+
+describe('协议对照：protobuf varint', () => {
+  it('单字节边界', () => {
+    expect(encodeVarint(0).toString('hex')).toBe('00');
+    expect(encodeVarint(1).toString('hex')).toBe('01');
+    expect(encodeVarint(127).toString('hex')).toBe('7f');
+  });
+
+  it('跨字节边界', () => {
+    expect(encodeVarint(128).toString('hex')).toBe('8001');
+    expect(encodeVarint(300).toString('hex')).toBe('ac02');
+  });
+
+  it('官方样本里的 expiry_unix=1800000000 编码一致', () => {
+    // 从 oracle 的 protobuf 里能看到这段：20 80 a4 a7 da 06
+    // 20 = tag(字段4, varint)，后面 5 字节是值
+    expect(encodeVarint(1_800_000_000).toString('hex')).toBe('80a4a7da06');
+  });
+
+  it('负数与 int64 补码', () => {
+    // -1 在 protobuf int64 里是 10 个 ff 最后一个 01
+    const encoded = encodeVarint(-1);
+    expect(encoded.length).toBe(10);
+    const decoded = decodeVarint(encoded);
+    expect(decoded.value).toBe(-1);
+    expect(decoded.bytes).toBe(10);
+  });
+
+  it('往返编解码一批值', () => {
+    for (const value of [0, 1, 127, 128, 300, 16383, 16384, 2 ** 31 - 1, 1_800_000_000]) {
+      const decoded = decodeVarint(encodeVarint(value));
+      expect(decoded.value, `值 ${value} 往返失败`).toBe(value);
+    }
+  });
+
+  it('能从 oracle 的真实路由字节里取到 peer_id', () => {
+    // 字段 1（peer_id）在 proto 里编号最小，所以总是第一个出现
+    const fields = decodeFields(Buffer.from(oracle.routes.sample.protobuf_hex, 'hex'));
+    expect(getVarint(fields, RoutePeerInfoField.peerId)).toBe(
+      oracle.routes.sample.input.peer_id,
+    );
+  });
+});
+
+describe('协议对照：X25519 密钥', () => {
+  it('生成的密钥长度符合 X25519 / 凭证要求', () => {
+    const kp = generateCredentialKeyPair();
+    expect(kp.privateKey).toHaveLength(32);
+    expect(kp.publicKey).toHaveLength(32);
+    // 与 oracle 里那份假公钥长度一致（proto 只要求 32 字节）
+    expect(Buffer.from(oracle.credentials.vector.credential.pubkey_hex, 'hex')).toHaveLength(32);
+  });
+
+  it('两次生成不同（不是固定值）', () => {
+    const a = generateCredentialKeyPair();
+    const b = generateCredentialKeyPair();
+    expect(a.privateKey.equals(b.privateKey)).toBe(false);
+    expect(a.publicKey.equals(b.publicKey)).toBe(false);
+  });
+
+  it('能从裸 32 字节私钥导出对应的公钥', () => {
+    // 这条覆盖一个 Node 的坑：X25519 的 JWK 导入要求同时给 `x`（公钥），
+    // 而只有私钥时恰恰不知道 x。实现里用 PKCS#8 DER 封装绕过，
+    // 这里验证绕过是正确的同时也没算错公钥。
+    const kp = generateCredentialKeyPair();
+    expect(publicKeyFromPrivate(kp.privateKey).equals(kp.publicKey)).toBe(true);
+  });
+
+  it('私钥长度不对时拒绝', () => {
+    expect(() => publicKeyFromPrivate(Buffer.alloc(16))).toThrow(/32 字节/);
+  });
+
+  it('用生成的密钥签发，能验签通过；换密钥则失败', () => {
+    const kp = generateCredentialKeyPair();
+    const credential = {
+      pubkey: kp.publicKey,
+      groups: ['operators'],
+      allowRelay: false,
+      expiryUnix: 1_900_000_000,
+      allowedProxyCidrs: [],
+      // 用 optional 的 null 情形，覆盖"未设置"分支
+      reusable: null,
+    };
+    const proof = signCredential(credential, 'network-secret');
+    expect(verifyCredential(proof, 'network-secret')).toBe(true);
+    expect(verifyCredential(proof, 'wrong-secret')).toBe(false);
   });
 });

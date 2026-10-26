@@ -1,5 +1,53 @@
 {
   "_comment": "由 native/protocol-oracle 从官方 easytier-core 生成，供 TS 协议实现对照",
+  "credentials": {
+    "edge_cases": {
+      "empty_len": 0,
+      "empty_protobuf_hex": "",
+      "reusable_false_protobuf_hex": "3000",
+      "reusable_presence_matters": true,
+      "without_reusable_protobuf_hex": "0a201111111111111111111111111111111111111111111111111111111111111111120561646d696e120572656c617918012080a4a7da062a0a31302e302e302e302f38"
+    },
+    "hmac_formula": {
+      "key": "network_secret (UTF-8 bytes)",
+      "mac": "HMAC-SHA256",
+      "note": "msg = prefix || protobuf_encode(TrustedCredentialPubkey)",
+      "prefix": "easytier credential proof"
+    },
+    "pubkey_fields": {
+      "allow_relay": 3,
+      "allowed_proxy_cidrs": 5,
+      "expiry_unix": 4,
+      "groups": 2,
+      "pubkey": 1,
+      "reusable": 6
+    },
+    "tamper": {
+      "changed_field": "allow_relay -> false",
+      "protobuf_differs": true,
+      "protobuf_hex": "0a201111111111111111111111111111111111111111111111111111111111111111120561646d696e120572656c61792080a4a7da062a0a31302e302e302e302f383001"
+    },
+    "vector": {
+      "api_self_verify": true,
+      "credential": {
+        "allow_relay": true,
+        "allowed_proxy_cidrs": [
+          "10.0.0.0/8"
+        ],
+        "expiry_unix": 1800000000,
+        "groups": [
+          "admin",
+          "relay"
+        ],
+        "pubkey_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "reusable": true
+      },
+      "hmac_from_bytes_hex": "f98fdece92309b34c00c8f0b64c3360fd88ee087b54a085e5e78d6fd08244de4",
+      "hmac_hex": "f98fdece92309b34c00c8f0b64c3360fd88ee087b54a085e5e78d6fd08244de4",
+      "network_secret": "oracle-network-secret",
+      "protobuf_hex": "0a201111111111111111111111111111111111111111111111111111111111111111120561646d696e120572656c617918012080a4a7da062a0a31302e302e302e302f383001"
+    }
+  },
   "default_header_hex": "00000000000000000000000000000000",
   "easytier_version": "0.1.0",
   "flags": {
@@ -76,7 +124,7 @@
       "initiator": true,
       "responder": true
     },
-    "msg1_prefix": "9fcd24061d284e9d",
+    "msg1_prefix": "555161c098efd2af",
     "msg_lengths": {
       "msg1": 32,
       "msg2": 96,
@@ -109,5 +157,76 @@
     "RpcReq": 8,
     "RpcResp": 9,
     "TaRpc": 6
+  },
+  "routes": {
+    "default_protobuf_hex": "",
+    "field_numbers": {
+      "cost": 3,
+      "easytier_version": 10,
+      "feature_flag": 11,
+      "groups": 16,
+      "hostname": 6,
+      "inst_id": 2,
+      "ipv4_addr": 4,
+      "ipv6_addr": 15,
+      "last_update": 8,
+      "network_length": 13,
+      "noise_static_pubkey": 18,
+      "peer_id": 1,
+      "peer_route_id": 12,
+      "proxy_cidrs": 5,
+      "quic_port": 14,
+      "tcp_nat_type": 17,
+      "trusted_credential_pubkeys": 19,
+      "udp_nat_type": 7,
+      "version": 9
+    },
+    "minimal": {
+      "input": {
+        "peer_id": 1
+      },
+      "note": "proto3 不序列化默认值；identity 里 version=0 等字段都不会出现",
+      "protobuf_hex": "0801"
+    },
+    "sample": {
+      "decoded": {
+        "cost": 5,
+        "easytier_version": "2.7.0",
+        "hostname": "node-a",
+        "network_length": 3,
+        "noise_static_pubkey_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+        "peer_id": 42,
+        "peer_route_id": 99,
+        "proxy_cidrs": [
+          "192.168.0.0/16"
+        ],
+        "version": 7
+      },
+      "input": {
+        "cost": 5,
+        "easytier_version": "2.7.0",
+        "hostname": "node-a",
+        "network_length": 3,
+        "noise_static_pubkey_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+        "peer_id": 42,
+        "peer_route_id": 99,
+        "proxy_cidrs": [
+          "192.168.0.0/16"
+        ],
+        "version": 7
+      },
+      "protobuf_hex": "082a18052a0e3139322e3136382e302e302f313632066e6f64652d6148075205322e372e30606368039201202222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "wire_types": {
+      "cost": "varint",
+      "easytier_version": "length-delimited",
+      "hostname": "length-delimited",
+      "network_length": "varint",
+      "noise_static_pubkey": "length-delimited",
+      "peer_id": "varint",
+      "peer_route_id": "varint",
+      "proxy_cidrs": "length-delimited",
+      "version": "varint"
+    }
   }
 }

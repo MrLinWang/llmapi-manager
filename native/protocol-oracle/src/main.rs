@@ -107,6 +107,8 @@ fn main() {
     // prologue 与模式名在 easytier-core 里是字面量，不在公共 API 上，
     // 所以这里只能确认"包头类型编号"，握手参数用 TS 侧的断言与源码引用对照。
     let noise = run_noise_handshake();
+    let credentials = credential_vectors();
+    let routes = route_vectors();
 
     let output = json!({
         "_comment": "由 native/protocol-oracle 从官方 easytier-core 生成，供 TS 协议实现对照",
@@ -127,6 +129,8 @@ fn main() {
         },
         "default_header_hex": default_hex,
                 "noise_handshake": noise,
+        "credentials": credentials,
+        "routes": routes,
         "packet_types": packet_types,
         "flags": flags,
     });
@@ -262,5 +266,239 @@ fn run_noise_handshake() -> serde_json::Value {
         // 每条消息的长度（XX 模式是固定结构，长度可作为额外的结构证据）
         "msg_lengths": { "msg1": msg1.len() / 2, "msg2": msg2.len() / 2, "msg3": msg3.len() / 2 },
         "msg1_prefix": &msg1[..16.min(msg1.len())],
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// 凭证（X25519 + HMAC-SHA256 over protobuf）
+// ══════════════════════════════════════════════════════════════════════
+
+/// 导出凭证的签名算法细节与固定测试向量。
+///
+/// 官方实现（`easytier-proto/src/peer_rpc.rs:48`）：
+///
+/// ```ignore
+/// HMAC-SHA256(key = network_secret,
+///             msg = b"easytier credential proof" || credential.encode_to_vec())
+/// ```
+///
+/// 注意被签名的是 **protobuf 序列化结果**，不是字段的某种字符串拼接。
+/// 所以 TS 侧要么能精确复现 protobuf 编码，要么这条路径就只能校验、
+/// 不能自己生成凭证。这里把真实字节导出来，让 TS 能对着复现。
+fn credential_vectors() -> serde_json::Value {
+    use easytier_proto::peer_rpc::{TrustedCredentialPubkey, TrustedCredentialPubkeyProof};
+    use prost::Message;
+
+    // 固定输入：所有字段都填可预测的值，便于 TS 侧逐字段对照
+    let pubkey_bytes = [0x11u8; 32]; // 假公钥，只用形状
+    let mut credential = TrustedCredentialPubkey {
+        pubkey: pubkey_bytes.to_vec(),
+        groups: vec!["admin".to_string(), "relay".to_string()],
+        allow_relay: true,
+        expiry_unix: 1_800_000_000,
+        allowed_proxy_cidrs: vec!["10.0.0.0/8".to_string()],
+        reusable: Some(true),
+    };
+
+    let secret = "oracle-network-secret";
+
+    // protobuf 序列化结果（被签名的字节）
+    let encoded = credential.encode_to_vec();
+    let encoded_hex: String = encoded.iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 用官方 API 生成 HMAC
+    let proof = TrustedCredentialPubkeyProof::new_signed(credential.clone(), secret);
+    let hmac_hex: String = proof
+        .credential_hmac
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+
+    // 自己再算一遍，确认复现的是同一条公式（而不是只信 API）
+    let manual = TrustedCredentialPubkeyProof::generate_credential_hmac_from_bytes(
+        &encoded, secret,
+    );
+    let manual_hex: String = manual.iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 验证 API 自校验通过
+    let verified = proof.verify_credential_hmac(secret);
+
+    // 篡改一个字节后应当验证失败——证明 HMAC 真的覆盖了内容
+    let mut tampered = credential.clone();
+    tampered.allow_relay = false;
+    let tampered_encoded = tampered.encode_to_vec();
+    let tampered_hex: String = tampered_encoded.iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 空凭证（全默认值）的编码：proto3 下应为空字节
+    let empty = TrustedCredentialPubkey {
+        pubkey: vec![],
+        groups: vec![],
+        allow_relay: false,
+        expiry_unix: 0,
+        allowed_proxy_cidrs: vec![],
+        reusable: None,
+    };
+    let empty_encoded = empty.encode_to_vec();
+
+    // 只设 reusable=Some(false) 时的编码：验证 optional bool 的 presence
+    let mut only_reusable = TrustedCredentialPubkey {
+        pubkey: vec![],
+        groups: vec![],
+        allow_relay: false,
+        expiry_unix: 0,
+        allowed_proxy_cidrs: vec![],
+        reusable: None,
+    };
+    only_reusable.reusable = Some(false);
+    let only_reusable_encoded = only_reusable.encode_to_vec();
+    let only_reusable_hex: String = only_reusable_encoded
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+
+    // 去掉 reusable 再编一次，确认两组字节不同（optional 的 presence 有意义）
+    credential.reusable = None;
+    let without_reusable = credential.encode_to_vec();
+    let without_reusable_hex: String = without_reusable.iter().map(|b| format!("{:02x}", b)).collect();
+
+    json!({
+        "hmac_formula": {
+            "mac": "HMAC-SHA256",
+            "key": "network_secret (UTF-8 bytes)",
+            "prefix": "easytier credential proof",
+            "note": "msg = prefix || protobuf_encode(TrustedCredentialPubkey)",
+        },
+        "pubkey_fields": {
+            "pubkey": 1, "groups": 2, "allow_relay": 3,
+            "expiry_unix": 4, "allowed_proxy_cidrs": 5, "reusable": 6,
+        },
+        "vector": {
+            "network_secret": secret,
+            "credential": {
+                "pubkey_hex": hex::encode(&pubkey_bytes),
+                "groups": credential.groups,
+                "allow_relay": true,
+                "expiry_unix": 1_800_000_000i64,
+                "allowed_proxy_cidrs": vec!["10.0.0.0/8"],
+                "reusable": true,
+            },
+            "protobuf_hex": encoded_hex,
+            "hmac_hex": hmac_hex,
+            "hmac_from_bytes_hex": manual_hex,
+            "api_self_verify": verified,
+        },
+        "tamper": {
+            "changed_field": "allow_relay -> false",
+            "protobuf_hex": tampered_hex,
+            "protobuf_differs": tampered_hex != encoded_hex,
+        },
+        "edge_cases": {
+            "empty_protobuf_hex": hex::encode(&empty_encoded),
+            "empty_len": empty_encoded.len(),
+            "reusable_false_protobuf_hex": only_reusable_hex,
+            "without_reusable_protobuf_hex": without_reusable_hex,
+            "reusable_presence_matters": only_reusable_hex != without_reusable_hex,
+        },
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// 路由（RoutePeerInfo）
+// ══════════════════════════════════════════════════════════════════════
+
+/// 导出 `RoutePeerInfo` 的字段编号与一个真实序列化样本。
+///
+/// TS 侧的 `route.ts` 要能解析这个结构（对端广播的路由信息）。
+/// 导出真实 protobuf 字节，让 TS 的解析器对着它验证。
+fn route_vectors() -> serde_json::Value {
+    use easytier_proto::peer_rpc::RoutePeerInfo;
+    use prost::Message;
+
+    // 构造一个填满字段的 RoutePeerInfo。
+    // 只填标量字段与 bytes/string——嵌套消息（inst_id / ipv4_addr / last_update）
+    // 另算，见下面单独的最小样本。
+    let route = RoutePeerInfo {
+        peer_id: 42,
+        inst_id: None,
+        cost: 5,
+        ipv4_addr: None,
+        proxy_cidrs: vec!["192.168.0.0/16".to_string()],
+        hostname: Some("node-a".to_string()),
+        udp_nat_type: 0,
+        last_update: None,
+        version: 7,
+        easytier_version: "2.7.0".to_string(),
+        feature_flag: None,
+        peer_route_id: 99,
+        network_length: 3,
+        quic_port: None,
+        ipv6_addr: None,
+        groups: vec![],
+        tcp_nat_type: 0,
+        noise_static_pubkey: vec![0x22; 32],
+        trusted_credential_pubkeys: vec![],
+        ipv6_public_addr_prefix: None,
+        ipv6_public_addr_lease: None,
+    };
+
+    let encoded = route.encode_to_vec();
+    let encoded_hex: String = encoded.iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 最小样本：只有 peer_id，便于验"proto3 不写默认值"
+    let minimal = RoutePeerInfo {
+        peer_id: 1,
+        ..Default::default()
+    };
+    let minimal_encoded = minimal.encode_to_vec();
+    let minimal_hex: String = minimal_encoded.iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 全默认：应为空字节
+    let default_encoded = RoutePeerInfo::default().encode_to_vec();
+
+    // 解码回来，确认往返一致（给 TS 侧一个"解析后应得到什么"的期望值）
+    let decoded = RoutePeerInfo::decode(&encoded[..]).unwrap();
+
+    json!({
+        "field_numbers": {
+            "peer_id": 1, "inst_id": 2, "cost": 3, "ipv4_addr": 4,
+            "proxy_cidrs": 5, "hostname": 6, "udp_nat_type": 7, "last_update": 8,
+            "version": 9, "easytier_version": 10, "feature_flag": 11,
+            "peer_route_id": 12, "network_length": 13, "quic_port": 14,
+            "ipv6_addr": 15, "groups": 16, "tcp_nat_type": 17,
+            "noise_static_pubkey": 18, "trusted_credential_pubkeys": 19,
+        },
+        "wire_types": {
+            "peer_id": "varint", "cost": "varint", "proxy_cidrs": "length-delimited",
+            "hostname": "length-delimited", "version": "varint",
+            "easytier_version": "length-delimited", "peer_route_id": "varint",
+            "network_length": "varint", "noise_static_pubkey": "length-delimited",
+        },
+        "sample": {
+            "input": {
+                "peer_id": 42, "cost": 5, "version": 7,
+                "hostname": "node-a", "easytier_version": "2.7.0",
+                "proxy_cidrs": ["192.168.0.0/16"],
+                "peer_route_id": 99, "network_length": 3,
+                "noise_static_pubkey_hex": hex::encode([0x22u8; 32]),
+            },
+            "protobuf_hex": encoded_hex,
+            "decoded": {
+                "peer_id": decoded.peer_id,
+                "cost": decoded.cost,
+                "version": decoded.version,
+                "hostname": decoded.hostname,
+                "easytier_version": decoded.easytier_version,
+                "proxy_cidrs": decoded.proxy_cidrs,
+                "peer_route_id": decoded.peer_route_id,
+                "network_length": decoded.network_length,
+                "noise_static_pubkey_hex": hex::encode(&decoded.noise_static_pubkey),
+            },
+        },
+        "minimal": {
+            "input": { "peer_id": 1 },
+            "protobuf_hex": minimal_hex,
+            "note": "proto3 不序列化默认值；identity 里 version=0 等字段都不会出现",
+        },
+        "default_protobuf_hex": hex::encode(&default_encoded),
     })
 }

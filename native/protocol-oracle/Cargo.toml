@@ -16,6 +16,9 @@ publish = false
 #    编译很快
 [dependencies]
 easytier-core = { git = "https://github.com/EasyTier/EasyTier.git", tag = "v2.7.0", default-features = false }
+# proto 类型（RoutePeerInfo / TrustedCredentialPubkey）在这里。
+# 凭证的 HMAC 是对它们的 protobuf 编码签名的，所以要直接依赖。
+easytier-proto = { git = "https://github.com/EasyTier/EasyTier.git", tag = "v2.7.0", default-features = false }
 zerocopy = { version = "0.7", features = ["derive"] }
 serde_json = "1"
 
@@ -23,3 +26,10 @@ serde_json = "1"
 # 用它跑真实握手，验证 TS 侧给出的 pattern / prologue 参数是可行的。
 snow = { version = "0.10.0", features = ["default-resolver"] }
 hex = "0.4"
+
+# 凭证的 HMAC 是对**protobuf 序列化结果**签名的，所以要能调 encode_to_vec()。
+# prost 由 easytier-proto 传递依赖进来，这里显式声明以便直接用它的 Message trait。
+prost = "0.14"
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
