@@ -90,14 +90,35 @@ body: 12ab0108b49bfce00f10efa1ec8ee4dab8fed30118012a150a06...
 | descriptor `peer_rpc.OspfRouteRpc` / method 0 | **`OspfRouteRpc`** / method **1**，domain 是网络名 |
 | 方向按客户端/服务端 | **按 peer_id 大小**（sender < receiver 即 aToB）|
 
-### 剩余问题（诚实记录）
+### 剩余问题（诚实记录：未解决）
 
-加密应答已经发出，但对端仍报 `sync_route_info failed ... Timeout`。
-已排除的项：密钥（能解密对端数据）、算法、方向、transaction_id 回显、
-`ENCRYPTED` 标志、seq 起点（从 0 递增）。
+加密应答已发出，但对端仍报 `sync_route_info failed ... Timeout`。
 
-尚未查清的是对端是否要求响应满足其他条件（例如需要先发一次自己的
-`SyncRouteInfoRequest`，或对 `conn_bitmap` 内容有校验）。
+**已确认无误的部分**（这些都有实证）：
+
+| 项 | 证据 |
+| --- | --- |
+| 密钥派生 | 能成功解密对端的真实加密 RPC |
+| 加密算法 `aes-gcm` = AES-128 | 同上（用 AES-128 才解得开，256 失败）|
+| 方向按 peer_id 大小 | 解密时用 `bToA` 才对 |
+| `RpcPacket` 编解码 | 与 oracle 逐字节一致 |
+| 响应字段（反向 from/to、同 txn、is_request=false） | 手工核对过 |
+
+**已排除的假设**：
+
+- `to_peer_id` 用连接级 peer_id / 对端 RPC 的 from / 对端的 my_peer_id
+  —— 三种都试过，都超时
+- 加密 vs 不加密 —— 都试过，对端**都没有任何相关日志**
+- `transaction_id` 回显、`ENCRYPTED` 标志、seq 起点（从 0 递增）
+
+**最有价值的线索**：发未加密响应后，对端日志里连
+"Received non-response packet"（`rpc/client.rs:183`）都没出现。
+说明**响应包根本没有到达对端的 RPC 处理层**，被更早的环节丢弃了。
+
+下一步该查的方向（留给后续）：
+1. 响应包是否被 `after_received` 的某项检查提前 return（`peer_conn.rs:178`）
+2. 对端是否要求先收到一次我发起的 `SyncRouteInfoRequest` 才建立 inflight 记录
+3. `conn_bitmap` 之类 oneof 字段是否需要按拓扑内容回填
 
 ## 还没实现
 

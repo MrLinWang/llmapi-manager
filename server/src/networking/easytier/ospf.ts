@@ -51,7 +51,16 @@ import type { ReceivedPacket } from './session';
 
 export interface OspfSessionOptions {
   myPeerId: number;
+  /** 连接级 peer_id（握手协商出的，用于 RPC 的 from/to 配对） */
   remotePeerId: number;
+  /**
+   * 对端在虚拟网络里的 my_peer_id。
+   *
+   * 与 `remotePeerId` **不是同一个值**，用途也不同：
+   * - 加解密的**方向判断**用连接级 peer_id
+   * - 包头里的 `to_peer_id` 必须用 my_peer_id，否则对端不解密直接丢包
+   */
+  remoteMyPeerId?: number;
   /** 从 Noise Msg2 拿到的 `root_key_32` */
   rootKey: Buffer;
   /** Msg2 的 `server_encryption_algorithm`，实测是 `aes-gcm` */
@@ -107,6 +116,48 @@ export class SecureChannel {
    * `PeerManagerHeader` 的 `ENCRYPTED` 标志置位——否则对端会拿它当明文解，
    * 直接认证失败。
    */
+  /**
+   * 发送一个 RPC 包。
+   *
+   * **包头里的 to_peer_id 必须等于对端的 my_peer_id**，而不是对端的
+   * "连接级 peer_id"。这两个值是不同的：
+   *
+   * - `my_peer_id`：节点在虚拟网络里的身份（每个节点自己生成）
+   * - 连接级 peer_id：握手协商出来的、用于这条连接上标识对端
+   *
+   * 对端在解密前会先检查 `hdr.to_peer_id != my_peer_id` 就**直接放行不解密**
+   * （`peer_conn.rs:214`），于是我们的加密包被当成明文包丢掉——
+   * 表现为"响应已发出但对端仍超时"，且日志里没有任何错误。
+   *
+   * 这个值由调用方通过 `remoteMyPeerId` 传入（从对端 RPC 的 to_peer 读，
+   * 或从它广播的路由信息里读）。
+   */
+  /**
+   * 发送一个 RPC 包，显式指定包头里的 `to_peer_id`。
+   *
+   * 必须用对端请求里的 `from_peer_id`，原因见 `handleOspfRequest` 里的说明。
+   */
+  sendRpcTo(packet: RpcPacket, toPeerId: number): void {
+    const plaintext = encodeRpcPacket(packet);
+    const ciphertext = encryptPayload({
+      key: this.sendKey(),
+      payload: plaintext,
+      epoch: this.options.epoch ?? 0,
+      seq: this.sendSeq,
+      algorithm: this.options.algorithm,
+    });
+    this.sendSeq += 1n;
+
+    this.socket.write(
+      framePacket(ciphertext, {
+        fromPeerId: this.options.myPeerId,
+        toPeerId,
+        packetType: packet.isRequest ? PacketType.RpcReq : PacketType.RpcResp,
+        flags: PeerManagerHeaderFlags.ENCRYPTED,
+      }),
+    );
+  }
+
   sendRpc(packet: RpcPacket): void {
     const plaintext = encodeRpcPacket(packet);
     const ciphertext = encryptPayload({
@@ -121,7 +172,8 @@ export class SecureChannel {
     this.socket.write(
       framePacket(ciphertext, {
         fromPeerId: this.options.myPeerId,
-        toPeerId: this.options.remotePeerId,
+        // 用对端的 my_peer_id，不是连接级 peer_id（见上面那段说明）
+        toPeerId: this.options.remoteMyPeerId ?? this.options.remotePeerId,
         packetType: packet.isRequest ? PacketType.RpcReq : PacketType.RpcResp,
         flags: PeerManagerHeaderFlags.ENCRYPTED,
       }),
@@ -167,6 +219,7 @@ export class SecureChannel {
 
     const request = decodeSyncRouteInfoRequest(rpc.body);
 
+
     // 回显 is_initiator 与 session_id 即可完成这次同步。
     // 不填 missing_peer_ids 表示"我没有缺失的拓扑数据"。
     const responseBody = encodeSyncRouteInfoResponse({
@@ -177,7 +230,14 @@ export class SecureChannel {
       missingConnPeerIds: [],
     });
 
-    this.sendRpc(buildingRpcResponse(rpc, responseBody));
+    // 响应的包头 from/to **直接由请求的 to/from 反转得到**，
+    // 这样无论对端用哪个 id（连接级还是 my_peer_id），回程都能对上——
+    // 因为对端自己发的请求里 from 就是"它希望被回复的地址"。
+    //
+    // 踩过的坑：我先用了连接级 peer_id 当 to，对端在解密前检查
+    // `hdr.to_peer_id == 自己的 my_peer_id` 不通过就**直接放行不解密**，
+    // 于是加密包被当明文丢掉，表现为"响应已发但对端仍超时"且无任何错误日志。
+    this.sendRpcTo(buildingRpcResponse(rpc, responseBody), rpc.fromPeer);
     return true;
   }
 }
