@@ -415,7 +415,7 @@
       "initiator": true,
       "responder": true
     },
-    "msg1_prefix": "5507d4d5104e98b9",
+    "msg1_prefix": "42a589fb07419ba0",
     "msg_lengths": {
       "msg1": 32,
       "msg2": 96,
@@ -604,6 +604,74 @@
       "missing_conn_peer_ids": 5,
       "missing_peer_ids": 4,
       "session_id": 2
+    }
+  },
+  "rpc_response": {
+    "error_fields": {
+      "execute_error": 6,
+      "invalid_method_index": 2,
+      "invalid_service": 3,
+      "malformat_rpc_packet": 7,
+      "other_error": 1,
+      "prost_decode_error": 4,
+      "prost_encode_error": 5,
+      "timeout": 8
+    },
+    "error_kinds": {
+      "execute_error": {
+        "error_message": 1
+      },
+      "invalid_method_index": {
+        "method_index": 2,
+        "service_name": 1
+      },
+      "invalid_service": {
+        "service_name": 1
+      },
+      "malformat_rpc_packet": {
+        "error_message": 1
+      },
+      "other_error": {
+        "error_message": 1
+      },
+      "prost_decode_error": {},
+      "prost_encode_error": {},
+      "timeout": {
+        "error_message": 1
+      }
+    },
+    "nesting": {
+      "inner_response_hex": "0a0a726f7574652d72657370",
+      "note": "RpcPacket.body 里装的是 RpcResponse 的字节，不是业务消息本身",
+      "packet_with_response_body_hex": "086410c8011889062a0c0a0a726f7574652d72657370"
+    },
+    "rpc_response_fields": {
+      "error": 2,
+      "response": 1,
+      "runtime_us": 3
+    },
+    "samples": {
+      "empty": {
+        "note": "全默认时编码为空字节，是合法响应",
+        "protobuf_hex": ""
+      },
+      "error_other": {
+        "message": "boom",
+        "protobuf_hex": "0a060a04626f6f6d"
+      },
+      "error_timeout": {
+        "message": "deadline",
+        "protobuf_hex": "420a0a08646561646c696e65"
+      },
+      "ok": {
+        "protobuf_hex": "0a10627573696e6573732d7061796c6f6164",
+        "response": "business-payload"
+      },
+      "ok_with_timing": {
+        "protobuf_hex": "0a077061796c6f616418d209",
+        "response": "payload",
+        "runtime_us": 1234
+      }
     }
   },
   "topology": {

@@ -118,6 +118,7 @@ fn main() {
     let peer_conn_info = peer_conn_info_vectors();
     let feature_flag = feature_flag_vectors();
     let handshake_edge = handshake_edge_vectors();
+    let rpc_response = rpc_response_vectors();
 
     let output = json!({
         "_comment": "由 native/protocol-oracle 从官方 easytier-core 生成，供 TS 协议实现对照",
@@ -149,6 +150,7 @@ fn main() {
         "peer_conn_info": peer_conn_info,
         "feature_flag": feature_flag,
         "handshake_edge": handshake_edge,
+        "rpc_response": rpc_response,
         "packet_types": packet_types,
         "flags": flags,
     });
@@ -1078,6 +1080,129 @@ fn handshake_edge_vectors() -> serde_json::Value {
                 "version": 1, "a_network_name": 2, "a_session_generation": 3,
                 "a_conn_id": 4, "client_encryption_algorithm": 5, "features": 6,
             },
+        },
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════
+// RPC 响应包装层（RpcResponse + error.Error）
+// ══════════════════════════════════════════════════════════════════
+
+/// 导出 `RpcResponse` 与 `error.Error` 的编码。
+///
+/// ## 这一层容易被忽略
+///
+/// `RpcPacket.body` 里装的**不是**业务消息本身，而是 `RpcResponse`
+/// （响应方向）或 `RpcRequest`（请求方向）的序列化字节。
+/// 也就是说业务消息外面还套了一层：
+///
+/// ```
+/// RpcPacket.body
+///   └─ RpcResponse
+///        ├─ response = <业务消息的字节，如 SyncRouteInfoResponse>
+///        ├─ error    = <error.Error，成功时不填>
+///        └─ runtime_us
+/// ```
+///
+/// 如果直接把业务消息塞进 `body`，对端会尝试按 `RpcResponse` 解析，
+/// 得到一个"字段号对不上"的错误——但因为 protobuf 的宽容性，
+/// **不一定报错**，可能只是解出空的 response，表现为"对端收到了但当作空响应"。
+///
+/// `error.Error` 是 oneof，只会有其中一个分支被设置。
+fn rpc_response_vectors() -> serde_json::Value {
+    use easytier_proto::common::{RpcPacket, RpcResponse};
+    use easytier_proto::error::{Error as ErrMsg, OtherError, Timeout as TimeoutErr};
+    use prost::Message;
+
+    // 成功响应：只有 response 字节
+    let ok = RpcResponse {
+        response: b"business-payload".to_vec(),
+        error: None,
+        runtime_us: 0,
+    };
+    let ok_hex: String = ok.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 成功但带耗时
+    let ok_with_timing = RpcResponse {
+        response: b"payload".to_vec(),
+        error: None,
+        runtime_us: 1234,
+    };
+    let ok_timing_hex: String =
+        ok_with_timing.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 错误响应：other_error 分支（字段 1）
+    let other = ErrMsg {
+        error_kind: Some(easytier_proto::error::error::ErrorKind::OtherError(OtherError {
+            error_message: "boom".to_string(),
+        })),
+    };
+    let other_hex: String = other.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 错误响应：timeout 分支（字段 8）
+    let timeout = ErrMsg {
+        error_kind: Some(easytier_proto::error::error::ErrorKind::Timeout(TimeoutErr {
+            error_message: "deadline".to_string(),
+        })),
+    };
+    let timeout_hex: String = timeout.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 空响应（合法：所有字段都是默认值）
+    let empty = RpcResponse::default();
+    let empty_hex: String = empty.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 完整 RpcPacket（body 里装 RpcResponse），验证两层嵌套
+    let inner_body = RpcResponse {
+        response: b"route-resp".to_vec(),
+        error: None,
+        runtime_us: 0,
+    }
+    .encode_to_vec();
+    let packet = RpcPacket {
+        from_peer: 100,
+        to_peer: 200,
+        transaction_id: 777,
+        descriptor: None,
+        body: inner_body,
+        is_request: false,
+        total_pieces: 0,
+        piece_idx: 0,
+        trace_id: 0,
+        compression_info: None,
+    };
+    let packet_hex: String = packet.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    json!({
+        "rpc_response_fields": { "response": 1, "error": 2, "runtime_us": 3 },
+        "error_fields": {
+            "other_error": 1, "invalid_method_index": 2, "invalid_service": 3,
+            "prost_decode_error": 4, "prost_encode_error": 5, "execute_error": 6,
+            "malformat_rpc_packet": 7, "timeout": 8,
+        },
+        "error_kinds": {
+            "other_error": { "error_message": 1 },
+            "invalid_method_index": { "service_name": 1, "method_index": 2 },
+            "invalid_service": { "service_name": 1 },
+            "prost_decode_error": {},
+            "prost_encode_error": {},
+            "execute_error": { "error_message": 1 },
+            "malformat_rpc_packet": { "error_message": 1 },
+            "timeout": { "error_message": 1 },
+        },
+        "samples": {
+            "ok": { "response": "business-payload", "protobuf_hex": ok_hex },
+            "ok_with_timing": { "response": "payload", "runtime_us": 1234, "protobuf_hex": ok_timing_hex },
+            "empty": { "protobuf_hex": empty_hex, "note": "全默认时编码为空字节，是合法响应" },
+            "error_other": { "message": "boom", "protobuf_hex": other_hex },
+            "error_timeout": { "message": "deadline", "protobuf_hex": timeout_hex },
+        },
+        "nesting": {
+            "note": "RpcPacket.body 里装的是 RpcResponse 的字节，不是业务消息本身",
+            "packet_with_response_body_hex": packet_hex,
+            "inner_response_hex": hex::encode(
+                RpcResponse { response: b"route-resp".to_vec(), error: None, runtime_us: 0 }
+                    .encode_to_vec()
+            ),
         },
     })
 }

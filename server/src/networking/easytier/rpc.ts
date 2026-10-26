@@ -371,3 +371,199 @@ export function buildingRpcResponse(request: RpcPacket, body: Buffer): RpcPacket
     compressionInfo: { algo: CompressionAlgo.None, acceptedAlgo: CompressionAlgo.None },
   };
 }
+
+// ══════════════════════════════════════════════════════════════════
+// RPC 响应包装层（RpcResponse + error.Error）
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * `RpcResponse` 字段号（`common.proto:129`）。
+ *
+ * ## 这一层极易被忽略
+ *
+ * `RpcPacket.body` 里装的**不是**业务消息本身，而是 `RpcResponse`
+ * （响应方向）或 `RpcRequest`（请求方向）的序列化字节：
+ *
+ * ```
+ * RpcPacket.body
+ *   └─ RpcResponse
+ *        ├─ response = <业务消息字节，如 SyncRouteInfoResponse>
+ *        ├─ error    = <error.Error，成功时不填>
+ *        └─ runtime_us
+ * ```
+ *
+ * **直接把业务消息塞进 `body` 是一个隐蔽的错误**：对端会按 `RpcResponse`
+ * 解析，而 protobuf 的宽容性让它不报错——只是解出空的 `response`，
+ * 表现为"对端收到了但当作空响应"。这正是我此前 OSPF 应答"发出了没反应"
+ * 的可能原因之一。
+ */
+export const RpcResponseField = { response: 1, error: 2, runtimeUs: 3 } as const;
+
+/** `error.Error` 的 oneof 分支字段号（`error.proto:23`）。 */
+export const RpcErrorField = {
+  otherError: 1,
+  invalidMethodIndex: 2,
+  invalidService: 3,
+  prostDecodeError: 4,
+  prostEncodeError: 5,
+  executeError: 6,
+  malformatRpcPacket: 7,
+  timeout: 8,
+} as const;
+
+/** `error.Error` 的具体分支（oneof，只会命中一个）。 */
+export type RpcError =
+  | { kind: 'otherError'; message: string }
+  | { kind: 'invalidMethodIndex'; serviceName: string; methodIndex: number }
+  | { kind: 'invalidService'; serviceName: string }
+  | { kind: 'prostDecodeError' }
+  | { kind: 'prostEncodeError' }
+  | { kind: 'executeError'; message: string }
+  | { kind: 'malformatRpcPacket'; message: string }
+  | { kind: 'timeout'; message: string }
+  | null;
+
+/** 各分支里 `error_message` 的字段号统一是 1。 */
+const SIMPLE_ERROR_FIELD = 1;
+
+/** 编码 `error.Error`。`null` 表示成功（不写这个字段）。 */
+export function encodeRpcError(error: RpcError): Buffer {
+  if (error === null) return Buffer.alloc(0);
+
+  switch (error.kind) {
+    case 'otherError':
+      return encodeBytesField(
+        RpcErrorField.otherError,
+        encodeStringField(SIMPLE_ERROR_FIELD, error.message),
+      );
+    case 'invalidMethodIndex': {
+      const inner: Buffer[] = [];
+      if (error.serviceName !== '') {
+        inner.push(encodeStringField(1, error.serviceName));
+      }
+      if (error.methodIndex !== 0) inner.push(encodeVarintField(2, error.methodIndex));
+      return encodeBytesField(RpcErrorField.invalidMethodIndex, Buffer.concat(inner));
+    }
+    case 'invalidService':
+      return encodeBytesField(
+        RpcErrorField.invalidService,
+        encodeStringField(1, error.serviceName),
+      );
+    case 'prostDecodeError':
+      // 空 message：字段存在但内容为空
+      return encodeBytesField(RpcErrorField.prostDecodeError, Buffer.alloc(0));
+    case 'prostEncodeError':
+      return encodeBytesField(RpcErrorField.prostEncodeError, Buffer.alloc(0));
+    case 'executeError':
+      return encodeBytesField(
+        RpcErrorField.executeError,
+        encodeStringField(SIMPLE_ERROR_FIELD, error.message),
+      );
+    case 'malformatRpcPacket':
+      return encodeBytesField(
+        RpcErrorField.malformatRpcPacket,
+        encodeStringField(SIMPLE_ERROR_FIELD, error.message),
+      );
+    case 'timeout':
+      return encodeBytesField(
+        RpcErrorField.timeout,
+        encodeStringField(SIMPLE_ERROR_FIELD, error.message),
+      );
+  }
+}
+
+/** 解码 `error.Error`。 */
+export function decodeRpcError(buffer: Buffer): RpcError {
+  const fields = decodeFields(buffer);
+  const message = (bytes: Buffer | null): string =>
+    bytes === null ? '' : (getBytes(decodeFields(bytes), SIMPLE_ERROR_FIELD)?.toString('utf8') ?? '');
+
+  const other = getBytes(fields, RpcErrorField.otherError);
+  if (other !== null) return { kind: 'otherError', message: message(other) };
+
+  const badMethod = getBytes(fields, RpcErrorField.invalidMethodIndex);
+  if (badMethod !== null) {
+    const f = decodeFields(badMethod);
+    return {
+      kind: 'invalidMethodIndex',
+      serviceName: getBytes(f, 1)?.toString('utf8') ?? '',
+      methodIndex: getVarint(f, 2) ?? 0,
+    };
+  }
+
+  const badService = getBytes(fields, RpcErrorField.invalidService);
+  if (badService !== null) {
+    return { kind: 'invalidService', serviceName: getBytes(decodeFields(badService), 1)?.toString('utf8') ?? '' };
+  }
+
+  if (getBytes(fields, RpcErrorField.prostDecodeError) !== null) return { kind: 'prostDecodeError' };
+  if (getBytes(fields, RpcErrorField.prostEncodeError) !== null) return { kind: 'prostEncodeError' };
+
+  const exec = getBytes(fields, RpcErrorField.executeError);
+  if (exec !== null) return { kind: 'executeError', message: message(exec) };
+
+  const malformat = getBytes(fields, RpcErrorField.malformatRpcPacket);
+  if (malformat !== null) return { kind: 'malformatRpcPacket', message: message(malformat) };
+
+  const timeout = getBytes(fields, RpcErrorField.timeout);
+  if (timeout !== null) return { kind: 'timeout', message: message(timeout) };
+
+  return null;
+}
+
+export interface RpcResponseMessage {
+  /** 业务消息的序列化字节 */
+  response: Buffer;
+  /** 错误；成功时为 null */
+  error: RpcError;
+  /** 服务端处理耗时（微秒）；0 表示不填 */
+  runtimeUs: number;
+}
+
+/** 编码 `RpcResponse`。 */
+export function encodeRpcResponse(response: RpcResponseMessage): Buffer {
+  const parts: Buffer[] = [];
+  if (response.response.length > 0) {
+    parts.push(encodeBytesField(RpcResponseField.response, response.response));
+  }
+  const errorBytes = encodeRpcError(response.error);
+  if (errorBytes.length > 0) {
+    parts.push(encodeBytesField(RpcResponseField.error, errorBytes));
+  }
+  if (response.runtimeUs !== 0) {
+    parts.push(encodeVarintField(RpcResponseField.runtimeUs, response.runtimeUs));
+  }
+  return Buffer.concat(parts);
+}
+
+/** 解码 `RpcResponse`。 */
+export function decodeRpcResponse(buffer: Buffer): RpcResponseMessage {
+  const fields = decodeFields(buffer);
+  const errorBytes = getBytes(fields, RpcResponseField.error);
+  return {
+    response: getBytes(fields, RpcResponseField.response) ?? Buffer.alloc(0),
+    error: errorBytes === null ? null : decodeRpcError(errorBytes),
+    runtimeUs: getVarint(fields, RpcResponseField.runtimeUs) ?? 0,
+  };
+}
+
+/**
+ * 构造一个完整的 RPC 响应包（`RpcPacket` + 内层 `RpcResponse`）。
+ *
+ * 这是 `buildingRpcResponse` 的**正确版本**：业务消息要先包进 `RpcResponse`，
+ * 再放进 `RpcPacket.body`。早先直接把业务消息放进 body 是错的。
+ */
+export function buildWrappedRpcResponse(
+  request: RpcPacket,
+  businessPayload: Buffer,
+  options?: { error?: RpcError; runtimeUs?: number },
+): RpcPacket {
+  const innerBytes = encodeRpcResponse({
+    response: businessPayload,
+    error: options?.error ?? null,
+    runtimeUs: options?.runtimeUs ?? 0,
+  });
+  return {
+    ...buildingRpcResponse(request, innerBytes),
+  };
+}

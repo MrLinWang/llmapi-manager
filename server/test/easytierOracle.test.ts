@@ -34,7 +34,16 @@ import {
   pickBestRoute,
   type RoutePeerInfo,
 } from '../src/networking/easytier/route';
-import { CompressionAlgo } from '../src/networking/easytier/rpc';
+import {
+  CompressionAlgo,
+  RpcErrorField,
+  RpcResponseField,
+  decodeRpcError,
+  decodeRpcPacket,
+  decodeRpcResponse,
+  encodeRpcError,
+  encodeRpcResponse,
+} from '../src/networking/easytier/rpc';
 import {
   HANDSHAKE_MAGIC,
   HandshakeRequestField,
@@ -1207,5 +1216,138 @@ describe('握手消息边界', () => {
     // 官方 peer_conn_liveness.rs:10 是 "liveness-echo-v1"
     expect(LIVENESS_ECHO_FEATURE).toBe('liveness-echo-v1');
     expect(hs.full.input.features).toContain('liveness-echo-v1');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// RPC 响应包装层（RpcResponse + error.Error）
+// ══════════════════════════════════════════════════════════════════
+
+interface OracleRpcResponse {
+  rpc_response_fields: Record<string, number>;
+  error_fields: Record<string, number>;
+  error_kinds: Record<string, Record<string, number>>;
+  samples: {
+    ok: { response: string; protobuf_hex: string };
+    ok_with_timing: { response: string; runtime_us: number; protobuf_hex: string };
+    empty: { protobuf_hex: string };
+    error_other: { message: string; protobuf_hex: string };
+    error_timeout: { message: string; protobuf_hex: string };
+  };
+  nesting: { packet_with_response_body_hex: string; inner_response_hex: string };
+}
+
+describe('RpcResponse 包装层', () => {
+  const rr = (oracle as unknown as { rpc_response: OracleRpcResponse }).rpc_response;
+  const s = rr.samples;
+
+  it('成功响应编码与官方一致', () => {
+    const encoded = encodeRpcResponse({
+      response: Buffer.from(s.ok.response),
+      error: null,
+      runtimeUs: 0,
+    });
+    expect(encoded.toString('hex')).toBe(s.ok.protobuf_hex);
+  });
+
+  it('带 runtime_us 的响应编码与官方一致', () => {
+    const encoded = encodeRpcResponse({
+      response: Buffer.from(s.ok_with_timing.response),
+      error: null,
+      runtimeUs: s.ok_with_timing.runtime_us,
+    });
+    expect(encoded.toString('hex')).toBe(s.ok_with_timing.protobuf_hex);
+  });
+
+  it('全默认时编码为空字节（是合法响应）', () => {
+    // 与"没有响应"不同：空 RpcResponse 表示"成功但业务消息为空"
+    const encoded = encodeRpcResponse({
+      response: Buffer.alloc(0),
+      error: null,
+      runtimeUs: 0,
+    });
+    expect(encoded.toString('hex')).toBe(s.empty.protobuf_hex);
+    expect(encoded).toHaveLength(0);
+  });
+
+  it('error.Error 的各分支编码与官方一致', () => {
+    // 注意：这两个样本是 error.Error **本身**的编码，不是 RpcResponse。
+    // error_other 外层是字段 1（other_error），error_timeout 外层是字段 8（timeout）。
+    expect(
+      encodeRpcError({ kind: 'otherError', message: s.error_other.message }).toString('hex'),
+    ).toBe(s.error_other.protobuf_hex);
+
+    expect(
+      encodeRpcError({ kind: 'timeout', message: s.error_timeout.message }).toString('hex'),
+    ).toBe(s.error_timeout.protobuf_hex);
+  });
+
+  it('error.Error 解码能还原分支与消息', () => {
+    expect(decodeRpcError(Buffer.from(s.error_other.protobuf_hex, 'hex'))).toEqual({
+      kind: 'otherError',
+      message: s.error_other.message,
+    });
+    expect(decodeRpcError(Buffer.from(s.error_timeout.protobuf_hex, 'hex'))).toEqual({
+      kind: 'timeout',
+      message: s.error_timeout.message,
+    });
+  });
+
+  it('空字节解码为"无错误"', () => {
+    expect(decodeRpcError(Buffer.alloc(0))).toBeNull();
+  });
+
+  it('RpcResponse 往返：response 与 runtime_us 保持', () => {
+    const original = {
+      response: Buffer.from('payload-bytes'),
+      error: null as null,
+      runtimeUs: 999,
+    };
+    const roundTrip = decodeRpcResponse(encodeRpcResponse(original));
+    expect(roundTrip.response.toString()).toBe('payload-bytes');
+    expect(roundTrip.runtimeUs).toBe(999);
+    expect(roundTrip.error).toBeNull();
+  });
+
+  it('RpcResponse 往返：错误响应保持', () => {
+    const roundTrip = decodeRpcResponse(
+      encodeRpcResponse({
+        response: Buffer.alloc(0),
+        error: { kind: 'executeError', message: 'failed' },
+        runtimeUs: 0,
+      }),
+    );
+    expect(roundTrip.error).toEqual({ kind: 'executeError', message: 'failed' });
+  });
+
+  it('嵌套关系：RpcPacket.body 里装的是 RpcResponse 而非业务消息', () => {
+    // 这是最容易搞错的一层。内层 RpcResponse 的编码是 0a0a726f7574652d72657370，
+    // 而 RpcPacket.body（字段 5）里装的就是这串字节。
+    const inner = encodeRpcResponse({
+      response: Buffer.from('route-resp'),
+      error: null,
+      runtimeUs: 0,
+    });
+    expect(inner.toString('hex')).toBe(rr.nesting.inner_response_hex);
+
+    // 从官方完整包里解出 body，应当等于内层 RpcResponse 的编码
+    const packet = decodeRpcPacket(Buffer.from(rr.nesting.packet_with_response_body_hex, 'hex'));
+    expect(packet.body.toString('hex')).toBe(inner.toString('hex'));
+
+    // 再把 body 当作 RpcResponse 解，得到业务消息
+    const unwrapped = decodeRpcResponse(packet.body);
+    expect(unwrapped.response.toString()).toBe('route-resp');
+  });
+
+  it('字段号与 proto 定义一致', () => {
+    expect(rr.rpc_response_fields.response).toBe(RpcResponseField.response);
+    expect(rr.rpc_response_fields.error).toBe(RpcResponseField.error);
+    expect(rr.rpc_response_fields.runtime_us).toBe(RpcResponseField.runtimeUs);
+
+    // error.Error 的 8 个 oneof 分支
+    expect(rr.error_fields.other_error).toBe(RpcErrorField.otherError);
+    expect(rr.error_fields.invalid_method_index).toBe(RpcErrorField.invalidMethodIndex);
+    expect(rr.error_fields.timeout).toBe(RpcErrorField.timeout);
+    expect(Object.keys(rr.error_fields)).toHaveLength(8);
   });
 });

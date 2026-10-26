@@ -46,6 +46,8 @@
 14. **能力标志**：`PeerFeatureFlag` 的 11 个位与"全默认编码为空"的行为
 15. **握手边界**：`HandshakeRequest`（含 digest 为空的情形）、`magic` 常量、
     `NoiseMsg1` 的 `UUID`（4 个 uint32）
+16. **RPC 响应包装层**：`RpcResponse` 与 `error.Error` 的全部 8 个 oneof 分支，
+    以及"`RpcPacket.body` 里装的是 `RpcResponse` 而非业务消息"这个嵌套关系
 
 ## 用法
 
