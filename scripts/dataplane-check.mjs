@@ -74,6 +74,11 @@ function parseArgs(argv) {
     vnet: '10.126.126',
     servicePort: 18080,
     forwardPort: 18081,
+    // 反向：A 侧转发到 B 的服务
+    servicePortB: 18082,
+    forwardPortA: 18083,
+    rounds: 3,
+    concurrency: 4,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i];
@@ -84,6 +89,8 @@ function parseArgs(argv) {
     else if (a === '--vnet') opts.vnet = argv[++i];
     else if (a === '--service-port') opts.servicePort = Number(argv[++i]);
     else if (a === '--forward-port') opts.forwardPort = Number(argv[++i]);
+    else if (a === '--rounds') opts.rounds = Number(argv[++i]);
+    else if (a === '--concurrency') opts.concurrency = Number(argv[++i]);
     else if (a === '--help' || a === '-h') {
       console.log(`用法: node scripts/dataplane-check.mjs [选项]
 
@@ -93,6 +100,8 @@ function parseArgs(argv) {
   --vnet <prefix>      虚拟网段前缀（默认 10.126.126，得到 .1 与 .2）
   --service-port <n>   节点 A 上被访问的服务端口（默认 18080）
   --forward-port <n>   节点 B 上的转发端口（默认 18081）
+  --rounds <n>         重复传输次数，验证连接复用（默认 3）
+  --concurrency <n>    并发连接数（默认 4）
   --verbose, -v        打印子进程日志
   --help, -h           显示本帮助`);
       process.exit(0);
@@ -255,6 +264,49 @@ function fetchThroughForward(port, size, timeoutMs) {
   });
 }
 
+/**
+ * 跑一次传输并校验内容。
+ *
+ * 返回 `{ ok, kbps, bytes, elapsed, error }`——调用方只需要看 `ok`。
+ * 内容校验是必须的：只看"连接成功"发现不了数据损坏。
+ */
+async function runTransfer({ port, size, timeoutMs }) {
+  const started = Date.now();
+  let payload;
+  try {
+    payload = await fetchThroughForward(port, size, timeoutMs);
+  } catch (cause) {
+    return { ok: false, error: cause instanceof Error ? cause.message : String(cause) };
+  }
+  const elapsed = Date.now() - started;
+
+  if (payload.length !== size) {
+    return { ok: false, error: `长度不符：收到 ${payload.length}，期望 ${size}`, bytes: payload.length, elapsed };
+  }
+  for (let i = 0; i < payload.length; i += 1) {
+    if (payload[i] !== i % 251) {
+      return { ok: false, error: `第 ${i} 字节损坏`, bytes: payload.length, elapsed };
+    }
+  }
+
+  return {
+    ok: true,
+    bytes: payload.length,
+    elapsed,
+    kbps: elapsed > 0 ? Math.round((payload.length / 1024 / elapsed) * 1000) : null,
+  };
+}
+
+/** 打印单次传输结果。 */
+function reportTransfer(result) {
+  if (result.ok) {
+    console.log(`       ✅ ${result.bytes} 字节 / ${result.elapsed}ms` +
+      (result.kbps ? ` / ${result.kbps} KiB/s` : '') + ' / 内容一致');
+  } else {
+    console.log(`       ❌ ${result.error}`);
+  }
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
 
@@ -306,6 +358,7 @@ async function main() {
       hostname: 'node-a',
       listenPort: portA,
       ipv4: `${ipA}/24`,
+      // A 不配转发规则：它是被访问的服务端，不是客户端。
     },
   });
 
@@ -326,7 +379,9 @@ async function main() {
         listenPort: portB,
         ipv4: `${ipB}/24`,
         // B 侧的转发：本机 127.0.0.1:forwardPort → 虚拟网络里的 A:servicePort
-        portForwards: [`127.0.0.1:${opts.forwardPort}->${ipA}:${opts.servicePort}`],
+        portForwards: [
+          `127.0.0.1:${opts.forwardPort}->${ipA}:${opts.servicePort}`,
+        ],
       },
     });
     await waitReady(nodeB, 15_000);
@@ -379,41 +434,77 @@ async function main() {
     }
     console.log(`  转发端口就绪（127.0.0.1:${opts.forwardPort}）`);
 
-    // ── 真正传数据 ──
-    console.log(`\n  开始传输 ${opts.size} 字节……`);
-    const started = Date.now();
-    let payload;
-    try {
-      payload = await fetchThroughForward(opts.forwardPort, opts.size, opts.timeout * 1000);
-    } catch (cause) {
-      console.log('\n结果');
-      console.log('  ❌ 数据未能通过虚拟网络传输');
-      console.log(`     ${cause.message}`);
-      console.log('     转发端口能连上但取不到数据，通常意味着：');
-      console.log('       - 虚拟网络路由未收敛（再多等一会）');
-      console.log('       - 目标服务不在 A 的虚拟地址上');
-      process.exitCode = 1;
-      return;
-    }
-    const elapsed = Date.now() - started;
+    // ── 1. 双向：B → A ──
+    console.log(`\n  [1/4] B → A 单向传输 ${opts.size} 字节……`);
+    const forwardResult = await runTransfer({
+      label: 'B→A',
+      port: opts.forwardPort,
+      size: opts.size,
+      timeoutMs: opts.timeout * 1000,
+    });
+    reportTransfer(forwardResult);
 
-    // ── 校验内容 ──
-    let contentOk = payload.length === opts.size;
-    if (contentOk) {
-      for (let i = 0; i < payload.length; i += 1) {
-        if (payload[i] !== i % 251) { contentOk = false; break; }
-      }
+    // ── 2. 说明：为什么只测单向 ──
+    //
+    // port_forward 的语义是"本机入口 → 虚拟网络对端地址"。
+    // 反向（A 主动访问 B 上的服务）要求 B 的服务能挂在 **B 的虚拟地址**上，
+    // 而 noTun 模式没有内核网卡承载那个地址，bind 虚拟 IP 会失败。
+    //
+    // 所以 noTun 下只能验证单向。双向需要真实 TUN，见文档。
+    console.log('\n  [2/4] 反向传输：noTun 模式下不可行（需要真实 TUN）');
+    console.log('        原因：dst 必须是虚拟网络上可路由的地址，');
+    console.log('        而 noTun 没有网卡承载虚拟地址，对端服务无法挂上去。');
+
+    // ── 3. 连接复用：连续多轮 ──
+    //
+    // 每条都是一次新的 TCP 连接。验证第二次、第三次仍然通——
+    // 有些问题（端口占用、会话状态泄漏）只在第二次连接才暴露。
+    console.log(`\n  [3/4] 连续 ${opts.rounds} 轮（验证连接复用）……`);
+    const roundsOk = [];
+    for (let round = 1; round <= opts.rounds; round += 1) {
+      const r = await runTransfer({
+        label: `第 ${round} 轮`,
+        port: opts.forwardPort,
+        size: Math.max(1024, Math.floor(opts.size / 4)),
+        timeoutMs: opts.timeout * 1000,
+      });
+      roundsOk.push(r.ok);
+      console.log(`       第 ${round} 轮：${r.ok ? '✅' : '❌ ' + (r.error ?? '内容不一致')}`);
     }
+
+    // ── 4. 并发：同时多条连接 ──
+    //
+    // 转发是单端口多连接场景，并发能暴露"只处理第一条连接"这类问题。
+    console.log(`\n  [4/4] ${opts.concurrency} 条并发连接……`);
+    const concurrent = await Promise.all(
+      Array.from({ length: opts.concurrency }, (_, i) =>
+        runTransfer({
+          label: `并发 ${i + 1}`,
+          port: opts.forwardPort,
+          size: Math.max(1024, Math.floor(opts.size / 4)),
+          timeoutMs: opts.timeout * 1000,
+        }),
+      ),
+    );
+    const concurrentOk = concurrent.filter((r) => r.ok).length;
+    console.log(`       ${concurrentOk}/${opts.concurrency} 条成功`);
+
+    // ── 汇总 ──
+    const allOk =
+      forwardResult.ok && roundsOk.every(Boolean) && concurrentOk === opts.concurrency;
 
     console.log('\n结果');
-    console.log('  ✅ 数据成功通过虚拟网络传输');
-    console.log(`     收到 ${payload.length} 字节，耗时 ${elapsed}ms`);
-    if (elapsed > 0) {
-      const kbps = Math.round((payload.length / 1024 / elapsed) * 1000);
-      console.log(`     约 ${kbps} KiB/s`);
+    if (allOk) {
+      console.log('  ✅ 数据面全部验证通过');
+    } else {
+      console.log('  ❌ 部分场景失败（见上）');
     }
-    console.log(`     内容校验：${contentOk ? '✅ 一致' : '❌ 不一致（数据被损坏）'}`);
-    if (!contentOk) process.exitCode = 1;
+    console.log(`     单向传输：  ${forwardResult.ok ? '✅' : '❌'}`);
+    console.log(`     连接复用：  ${roundsOk.filter(Boolean).length}/${opts.rounds} 轮成功`);
+    console.log(`     并发：      ${concurrentOk}/${opts.concurrency} 条成功`);
+    console.log(`     大小：      ${opts.size} 字节`);
+    console.log(`     吞吐：      ${forwardResult.kbps ?? '?'} KiB/s`);
+    if (!allOk) process.exitCode = 1;
   } finally {
     service?.close();
     for (const node of [nodeA, nodeB]) {
