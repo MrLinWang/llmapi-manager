@@ -161,6 +161,26 @@ pub struct NodeOptions {
     /// 这是本节点在网络里的**长期身份**：对端可以用它的公钥做钉扎校验。
     /// 每次启动换一个会让钉扎失效，所以要持久化。
     pub secure_mode_private_key: Option<String>,
+    /// 端口转发规则：把本机的某个 TCP 端口映射到虚拟网络里某个地址的端口。
+    ///
+    /// ## 这是**无需 TUN 即可验证数据面**的唯一通道
+    ///
+    /// `no_tun = true` 时不建内核网卡，因此没法 `ping` 虚拟 IP、也没法
+    /// 用普通 `net.connect` 打虚拟地址。但端口转发走的是 EasyTier 自己的
+    /// gateway，在用户态完成"虚拟网络 → 本机端口"的桥接：
+    ///
+    /// ```
+    /// 节点 B 上监听 127.0.0.1:18080
+    ///   配一条转发：bind 127.0.0.1:18081  →  dst 10.126.126.1:18080
+    /// 于是在节点 A 上访问 127.0.0.1:18081，流量会经虚拟网络送到 A:18080
+    /// ```
+    ///
+    /// 这样"数据能否通过虚拟网络传输"就变成一个可自动化的断言：
+    /// 在 A 上起个 HTTP 服务，在 B 上通过转发端口去取，取到就算通。
+    ///
+    /// 格式：`"<bind_ip>:<bind_port>-><dst_virtual_ip>:<dst_port>"`，
+    /// 例如 `"127.0.0.1:18081->10.126.126.1:18080"`。
+    pub port_forwards: Option<Vec<String>>,
 }
 
 #[napi(object)]
@@ -355,7 +375,49 @@ fn build_config(options: &NodeOptions) -> anyhow::Result<TomlConfig> {
         _ => config.set_listeners(Vec::new()),
     }
 
+    // 端口转发。见 `NodeOptions.port_forwards` 的说明——
+    // 这是 no_tun 模式下唯一能验证"数据真的流过了虚拟网络"的手段。
+    //
+    // `set_port_forwards(&self, forwards: Vec<PortForwardConfig>)`
+    // （`toml.rs:961`）。`PortForwardConfig` 定义在
+    // `easytier-core/src/config/gateway.rs:16`，字段是
+    // `bind_addr` / `dst_addr` / `proto`（都是 std 的 SocketAddr 与 &str）。
+    if let Some(rules) = options.port_forwards.as_ref() {
+        let mut forwards = Vec::with_capacity(rules.len());
+        for rule in rules {
+            forwards.push(parse_port_forward(rule)?);
+        }
+        config.set_port_forwards(forwards);
+    }
+
     Ok(config)
+}
+
+/// 解析 `"<bind>-><dst>"` 形式的转发规则。
+///
+/// 用 `->` 而不是 `:` 分隔两端，否则 `127.0.0.1:8080:10.0.0.1:80`
+/// 会有 4 段、无法与 IPv6 地址区分。`->` 视觉上也更清楚。
+fn parse_port_forward(rule: &str) -> napi::Result<easytier::common::config::PortForwardConfig> {
+    use std::net::SocketAddr;
+
+    let (bind, dst) = rule.split_once("->").ok_or_else(|| {
+        napi::Error::from_reason(format!(
+            "端口转发规则格式错误：{rule}（期望 \"<bind_ip>:<port>-><dst_ip>:<port>\"）"
+        ))
+    })?;
+
+    let bind_addr: SocketAddr = bind.trim().parse().map_err(|e| {
+        napi::Error::from_reason(format!("端口转发的 bind 地址不合法：{bind}：{e}"))
+    })?;
+    let dst_addr: SocketAddr = dst.trim().parse().map_err(|e| {
+        napi::Error::from_reason(format!("端口转发的 dst 地址不合法：{dst}：{e}"))
+    })?;
+
+    Ok(easytier::common::config::PortForwardConfig {
+        bind_addr,
+        dst_addr,
+        proto: "tcp".to_string(),
+    })
 }
 
 /// 启动节点。

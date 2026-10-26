@@ -5,7 +5,8 @@
 | 方式 | 验证什么 | 运行成本 | 何时跑 |
 | --- | --- | --- | --- |
 | `protocolSelfCheck()` | 编出的**字节**对不对 | 毫秒，无需联网 | 随时 |
-| `scripts/interop-check.mjs` | 对端**真的接受**了、网络真的形成了 | 约 10–40 秒，需要两个进程 | 改了网络相关代码后 |
+| `scripts/interop-check.mjs` | 对端**真的接受**了、网络真的形成了（控制面）| 约 10–40 秒，需要两个进程 | 改了网络相关代码后 |
+| `scripts/dataplane-check.mjs` | 数据能否通过虚拟网络传输（数据面）| ⚠️ 当前环境不可用，见第八节 | 有可用 gateway 时 |
 
 自检通过只能说明"我们的编码正确"；建连成功才能说明"整个交互是通的"。
 协议字段错了可能被对端宽容忽略，这类问题只有真实建连才能暴露。
@@ -143,3 +144,71 @@ node scripts/interop-check.mjs --ipv4 10.126.126
    手工测试时网络名或密钥写错会表现为"连不上但没报错"。
 4. **确认没用 loopback**：见上面第 1 条。
 5. **确认端口没被占用**：`ss -lntp | grep <port>`。
+
+## 八、数据面（数据能否通过虚拟网络传输）
+
+控制面通了（`peerCount` 到 1）不等于数据能过。要验证数据面，需要一条
+**能在用户态走的通道**。
+
+### 方案一：端口转发（当前环境不可用）
+
+EasyTier 有个 port-forward gateway，能把本机端口映射到虚拟网络内的地址，
+理论上不需要 TUN 就能验证：
+
+```
+节点 B 配转发：127.0.0.1:18081 → 10.126.126.1:18080
+在 B 上访问 127.0.0.1:18081，流量经虚拟网络到达 A 的服务
+```
+
+`scripts/dataplane-check.mjs` 就是按这个思路写的（含内容校验，
+不只验证"能连上"）。
+
+**但在当前环境实测不工作**：gateway 不绑定端口。
+
+这不是脚本或调用方式的问题，做过对照实验：
+
+| 怀疑点 | 实测结果 |
+| --- | --- |
+| `set_port_forwards` 调用方式 | 去掉原生模块，用纯 Rust 直接调，同样不绑定 |
+| 配置没写进去 | 回读确认规则存在、地址正确 |
+| `no_tun = true` 导致 | `no_tun` 是否为 true 都不绑定 |
+| `smoltcp` feature 缺失 | `cargo tree` 确认 `proxy-smoltcp-stack` 已启用 |
+| `gateway_enabled` / `startup_plan.gateway` | 源码里默认都是 true |
+| 绑定慢 | 等 17 秒仍不绑定 |
+
+且 EasyTier 日志里**没有任何 gateway 相关输出**——既没成功也没报错。
+
+> 这是 EasyTier v2.7.0 在 `create_native_instance` 路径下的行为，
+> 尚未查到根因。若上游修复或找到正确的启用方式，脚本不需要改。
+
+### 方案二：真实 TUN（需要特权）
+
+去掉 `noTun`，用 root 或 `CAP_NET_ADMIN` 运行，然后直接验证虚拟 IP：
+
+```bash
+# 两个节点都要 noTun: false，且能建 /dev/net/tun
+# 然后：
+ping 10.126.126.2
+nc -zv 10.126.126.2 8080
+```
+
+前提条件（缺一不可）：
+
+- `/dev/net/tun` 存在
+- 进程有 `CAP_NET_ADMIN`
+- 或者说：以 root 运行
+
+容器里通常需要 `--cap-add=NET_ADMIN --device /dev/net/tun`。
+
+**本仓库的开发环境不具备这些条件**（非 root、无 `/dev/net/tun`、
+`CapEff` 全零），所以这条路径没有在此验证过。
+
+### 判断该用哪个
+
+```bash
+# 有没有 TUN 能力
+ls /dev/net/tun && grep CapEff /proc/self/status
+```
+
+- 能建 TUN → 用方案二，最直接
+- 不能 → 方案一目前不可用，数据面验证只能推迟
