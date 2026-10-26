@@ -23,8 +23,48 @@
 | `noiseXX.ts` | Noise_XX_25519_ChaChaPoly_SHA256 完整实现 | 与 snow（官方同款）三轮握手成功 |
 | `noiseHandshake.ts` | Noise Msg1/2/3 编解码 + `secret_proof` | **与真实节点完成 Noise 握手** |
 | `dataPlane.ts` | HKDF traffic key 派生 + AES-GCM 加解密 | 密钥派生对照独立实现；**成功解密对端真实 RPC** |
-| `rpc.ts` | `RpcPacket` / `RpcDescriptor` 编解码 | oracle 逐字节对照 |
-| `ospf.ts` | OSPF 同步应答（SecureChannel）| 能解密请求并加密应答 |
+| `rpc.ts` | `RpcPacket` / `RpcDescriptor` / `RpcResponse` / `error.Error` | oracle 逐字节对照 |
+| `address.ts` | IPv4/Inet/SocketAddr/Url/TunnelInfo、连接位图、能力标志 | oracle 逐字节对照 |
+| `ospf.ts` | `SecureChannel`：解密对端 RPC（✅）；回应 OSPF 请求（⚠️ 不可用）| 见下方"能力边界" |
+
+## 能力边界：哪些能用、哪些不能
+
+这张表比"实现了什么"更重要——避免后续维护者误用。
+
+| 能力 | 状态 | 依据 |
+| --- | --- | --- |
+| 明文握手（`HandshakeRequest`） | ✅ 可用 | 与真实节点握手成功 |
+| Noise XX 三段握手 | ✅ 可用 | 与真实节点完成握手 |
+| 解密对端加密 RPC | ✅ 可用 | 解出过真实的 `SyncRouteInfoRequest` 明文 |
+| 加密发送、seq/nonce 管理 | ✅ 可用 | 往返自洽，测试固定住 |
+| 回应 OSPF 同步请求 | ❌ **不可用** | 见下 |
+
+### 为什么"回应 OSPF"不可用
+
+不是字段没调对，而是与官方的**连接角色模型**冲突。
+
+对端在解密前会做这个检查（`peer_conn.rs:205`）：
+
+```rust
+if from_peer_id != peer_id { return Some(Ok(data)); }  // 不解密，直接放行
+```
+
+`peer_id` 实测等于对端**自己的** `my_peer_id`，于是：
+
+| `from_peer_id` | 结果 |
+| --- | --- |
+| 本节点 id（语义正确） | 检查不通过 → 静默丢弃或当明文放行 |
+| 对端 id（能进解密分支） | 通过检查，但密钥方向对不上 → `secure decrypt failed` |
+
+穷举 6 种（方向 × from × to）组合均失败；且 `rpc/client.rs:183` 的
+"Received non-response packet" 一次都没出现，说明包**从未到达 RPC 层**。
+
+官方把连接分为发起方/接受方，`RpcResp` 只由接受方回给发起方。本实现是
+**发起方**，去回 `RpcResp` 必然撞上那个检查。真要打通必须让本实现充当
+接受方（自己监听 + Noise 服务端方向 + admission 校验），成本远高于收益——
+生产路径走原生模块。
+
+**所以 `handleOspfRequest` 的返回值只表示"识别到并尝试回应了"，不代表对端接受。**
 
 ## 关键验证：真实建连
 

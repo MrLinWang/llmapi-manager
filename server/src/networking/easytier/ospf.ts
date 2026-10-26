@@ -1,46 +1,24 @@
 /**
- * OSPF 路由同步的最小应答。
+ * 已建立 Noise 会话的连接通道，以及 OSPF 同步应答的**实验性**实现。
  *
- * ## 这一步解决什么问题
+ * # 状态：部分能力已验证，应答能力**不可用于生产**
  *
- * Noise 握手完成后，对端会立刻发起 `SyncRouteInfo` RPC 同步路由拓扑，
- * 超时 3 秒（`peer_ospf_route.rs:3528`）。不应答时日志会持续出现：
+ * 这个文件把"已验证"与"未验证"分成两块，请看 `SecureChannel` 的类注释。
  *
- * ```
- * sync_route_info failed ret=Err(Timeout(...)) my_peer_id=X dst_peer_id=Y
- * ```
+ * - ✅ **已验证**：解密对端的加密 RPC、派生 traffic key、编码/解码 `RpcPacket`
+ * - ⚠️ **未验证**：回一个 `SyncRouteInfoResponse` 让对端接受
  *
- * 应答后这条错误消失，对端认为拓扑同步完成、本节点在线。
- *
- * ## 我实际收到的请求（解密后）
- *
- * ```
- * field 1 varint = 4229893556     ← my_peer_id（对端自己）
- * field 2 varint = 15275333...    ← my_session_id
- * field 3 varint = 1              ← is_initiator
- * field 5 bytes(21) = ...         ← conn_bitmap（oneof conn_info）
- * ```
- *
- * ## 这一步"完成"意味着什么
- *
- * 它让**建连流程完整走通**：握手完成 + 对端认可本节点 + 开始收数据。
- * 但真正的 OSPF 收敛（把拓扑算成路由表、给系统提供可路由的虚拟网络）
- * 是 EasyTier 内核的职责，本实现不做，也不需要——我们的目的是
- * "作为一个节点存在于网络中"，而不是自己当路由器。
- *
- * ## 三个必须精确的细节（任一错就继续超时）
- *
- * 1. **方向按 peer_id 大小定**，不是按客户端/服务端角色
- * 2. **密钥要经 HKDF 派生**（`deriveTrafficKey`），不是 root_key 本身
- * 3. **算法 `aes-gcm` = AES-128**，不是 AES-256
+ * 未验证的部分不是"再调几个字段"就能通的，而是与官方的**连接角色模型**
+ * 冲突。详见下面 `handleOspfRequest` 的说明。这个结论是穷举实验得出的，
+ * 不是猜测。
  */
 
 import {
+  buildWrappedRpcResponse,
   decodeRpcPacket,
   decodeSyncRouteInfoRequest,
   encodeRpcPacket,
   encodeSyncRouteInfoResponse,
-  buildWrappedRpcResponse,
   type RpcPacket,
 } from './rpc';
 import { PacketType, hasFlag, PeerManagerHeaderFlags } from './protocol';
@@ -49,18 +27,11 @@ import { framePacket } from './framing';
 import type { Socket } from 'node:net';
 import type { ReceivedPacket } from './session';
 
-export interface OspfSessionOptions {
+export interface SecureChannelOptions {
+  /** 本节点的 peer id（握手时在 Msg1 里声明的那个） */
   myPeerId: number;
-  /** 连接级 peer_id（握手协商出的，用于 RPC 的 from/to 配对） */
+  /** 握手协商出的对端连接级 peer_id，用于**加解密的方向判断** */
   remotePeerId: number;
-  /**
-   * 对端在虚拟网络里的 my_peer_id。
-   *
-   * 与 `remotePeerId` **不是同一个值**，用途也不同：
-   * - 加解密的**方向判断**用连接级 peer_id
-   * - 包头里的 `to_peer_id` 必须用 my_peer_id，否则对端不解密直接丢包
-   */
-  remoteMyPeerId?: number;
   /** 从 Noise Msg2 拿到的 `root_key_32` */
   rootKey: Buffer;
   /** Msg2 的 `server_encryption_algorithm`，实测是 `aes-gcm` */
@@ -70,16 +41,32 @@ export interface OspfSessionOptions {
 }
 
 /**
- * 一个已建立 Noise 会话的连接，能收发加密的 RPC。
+ * 一条已完成 Noise 握手的连接，能收发加密的 RPC。
  *
- * 这是"自研实现"的收口点：握手完成后用它跟对端交换加密消息。
+ * ## 哪些能力经过实证
+ *
+ * **解密（可靠）**：能成功解开官方节点发来的加密 `RpcReq`。这是硬证据——
+ * 拿到过真实的 `SyncRouteInfoRequest` 明文，字段全部对得上：
+ *
+ * ```
+ * field 1 varint = 4229893556     ← my_peer_id（对端自己）
+ * field 2 varint = 15275333...    ← my_session_id
+ * field 3 varint = 1              ← is_initiator
+ * field 5 bytes(21) = ...         ← conn_bitmap
+ * ```
+ *
+ * 这条路径依赖三件事，都已验证：HKDF 派生 traffic key、`aes-gcm` 是 AES-128、
+ * 方向按 peer_id 大小判定。
+ *
+ * **应答（不可用）**：加密应答能发出去，但对端**不接受**。见
+ * `handleOspfRequest` 的说明。
  */
 export class SecureChannel {
   private sendSeq = 0n;
 
   constructor(
     private readonly socket: Socket,
-    private readonly options: OspfSessionOptions,
+    private readonly options: SecureChannelOptions,
   ) {}
 
   /** 接收方向（对端发给我）的密钥。 */
@@ -100,7 +87,11 @@ export class SecureChannel {
     );
   }
 
-  /** 解密一个收到的载荷（返回明文 RPC 字节）。 */
+  /**
+   * 解密一个收到的载荷，返回明文字节。
+   *
+   * 用于观察对端发了什么——这是本模块**最可靠**的能力。
+   */
   decrypt(payload: Buffer): Buffer {
     return decryptPayload({
       key: this.receiveKey(),
@@ -110,38 +101,38 @@ export class SecureChannel {
   }
 
   /**
+   * 尝试把收到的包解成 `RpcPacket`。
+   *
+   * 返回 `null` 表示不是加密 RPC（或是别的东西）——调用方应当忽略而不是报错：
+   * 同一连接上还有 Ping/Pong 等控制包，解不开是正常情况。
+   */
+  decodeRpc(packet: ReceivedPacket): RpcPacket | null {
+    if (!hasFlag(packet.header, PeerManagerHeaderFlags.ENCRYPTED)) return null;
+    try {
+      return decodeRpcPacket(this.decrypt(packet.payload));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * 加密并发送一个 RPC 包。
    *
-   * 加密后的布局是 `密文 || tag(16) || nonce(12)`，并且必须把
-   * `PeerManagerHeader` 的 `ENCRYPTED` 标志置位——否则对端会拿它当明文解，
-   * 直接认证失败。
-   */
-  /**
-   * 发送一个 RPC 包。
+   * ## 加密细节（均已验证）
    *
-   * **包头里的 to_peer_id 必须等于对端的 my_peer_id**，而不是对端的
-   * "连接级 peer_id"。这两个值是不同的：
+   * - 布局是 `密文 || tag(16) || nonce(12)`，nonce 在**尾部**
+   * - `nonce = epoch(4B BE) || seq(8B BE)`，seq 每个方向独立从 0 递增
+   * - 必须置 `ENCRYPTED` 标志，否则对端会拿它当明文解、直接认证失败
    *
-   * - `my_peer_id`：节点在虚拟网络里的身份（每个节点自己生成）
-   * - 连接级 peer_id：握手协商出来的、用于这条连接上标识对端
+   * ## 包头里的 id
    *
-   * 对端在解密前会先检查 `hdr.to_peer_id != my_peer_id` 就**直接放行不解密**
-   * （`peer_conn.rs:214`），于是我们的加密包被当成明文包丢掉——
-   * 表现为"响应已发出但对端仍超时"，且日志里没有任何错误。
-   *
-   * 这个值由调用方通过 `remoteMyPeerId` 传入（从对端 RPC 的 to_peer 读，
-   * 或从它广播的路由信息里读）。
-   */
-  /**
-   * 发送一个 RPC 包，显式指定包头里的 `to_peer_id`。
-   *
-   * 必须用对端请求里的 `from_peer_id`，原因见 `handleOspfRequest` 里的说明。
+   * `toPeerId` 需要显式传入，因为**对端检查的字段随场景而变**，
+   * 没有一个总是正确的取值（见 `handleOspfRequest`）。
    */
   sendRpcTo(packet: RpcPacket, toPeerId: number): void {
-    const plaintext = encodeRpcPacket(packet);
     const ciphertext = encryptPayload({
       key: this.sendKey(),
-      payload: plaintext,
+      payload: encodeRpcPacket(packet),
       epoch: this.options.epoch ?? 0,
       seq: this.sendSeq,
       algorithm: this.options.algorithm,
@@ -158,60 +149,60 @@ export class SecureChannel {
     );
   }
 
-  sendRpc(packet: RpcPacket): void {
-    const plaintext = encodeRpcPacket(packet);
-    const ciphertext = encryptPayload({
-      key: this.sendKey(),
-      payload: plaintext,
-      epoch: this.options.epoch ?? 0,
-      seq: this.sendSeq,
-      algorithm: this.options.algorithm,
-    });
-    this.sendSeq += 1n;
-
-    this.socket.write(
-      framePacket(ciphertext, {
-        fromPeerId: this.options.myPeerId,
-        // 用对端的 my_peer_id，不是连接级 peer_id（见上面那段说明）
-        toPeerId: this.options.remoteMyPeerId ?? this.options.remotePeerId,
-        packetType: packet.isRequest ? PacketType.RpcReq : PacketType.RpcResp,
-        flags: PeerManagerHeaderFlags.ENCRYPTED,
-      }),
-    );
-  }
-
   /**
-   * 尝试把收到的包当作 OSPF 同步请求处理。
+   * 尝试回应一个 OSPF 同步请求。
    *
-   * 返回 `true` 表示已识别并回应；`false` 表示不是 OSPF 请求（或解不开）。
+   * # ⚠️ 这个能力**经实测不可用**，不要在生产里依赖
+   *
+   * 它能正确识别请求、构造出结构正确的响应并加密发出，但**对端不会接受**。
+   * 原因是官方的连接角色模型，而不是字段填错：
+   *
+   * 对端在解密前会先做这个检查（`peer_conn.rs:205`）：
+   *
+   * ```rust
+   * if from_peer_id != peer_id { return Some(Ok(data)); }  // 不解密，直接放行
+   * ```
+   *
+   * `peer_id` 是"这条连接的对端 id"，实测等于对端**自己的** `my_peer_id`。
+   * 于是形成死结：
+   *
+   * | `from_peer_id` 取值 | 结果 |
+   * | --- | --- |
+   * | 本节点 id（语义正确） | 检查不通过 → 静默丢弃，或当明文放行 |
+   * | 对端 id（能进解密分支） | 通过了检查，但密钥方向对不上 → `secure decrypt failed` |
+   *
+   * 我穷举了 6 种（方向 × from × to）组合，无一成功。而
+   * `rpc/client.rs:183` 的 "Received non-response packet" 日志一次都没出现，
+   * 说明包**根本没有到达 RPC 层**。
+   *
+   * ## 为什么这不是"再试试"能解决的
+   *
+   * 官方把连接分为**发起方 / 接受方**，`RpcResp` 只由接受方回给发起方。
+   * 本实现是发起方（主动连出去），去回 `RpcResp` 会撞上上面那个检查。
+   *
+   * 真要打通，必须让本实现充当**接受方**：自己监听端口等官方节点连进来，
+   * 并用 Noise 握手的服务端方向（`do_noise_handshake_as_server`）。
+   * 那是另一套流程（还涉及 admission 校验），成本明显更高，而生产路径
+   * 走原生模块，没有实际需要。
+   *
+   * 所以这个方法保留下来是为了**记录结论、方便日后验证**，不是可用功能。
+   * 返回 `true` 只表示"识别到并尝试回应了"，不代表对端接受了它。
    */
   handleOspfRequest(packet: ReceivedPacket): boolean {
-    // 只处理加密的 RpcReq
     if (packet.header.packetType !== PacketType.RpcReq) return false;
-    if (!hasFlag(packet.header, PeerManagerHeaderFlags.ENCRYPTED)) return false;
 
-    let rpc: RpcPacket;
-    try {
-      rpc = decodeRpcPacket(this.decrypt(packet.payload));
-    } catch {
-      // 解不开就忽略：可能是别的 epoch/会话的消息，不该当成错误
-      return false;
-    }
+    const rpc = this.decodeRpc(packet);
+    if (rpc === null || !rpc.isRequest || rpc.descriptor === null) return false;
 
-    // 识别 OSPF 同步请求。
+    // 识别 OSPF 同步请求的实测定论（与最初的假设不同）：
     //
-    // **注意实际值与我最初的假设不同**（这是靠打印真实包才发现的）：
-    //
-    // | 字段 | 我假设 | 实际 |
+    // | 字段 | 假设 | 实际 |
     // | --- | --- | --- |
-    // | protoName | `peer_rpc.OspfRouteRpc` | **`OspfRouteRpc`**（不带包名）|
-    // | domainName | `""` | **网络名**（如 `e2e`）|
-    // | methodIndex | 0 | **1** |
+    // | protoName | `peer_rpc.OspfRouteRpc` | `OspfRouteRpc`（不带包名）|
+    // | domainName | `""` | 网络名（如 `e2e`）|
+    // | methodIndex | 0 | 1 |
     //
-    // 所以判定只认 `serviceName`/`protoName` 里的 `OspfRouteRpc`，
-    // 不比对 domain（它随网络名变化）也不比对 methodIndex
-    // （不同版本的同步方法索引可能不同）。
-    if (!rpc.isRequest || rpc.descriptor === null) return false;
+    // 所以只认服务名，不比对 domain（随网络名变）与 methodIndex（版本相关）。
     const isOspf =
       rpc.descriptor.protoName.endsWith('OspfRouteRpc') ||
       rpc.descriptor.serviceName === 'OspfRouteRpc';
@@ -219,8 +210,7 @@ export class SecureChannel {
 
     const request = decodeSyncRouteInfoRequest(rpc.body);
 
-
-    // 回显 is_initiator 与 session_id 即可完成这次同步。
+    // 回显 is_initiator 与 session_id 即可完成这次同步；
     // 不填 missing_peer_ids 表示"我没有缺失的拓扑数据"。
     const responseBody = encodeSyncRouteInfoResponse({
       isInitiator: request.isInitiator,
@@ -230,25 +220,9 @@ export class SecureChannel {
       missingConnPeerIds: [],
     });
 
-    // 响应的包头 to 用**对端的 my_peer_id**——它可以从对端的 Ping 包
-    // 或它 RPC 请求的 from 字段里得到，两者一致。
-    //
-    // 对端在解密前会检查 `hdr.to_peer_id == 自己的 my_peer_id`，
-    // 不等就直接放行不解密（`peer_conn.rs:214`），而解密失败又被静默丢弃
-    // （`:229` 的 `return None`），所以配错时**完全没有日志**——
-    // 表现为"响应已发但对端一直超时"。这是最难定位的一类问题。
-    //
-    // 响应的包头 from/to **直接由请求的 to/from 反转得到**，
-    // 这样无论对端用哪个 id（连接级还是 my_peer_id），回程都能对上——
-    // 因为对端自己发的请求里 from 就是"它希望被回复的地址"。
-    //
-    // 踩过的坑：我先用了连接级 peer_id 当 to，对端在解密前检查
-    // `hdr.to_peer_id == 自己的 my_peer_id` 不通过就**直接放行不解密**，
-    // 于是加密包被当明文丢掉，表现为"响应已发但对端仍超时"且无任何错误日志。
-    // **必须用 buildWrappedRpcResponse**：业务消息要先包进 RpcResponse
-    // 再放进 RpcPacket.body。直接放业务消息会让对端解出空 response
-    // （`rpc/client.rs:387` 是 `RpcResponse::decode(rpc_packet.body)`），
-    // 表现为"对端收到了但当作空响应"。
+    // 注意必须走 buildWrappedRpcResponse：业务消息要先包进 RpcResponse
+    // 再放进 RpcPacket.body。对端是 `RpcResponse::decode(rpc_packet.body)`
+    // （`rpc/client.rs:387`），直接放业务消息会让它解出错误的东西。
     this.sendRpcTo(buildWrappedRpcResponse(rpc, responseBody), rpc.fromPeer);
     return true;
   }
