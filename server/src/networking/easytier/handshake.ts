@@ -53,11 +53,19 @@ export const HandshakeRequestField = {
 } as const;
 
 /**
- * `HandshakeResponse` 的字段号（`peer_rpc.proto`，与 Request 不同）。
+ * `HandshakeResponse` 的字段号。
  *
- * 注意：响应里 `network_name` 是字段 5、`network_secret_digest` 是字段 6，
- * 与请求的 5/6 相同，但**没有** `features` 之外的差异——
- * 这里单独定义一份是为了让"响应"与"请求"的语义分开，避免将来混淆。
+ * **重要：协议里没有独立的 `HandshakeResponse` message。**
+ * 服务端回包用的**就是 `HandshakeRequest` 类型本身**
+ * （`peer_conn.rs:500` 的 `HandshakeRequest::decode(rsp.payload())`）。
+ *
+ * 这一点很容易搞错：`magic_dns.proto` 里确实有个同名的
+ * `message HandshakeResponse {}`，但那是 DNS 服务的另一个东西，
+ * 与 peer 握手无关。如果照着它去实现会得到一个空结构。
+ *
+ * 所以这里的字段号与 Request 完全相同。保留独立的常量与类型，
+ * 只是为了让"我发出的请求"与"我收到的答复"在代码里语义分明——
+ * 它们是同一种字节格式，但校验的关注点不同（响应里要看对端的 peer_id）。
  */
 export const HandshakeResponseField = {
   magic: 1,

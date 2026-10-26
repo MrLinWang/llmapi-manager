@@ -1266,6 +1266,7 @@ name = "easytier-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "easytier",
  "napi",
  "napi-build",
@@ -1273,6 +1274,7 @@ dependencies = [
  "once_cell",
  "tokio",
  "url",
+ "x25519-dalek",
 ]
 
 [[package]]

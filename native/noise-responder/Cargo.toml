@@ -1,0 +1,15 @@
+[package]
+name = "noise-responder"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 测试工具：用**官方同一个 Noise 实现**（snow 0.10.0）充当响应方，
+# 供 TS 侧的 NoiseXXInitiator 做交叉验证。
+#
+# 为什么需要它：Noise 握手写错了表现是"握手失败"，而失败原因往往
+# 是某一步的哈希混入顺序或 DH 对象搞错——自己和自己测永远发现不了
+# （两边错得一样就互相通过）。必须拿一个独立实现来对。
+[dependencies]
+snow = { version = "0.10.0", features = ["default-resolver"] }
+hex = "0.4"

@@ -51,6 +51,11 @@ crate-type = ["cdylib"]
 #   easytier-core/src/config/toml.rs:21   pub use {Flags, FlagsPatch}
 
 [dependencies]
+# base64 与 X25519：secure mode 需要把私钥（base64）转成公钥。
+# 用 x25519-dalek 而不是自己实现 Curve25519 标量乘法——
+# 后者极易出错且没有任何对照物。
+base64 = "0.22"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 # url：构造监听地址（`TomlConfig::set_listeners` 收 `Vec<url::Url>`）。
 # 版本与 easytier 内部使用的保持一致，避免出现两个 url crate。
 url = "2"

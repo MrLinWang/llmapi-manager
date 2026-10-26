@@ -41,6 +41,35 @@ use napi_derive::napi;
 use once_cell::sync::Lazy;
 use tokio::sync::Mutex;
 
+/// 从 base64 的 X25519 私钥推导公钥。
+///
+/// 为什么要自己推导：官方 `SecureModeConfig` 要求
+/// `local_private_key` 与 `local_public_key` **都给**
+/// （`common.proto:283` 的注释写明"set 私钥时公钥必填"）。
+/// 让调用方同时维护两个值既容易不一致、也容易泄漏公钥与私钥的对应关系。
+///
+/// 标量乘法交给 `x25519-dalek`（官方依赖的同一个 crate），
+/// 不自己实现——Curve25519 手写几乎必然出错，而且出错时表现为
+/// "握手 mysteriously 失败"，极难定位。
+fn derive_x25519_public_key(private_key_b64: &str) -> napi::Result<String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+
+    let raw = B64
+        .decode(private_key_b64)
+        .map_err(|e| napi::Error::from_reason(format!("secureModePrivateKey 不是合法的 base64: {e}")))?;
+    if raw.len() != 32 {
+        return Err(napi::Error::from_reason(format!(
+            "secureModePrivateKey 必须是 32 字节的 X25519 私钥，实际 {} 字节",
+            raw.len()
+        )));
+    }
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&raw);
+    let secret = x25519_dalek::StaticSecret::from(bytes);
+    let public = x25519_dalek::PublicKey::from(&secret);
+    Ok(B64.encode(public.as_bytes()))
+}
+
 /// TUN 设备名固定，便于用户识别"这是 llmapi-manager 建的网卡"，
 /// 也便于卸载/排查时直接 `ip link del llmapi0`。
 ///
@@ -111,6 +140,27 @@ pub struct NodeOptions {
     /// 本机起一个节点监听、另一个节点连 127.0.0.1，就能验证真实握手，
     /// 而不必依赖公共中继（当前开发环境里 `public.easytier.cn` 解析不了）。
     pub listen_port: Option<u32>,
+    /// 是否启用 secure mode（Noise 加密握手）。
+    ///
+    /// **这个开关决定完全不同的握手路径**（`peer_conn.rs:1210`）：
+    ///
+    /// - `false`（默认）：第一条包必须是明文 `HandShake`，之后直接进入数据面。
+    ///   此时若发 `NoiseHandshakeMsg1`，对端会当作未处理包丢弃
+    ///   （日志：`unhandled packet ... packet_type: TCP`）。
+    /// - `true`：第一条包必须是 `NoiseHandshakeMsg1`，走 Noise XX 三阶段。
+    ///   此时**不会**先做明文握手——两条路径是互斥的，不能串行。
+    ///
+    /// 默认 `false` 与官方一致（`is_secure_mode_enabled` 在未配置时返回 false）。
+    pub secure_mode: Option<bool>,
+    /// secure mode 用的静态私钥（base64 的 32 字节 X25519）。
+    ///
+    /// **启用 secure_mode 时必填**：不填会直接创建实例失败，错误是
+    /// `local private key is not set`——这个报错来自实例构造阶段，
+    /// 看起来像配置缺失，实际是"选了加密模式却没给身份"。
+    ///
+    /// 这是本节点在网络里的**长期身份**：对端可以用它的公钥做钉扎校验。
+    /// 每次启动换一个会让钉扎失效，所以要持久化。
+    pub secure_mode_private_key: Option<String>,
 }
 
 #[napi(object)]
@@ -259,6 +309,26 @@ fn build_config(options: &NodeOptions) -> anyhow::Result<TomlConfig> {
     // 日志级别由 RUST_LOG 控制（默认 info）。写 stderr，不落文件——
     // 落盘交给本服务自己的 logger，避免出现第二套日志文件。
     let _ = easytier::common::log::init_console();
+
+    // secure mode：决定走明文握手还是 Noise 握手（互斥路径，见 NodeOptions 说明）。
+    // `set_secure_mode` 收 `Option<SecureModeConfig>`（toml.rs:145）。
+    if options.secure_mode.unwrap_or(false) {
+        // secure mode 必须有静态密钥，否则实例构造阶段直接失败：
+        // "local private key is not set"。
+        let private_key = options.secure_mode_private_key.clone().ok_or_else(|| {
+            napi::Error::from_reason(
+                "启用 secureMode 时必须提供 secureModePrivateKey（base64 的 32 字节 X25519 私钥）。                 它是本节点在网络里的长期身份，对端据此做钉扎校验。"
+                    .to_owned(),
+            )
+        })?;
+        // 公钥可由私钥推导，但官方要求两者都给（`common.proto:283` 的注释）。
+        let public_key = derive_x25519_public_key(&private_key)?;
+        config.set_secure_mode(Some(easytier::proto::common::SecureModeConfig {
+            enabled: true,
+            local_private_key: Some(private_key),
+            local_public_key: Some(public_key),
+        }));
+    }
 
     let mut flags = easytier::common::config::gen_default_flags();
     flags.dev_name = TUN_DEVICE_NAME.to_owned();
