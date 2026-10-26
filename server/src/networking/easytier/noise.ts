@@ -98,8 +98,16 @@ export interface NoiseMsg1 {
  * `LIVENESS_ECHO_FEATURE`。Rust 侧在 Msg1 里固定带上它，
  * 表示本节点支持 liveness echo。漏掉不影响握手成功，
  * 但会让对端不做回声探测，表现为延迟统计缺失。
+ *
+ * **注意字符串是 `liveness-echo-v1`（连字符 + 版本号）**，不是
+ * `liveness_echo`（下划线）。这个拼写来自 `peer_conn_liveness.rs:10` 的
+ * `pub(super) const FEATURE: &str = "liveness-echo-v1";`。
+ *
+ * 写错不会导致握手失败——对端只是看不到这个能力，于是不做回声探测。
+ * 症状是"连上了但没有延迟数据"，很难与"网络慢"区分，所以靠
+ * oracle 对照（`handshake_edge.full.input.features`）固定住。
  */
-export const LIVENESS_ECHO_FEATURE = 'liveness_echo';
+export const LIVENESS_ECHO_FEATURE = 'liveness-echo-v1';
 
 export function createNoiseMsg1(input: {
   version: string;

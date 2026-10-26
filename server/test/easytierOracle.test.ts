@@ -36,7 +36,21 @@ import {
 } from '../src/networking/easytier/route';
 import { CompressionAlgo } from '../src/networking/easytier/rpc';
 import {
+  HANDSHAKE_MAGIC,
+  HandshakeRequestField,
+  encodeHandshakeRequest,
+} from '../src/networking/easytier/handshake';
+import {
+  NoiseMsg1Field,
+  encodeNoiseMsg1,
+  encodeUuid,
+} from '../src/networking/easytier/noiseHandshake';
+import { LIVENESS_ECHO_FEATURE } from '../src/networking/easytier/noise';
+import {
   buildConnBitmap,
+  decodePeerFeatureFlag,
+  encodePeerFeatureFlag,
+  type PeerFeatureFlag,
   decodeConnBitmap,
   encodeConnBitmap,
   getBitmapBit,
@@ -998,5 +1012,200 @@ describe('连接位图：展平顺序与位序', () => {
   it('字段号与 proto 定义一致', () => {
     expect(cb.field_numbers.peer_ids).toBe(1);
     expect(cb.field_numbers.bitmap).toBe(2);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 能力标志与握手边界
+// ══════════════════════════════════════════════════════════════════
+
+interface OracleFeatureFlag {
+  field_numbers: Record<string, number>;
+  all_true_hex: string;
+  only_support_conn_list_sync_hex: string;
+  only_is_public_server_hex: string;
+  default_hex: string;
+}
+
+interface OracleHandshakeEdge {
+  handshake_request_fields: Record<string, number>;
+  magic: { correct: number; correct_hex: string };
+  full: { input: Record<string, unknown>; protobuf_hex: string };
+  no_digest: { input: Record<string, unknown>; protobuf_hex: string };
+  noise_msg1: {
+    uuid_4x_u32: { input: Record<string, number>; protobuf_hex: string };
+    msg1_protobuf_hex: string;
+    field_numbers: Record<string, number>;
+  };
+}
+
+describe('能力标志 PeerFeatureFlag', () => {
+  const ff = (oracle as unknown as { feature_flag: OracleFeatureFlag }).feature_flag;
+
+  const allTrue: PeerFeatureFlag = {
+    isPublicServer: true,
+    avoidRelayData: true,
+    kcpInput: true,
+    noRelayKcp: true,
+    supportConnListSync: true,
+    quicInput: true,
+    noRelayQuic: true,
+    isCredentialPeer: true,
+    needP2p: true,
+    disableP2p: true,
+    ipv6PublicAddrProvider: true,
+  };
+
+  it('全 true 编码与官方一致', () => {
+    expect(encodePeerFeatureFlag(allTrue).toString('hex')).toBe(ff.all_true_hex);
+  });
+
+  it('全默认编码为空字节（proto3 的 false 不写）', () => {
+    const allFalse = Object.fromEntries(
+      Object.keys(allTrue).map((k) => [k, false]),
+    ) as unknown as PeerFeatureFlag;
+    expect(encodePeerFeatureFlag(allFalse).toString('hex')).toBe(ff.default_hex);
+    // 官方就是空字符串
+    expect(ff.default_hex).toBe('');
+  });
+
+  it('只开 support_conn_list_sync 时编码与官方一致', () => {
+    // 这个标志决定对端用 conn_list 还是 bitmap 同步连接关系
+    const only = { ...allTrue };
+    for (const k of Object.keys(only) as Array<keyof PeerFeatureFlag>) only[k] = false;
+    only.supportConnListSync = true;
+    expect(encodePeerFeatureFlag(only).toString('hex')).toBe(
+      ff.only_support_conn_list_sync_hex,
+    );
+    expect(ff.only_support_conn_list_sync_hex).toBe('2801'); // 字段 5, 值 1
+  });
+
+  it('只开 is_public_server 时编码与官方一致', () => {
+    const only = { ...allTrue };
+    for (const k of Object.keys(only) as Array<keyof PeerFeatureFlag>) only[k] = false;
+    only.isPublicServer = true;
+    expect(encodePeerFeatureFlag(only).toString('hex')).toBe(ff.only_is_public_server_hex);
+    expect(ff.only_is_public_server_hex).toBe('0801'); // 字段 1, 值 1
+  });
+
+  it('解码官方字节得到正确标志', () => {
+    const decoded = decodePeerFeatureFlag(Buffer.from(ff.only_support_conn_list_sync_hex, 'hex'));
+    expect(decoded.supportConnListSync).toBe(true);
+    expect(decoded.isPublicServer).toBe(false);
+    expect(decoded.needP2p).toBe(false);
+  });
+
+  it('空字节解码为全 false（不是"没有这个字段"）', () => {
+    const decoded = decodePeerFeatureFlag(Buffer.alloc(0));
+    for (const value of Object.values(decoded)) expect(value).toBe(false);
+  });
+
+  it('字段号与 proto 定义一致', () => {
+    const d = ff.field_numbers;
+    expect(d.is_public_server).toBe(1);
+    expect(d.avoid_relay_data).toBe(2);
+    expect(d.support_conn_list_sync).toBe(5);
+    expect(d.is_credential_peer).toBe(8);
+    expect(d.ipv6_public_addr_provider).toBe(11);
+  });
+});
+
+describe('握手消息边界', () => {
+  const hs = (oracle as unknown as { handshake_edge: OracleHandshakeEdge }).handshake_edge;
+
+  it('magic 常量与官方一致', () => {
+    expect(HANDSHAKE_MAGIC).toBe(hs.magic.correct);
+    expect(hs.magic.correct).toBe(0xd1e1a5e1);
+    expect(hs.magic.correct_hex).toBe('0xd1e1a5e1');
+  });
+
+  it('完整握手请求编码与官方一致', () => {
+    // 注意 buildHandshakeRequest 自己算 digest（从 secret 派生），
+    // 所以要用一段、能算出官方那 32 字节 0xAB 的输入来对比结构，
+    // 这里改为直接构造 HandshakeRequest 对象以精确控制 digest。
+    const encoded = encodeHandshakeRequest({
+      magic: HANDSHAKE_MAGIC,
+      myPeerId: hs.full.input.my_peer_id as number,
+      version: 1,
+      features: hs.full.input.features as string[],
+      networkName: hs.full.input.network_name as string,
+      networkSecretDigest: Buffer.from(hs.full.input.network_secret_digest_hex as string, 'hex'),
+    });
+    expect(encoded.toString('hex')).toBe(hs.full.protobuf_hex);
+  });
+
+  it('digest 为空时编码里不出现该字段（接收方必须容忍）', () => {
+    const encoded = encodeHandshakeRequest({
+      magic: HANDSHAKE_MAGIC,
+      myPeerId: hs.no_digest.input.my_peer_id as number,
+      version: 1,
+      features: [],
+      networkName: hs.no_digest.input.network_name as string,
+      networkSecretDigest: Buffer.alloc(0),
+    });
+    expect(encoded.toString('hex')).toBe(hs.no_digest.protobuf_hex);
+    // 字段 6（digest）不应出现
+    const fields = decodeFields(encoded);
+    expect(fields.some((f) => f.fieldNumber === 6)).toBe(false);
+  });
+
+  it('Noise Msg1 的 UUID 是 4 个 uint32（不是 16 字节）', () => {
+    // 这一点曾被官方精确报错纠正过：
+    //   UnexpectedWireType { actual: LengthDelimited, expected: Varint }
+    //   stack: [("Uuid","part1"), ("PeerConnNoiseMsg1Pb","a_conn_id")]
+    const uuid = hs.noise_msg1.uuid_4x_u32.input;
+    // encodeUuid 收 16 字节，内部按 4 个 uint32(BE) 拆成 part1..part4
+    const raw = Buffer.alloc(16);
+    for (const [i, key] of (['part1', 'part2', 'part3', 'part4'] as const).entries()) {
+      raw.writeUInt32BE(uuid[key], i * 4);
+    }
+    const encoded = encodeUuid(raw);
+    expect(encoded.toString('hex')).toBe(hs.noise_msg1.uuid_4x_u32.protobuf_hex);
+    // 4 个字段各 4 字节 varint + tag = 20 字节，不是 16 字节
+    expect(encoded.length).not.toBe(16);
+  });
+
+  it('Noise Msg1 编码与官方一致', () => {
+    const uuid = hs.noise_msg1.uuid_4x_u32.input;
+    const raw = Buffer.alloc(16);
+    for (const [i, key] of (['part1', 'part2', 'part3', 'part4'] as const).entries()) {
+      raw.writeUInt32BE(uuid[key], i * 4);
+    }
+    const encoded = encodeNoiseMsg1({
+      version: 1,
+      aNetworkName: 'testnet',
+      aSessionGeneration: null,
+      aConnId: raw,
+      clientEncryptionAlgorithm: '',
+      features: ['liveness-echo-v1'],
+    });
+    expect(encoded.toString('hex')).toBe(hs.noise_msg1.msg1_protobuf_hex);
+  });
+
+  it('Noise Msg1 字段号与 proto 定义一致', () => {
+    const d = hs.noise_msg1.field_numbers;
+    expect(d.version).toBe(1);
+    expect(d.a_network_name).toBe(2);
+    expect(d.a_conn_id).toBe(4);
+    expect(d.features).toBe(6);
+    // 与我实现的常量对照
+    expect(NoiseMsg1Field.version).toBe(d.version);
+    expect(NoiseMsg1Field.aNetworkName).toBe(d.a_network_name);
+    expect(NoiseMsg1Field.aConnId).toBe(d.a_conn_id);
+    expect(NoiseMsg1Field.features).toBe(d.features);
+  });
+
+  it('握手请求字段号与 proto 定义一致', () => {
+    const d = hs.handshake_request_fields;
+    expect(HandshakeRequestField.magic).toBe(d.magic);
+    expect(HandshakeRequestField.myPeerId).toBe(d.my_peer_id);
+    expect(HandshakeRequestField.networkName).toBe(d.network_name);
+    expect(HandshakeRequestField.networkSecretDigest).toBe(d.network_secret_digest);
+  });
+
+  it('LIVENESS_ECHO_FEATURE 字符串与官方一致', () => {
+    // 官方 peer_conn_liveness.rs:10 是 "liveness-echo-v1"
+    expect(LIVENESS_ECHO_FEATURE).toBe('liveness-echo-v1');
+    expect(hs.full.input.features).toContain('liveness-echo-v1');
   });
 });

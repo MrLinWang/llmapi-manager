@@ -43,6 +43,9 @@
 12. **连接位图**：`RouteConnBitmap` 的展平顺序、位序，以及用官方
     `get_connected_peers()` 反解出的期望邻接关系
 13. **`PeerConnInfo`**：节点列表里的一项（含 `connected_peer_ids`）
+14. **能力标志**：`PeerFeatureFlag` 的 11 个位与"全默认编码为空"的行为
+15. **握手边界**：`HandshakeRequest`（含 digest 为空的情形）、`magic` 常量、
+    `NoiseMsg1` 的 `UUID`（4 个 uint32）
 
 ## 用法
 
@@ -63,6 +66,7 @@ cd ../.. && npx vitest run --root server test/easytierOracle.test.ts
 | `SocketType` 当成隧道类型枚举 | 它只有 TCP/UDP；`tcp`/`wg`/`quic` 是 `TunnelInfo.tunnel_type` 字符串 |
 | 位图位序当成 MSB 优先 | 实际是 **LSB 优先**；搞反时拓扑"有连接但连错了人" |
 | 位图展平当成列优先 | 实际是行优先 `i*n+j`；有向连接会整张图颠倒 |
+| `liveness-echo-v1` 写成 `liveness_echo` | 握手仍成功，但对端不做回声探测——症状是"没有延迟数据" |
 
 第一条尤其隐蔽：proto3 里普通标量取默认值不写，但 `optional` 一旦显式设置
 （哪怕 false/0）**必须写出来**。这两者混为一谈时，字段看起来都对、字节却不同。

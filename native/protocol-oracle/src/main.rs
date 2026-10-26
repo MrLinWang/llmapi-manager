@@ -116,6 +116,8 @@ fn main() {
     let topology = topology_vectors();
     let conn_bitmap = conn_bitmap_vectors();
     let peer_conn_info = peer_conn_info_vectors();
+    let feature_flag = feature_flag_vectors();
+    let handshake_edge = handshake_edge_vectors();
 
     let output = json!({
         "_comment": "由 native/protocol-oracle 从官方 easytier-core 生成，供 TS 协议实现对照",
@@ -145,6 +147,8 @@ fn main() {
         "topology": topology,
         "conn_bitmap": conn_bitmap,
         "peer_conn_info": peer_conn_info,
+        "feature_flag": feature_flag,
+        "handshake_edge": handshake_edge,
         "packet_types": packet_types,
         "flags": flags,
     });
@@ -918,6 +922,162 @@ fn peer_conn_info_vectors() -> serde_json::Value {
             },
             "protobuf_hex": info_hex,
             "list_protobuf_hex": list_hex,
+        },
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 能力标志（PeerFeatureFlag）与握手消息边界
+// ══════════════════════════════════════════════════════════════════
+
+/// 导出 `PeerFeatureFlag` 的字段号与编码行为。
+///
+/// 这是一个纯 bool 的 message，每个字段占一个位。它的用途是**能力协商**：
+/// 对端据此判断"这个节点支不支持 conn_list 同步 / 能不能当 relay / 要不要打洞"。
+///
+/// proto3 规则：所有 bool 默认 false，所以**全默认时编码为空字节**。
+/// 这点容易被误解成"没有这个字段"——实际是"字段都在，只是都是 false"。
+fn feature_flag_vectors() -> serde_json::Value {
+    use easytier_proto::common::PeerFeatureFlag;
+    use prost::Message;
+
+    let all_true = PeerFeatureFlag {
+        is_public_server: true,
+        avoid_relay_data: true,
+        kcp_input: true,
+        no_relay_kcp: true,
+        support_conn_list_sync: true,
+        quic_input: true,
+        no_relay_quic: true,
+        is_credential_peer: true,
+        need_p2p: true,
+        disable_p2p: true,
+        ipv6_public_addr_provider: true,
+    };
+    let all_hex: String = all_true.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 只开 support_conn_list_sync（第 5 号字段）
+    let mut only_conn_list = PeerFeatureFlag::default();
+    only_conn_list.support_conn_list_sync = true;
+    let only_hex: String =
+        only_conn_list.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 只开 is_public_server（第 1 号）
+    let mut only_public = PeerFeatureFlag::default();
+    only_public.is_public_server = true;
+    let only_public_hex: String =
+        only_public.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 全默认 → 空
+    let default_hex: String = PeerFeatureFlag::default()
+        .encode_to_vec()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+
+    json!({
+        "field_numbers": {
+            "is_public_server": 1, "avoid_relay_data": 2, "kcp_input": 3,
+            "no_relay_kcp": 4, "support_conn_list_sync": 5, "quic_input": 6,
+            "no_relay_quic": 7, "is_credential_peer": 8, "need_p2p": 9,
+            "disable_p2p": 10, "ipv6_public_addr_provider": 11,
+        },
+        "all_true_hex": all_hex,
+        "only_support_conn_list_sync_hex": only_hex,
+        "only_is_public_server_hex": only_public_hex,
+        "default_hex": default_hex,
+        "note": "全默认时编码为空字节；'没有这个字段'与'所有位都是 false'在线上无法区分",
+    })
+}
+
+/// 导出握手消息的边界行为。
+///
+/// `HandshakeRequest` 有几个容易踩的点：
+/// 1. `network_secret_digest` 是**可选**的（某些场景不发，接收方要容忍长度为 0）
+/// 2. `features` 是 repeated string，可以为空
+/// 3. `magic` 必须精确等于 `0xd1e1a5e1`，否则对端直接断开
+fn handshake_edge_vectors() -> serde_json::Value {
+    use easytier_proto::peer_rpc::{HandshakeRequest, PeerConnNoiseMsg1Pb};
+    use easytier_proto::common::Uuid as ProtoUuid;
+    use prost::Message;
+
+    // 完整请求
+    let full = HandshakeRequest {
+        magic: 0xd1e1_a5e1,
+        my_peer_id: 123456,
+        version: 1,
+        features: vec!["liveness-echo-v1".to_string()],
+        network_name: "testnet".to_string(),
+        network_secret_digest: vec![0xAB; 32],
+    };
+    let full_hex: String = full.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 不带 digest（某些场景）
+    let no_digest = HandshakeRequest {
+        magic: 0xd1e1_a5e1,
+        my_peer_id: 123456,
+        version: 1,
+        features: vec![],
+        network_name: "testnet".to_string(),
+        network_secret_digest: vec![],
+    };
+    let no_digest_hex: String =
+        no_digest.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    // magics：官方常量与几个常见错误值，便于对照
+    let magic_correct: u32 = 0xd1e1_a5e1;
+
+    // Noise Msg1 的 UUID 编码（4 个 uint32）
+    let uuid = ProtoUuid { part1: 0x0102_0304, part2: 0x0506_0708, part3: 0x090a_0b0c, part4: 0x0d0e_0f10 };
+    let uuid_hex: String = uuid.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    let msg1 = PeerConnNoiseMsg1Pb {
+        version: 1,
+        a_network_name: "testnet".to_string(),
+        a_session_generation: None,
+        a_conn_id: Some(uuid.clone()),
+        client_encryption_algorithm: String::new(),
+        features: vec!["liveness-echo-v1".to_string()],
+    };
+    let msg1_hex: String = msg1.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    json!({
+        "handshake_request_fields": {
+            "magic": 1, "my_peer_id": 2, "version": 3,
+            "features": 4, "network_name": 5, "network_secret_digest": 6,
+        },
+        "magic": {
+            "correct": magic_correct,
+            "correct_hex": format!("0x{:08x}", magic_correct),
+            "note": "必须精确匹配；不等时对端直接断开且不说明原因（peer_conn.rs:65）",
+        },
+        "full": {
+            "input": {
+                "magic": magic_correct, "my_peer_id": 123456, "version": 1,
+                "features": ["liveness-echo-v1"], "network_name": "testnet",
+                "network_secret_digest_hex": hex::encode([0xABu8; 32]),
+            },
+            "protobuf_hex": full_hex,
+        },
+        "no_digest": {
+            "input": {
+                "magic": magic_correct, "my_peer_id": 123456, "version": 1,
+                "features": [], "network_name": "testnet",
+                "network_secret_digest_hex": "",
+            },
+            "protobuf_hex": no_digest_hex,
+            "note": "接收方必须容忍 digest 长度为 0；否则某些场景会误判为密钥错误",
+        },
+        "noise_msg1": {
+            "uuid_4x_u32": {
+                "input": { "part1": 0x01020304u32, "part2": 0x05060708u32, "part3": 0x090a0b0cu32, "part4": 0x0d0e0f10u32 },
+                "protobuf_hex": uuid_hex,
+            },
+            "msg1_protobuf_hex": msg1_hex,
+            "field_numbers": {
+                "version": 1, "a_network_name": 2, "a_session_generation": 3,
+                "a_conn_id": 4, "client_encryption_algorithm": 5, "features": 6,
+            },
         },
     })
 }

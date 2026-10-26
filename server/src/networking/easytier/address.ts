@@ -313,3 +313,80 @@ export function buildConnBitmap(
   }
   return { peerIds, bitmap };
 }
+
+/**
+ * 能力标志（`PeerFeatureFlag`）。
+ *
+ * 对照 `common.proto:250`。11 个 bool，用于节点间**能力协商**：
+ * 对端据此判断"这个节点支不支持 conn_list 同步 / 能不能当 relay /
+ * 要不要打洞"，进而决定用哪条路由策略。
+ *
+ * ## proto3 的一个易误解点
+ *
+ * 全部为 false 时**编码为空字节**。这与"没有这个字段"在线上无法区分——
+ * 不要因为解出空 message 就认为对端没发能力信息，它只是"所有能力都没开"。
+ *
+ * 这直接影响了 OSPF 的行为：`support_conn_list_sync` 为 false 时，
+ * 对端会改用位图（`RouteConnBitmap`）而不是列表来同步连接关系——
+ * 这也是为什么两种 `conn_info` 分支都必须实现。
+ */
+export interface PeerFeatureFlag {
+  isPublicServer: boolean;
+  avoidRelayData: boolean;
+  kcpInput: boolean;
+  noRelayKcp: boolean;
+  supportConnListSync: boolean;
+  quicInput: boolean;
+  noRelayQuic: boolean;
+  isCredentialPeer: boolean;
+  needP2p: boolean;
+  disableP2p: boolean;
+  ipv6PublicAddrProvider: boolean;
+}
+
+/** 字段号 → 属性名的映射，编解码共用，避免两处写错位。 */
+const FEATURE_FLAG_FIELDS: Array<[number, keyof PeerFeatureFlag]> = [
+  [1, 'isPublicServer'],
+  [2, 'avoidRelayData'],
+  [3, 'kcpInput'],
+  [4, 'noRelayKcp'],
+  [5, 'supportConnListSync'],
+  [6, 'quicInput'],
+  [7, 'noRelayQuic'],
+  [8, 'isCredentialPeer'],
+  [9, 'needP2p'],
+  [10, 'disableP2p'],
+  [11, 'ipv6PublicAddrProvider'],
+];
+
+export function encodePeerFeatureFlag(flag: PeerFeatureFlag): Buffer {
+  const parts: Buffer[] = [];
+  for (const [fieldNumber, key] of FEATURE_FLAG_FIELDS) {
+    // proto3：false 是默认值，不写
+    if (flag[key]) parts.push(encodeVarintField(fieldNumber, 1));
+  }
+  return Buffer.concat(parts);
+}
+
+export function decodePeerFeatureFlag(buffer: Buffer): PeerFeatureFlag {
+  const fields = decodeFields(buffer);
+  const flag = {} as PeerFeatureFlag;
+  for (const [fieldNumber, key] of FEATURE_FLAG_FIELDS) {
+    flag[key] = (getVarint(fields, fieldNumber) ?? 0) !== 0;
+  }
+  return flag;
+}
+
+/**
+ * `PeerConnNoiseMsg1Pb` 里 `common.UUID` 的编码（4 个 uint32）。
+ *
+ * 已经在 `noiseHandshake.ts` 实现过一份，这里为了完整性再导出一次引用。
+ * 注意 `UUID` 是**4 个 uint32**，不是 16 字节 bytes——这一点我在实现
+ * 握手时被官方精确报错纠正过：
+ *
+ * ```
+ * UnexpectedWireType { actual: LengthDelimited, expected: Varint }
+ * stack: [("Uuid","part1"), ("PeerConnNoiseMsg1Pb","a_conn_id")]
+ * ```
+ */
+export { encodeUuid, decodeUuid } from './noiseHandshake';

@@ -261,6 +261,26 @@
       "_comment": "只有 TCP/UDP 两种；隧道类型字符串（tcp/wg/quic 等）不是这个枚举"
     }
   },
+  "feature_flag": {
+    "all_true_hex": "08011001180120012801300138014001480150015801",
+    "default_hex": "",
+    "field_numbers": {
+      "avoid_relay_data": 2,
+      "disable_p2p": 10,
+      "ipv6_public_addr_provider": 11,
+      "is_credential_peer": 8,
+      "is_public_server": 1,
+      "kcp_input": 3,
+      "need_p2p": 9,
+      "no_relay_kcp": 4,
+      "no_relay_quic": 7,
+      "quic_input": 6,
+      "support_conn_list_sync": 5
+    },
+    "note": "全默认时编码为空字节；'没有这个字段'与'所有位都是 false'在线上无法区分",
+    "only_is_public_server_hex": "0801",
+    "only_support_conn_list_sync_hex": "2801"
+  },
   "flags": {
     "COMPRESSED": {
       "header_hex": "00000000000000000010000000000000",
@@ -286,6 +306,66 @@
       "header_hex": "00000000000000000008000000000000",
       "hex": "08",
       "value": 8
+    }
+  },
+  "handshake_edge": {
+    "full": {
+      "input": {
+        "features": [
+          "liveness-echo-v1"
+        ],
+        "magic": 3521226209,
+        "my_peer_id": 123456,
+        "network_name": "testnet",
+        "network_secret_digest_hex": "abababababababababababababababababababababababababababababababab",
+        "version": 1
+      },
+      "protobuf_hex": "08e1cb868f0d10c0c407180122106c6976656e6573732d6563686f2d76312a07746573746e65743220abababababababababababababababababababababababababababababababab"
+    },
+    "handshake_request_fields": {
+      "features": 4,
+      "magic": 1,
+      "my_peer_id": 2,
+      "network_name": 5,
+      "network_secret_digest": 6,
+      "version": 3
+    },
+    "magic": {
+      "correct": 3521226209,
+      "correct_hex": "0xd1e1a5e1",
+      "note": "必须精确匹配；不等时对端直接断开且不说明原因（peer_conn.rs:65）"
+    },
+    "no_digest": {
+      "input": {
+        "features": [],
+        "magic": 3521226209,
+        "my_peer_id": 123456,
+        "network_name": "testnet",
+        "network_secret_digest_hex": "",
+        "version": 1
+      },
+      "note": "接收方必须容忍 digest 长度为 0；否则某些场景会误判为密钥错误",
+      "protobuf_hex": "08e1cb868f0d10c0c40718012a07746573746e6574"
+    },
+    "noise_msg1": {
+      "field_numbers": {
+        "a_conn_id": 4,
+        "a_network_name": 2,
+        "a_session_generation": 3,
+        "client_encryption_algorithm": 5,
+        "features": 6,
+        "version": 1
+      },
+      "msg1_protobuf_hex": "08011207746573746e65742214088486880810888e9828188c96a84820909eb86832106c6976656e6573732d6563686f2d7631",
+      "uuid_4x_u32": {
+        "input": {
+          "part1": 16909060,
+          "part2": 84281096,
+          "part3": 151653132,
+          "part4": 219025168
+        },
+        "protobuf_hex": "088486880810888e9828188c96a84820909eb868"
+      }
     }
   },
   "header_layout": {
@@ -335,7 +415,7 @@
       "initiator": true,
       "responder": true
     },
-    "msg1_prefix": "3eafc152b68ff891",
+    "msg1_prefix": "5507d4d5104e98b9",
     "msg_lengths": {
       "msg1": 32,
       "msg2": 96,
