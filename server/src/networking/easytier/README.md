@@ -131,13 +131,33 @@ body: 12ab0108b49bfce00f10efa1ec8ee4dab8fed30118012a150a06...
 4. **官方响应确实是 `from=请求的 to`、`to=请求的 from`**
    `rpc/server.rs:291` 明确如此，我的实现正确。
 
-**仍未能解决**：用 Ping 学到的对端 my_peer_id 作为 `to` 仍超时；
-补上 `compression_info` 后仍超时；发畸形的加密包、发未加密的合法
-RpcResp，对端都**不产生任何日志**。
+5. **`after_received` 的 `from_peer_id` 检查是根因所在**
+   （`peer_conn.rs:205`）
+   ```rust
+   if from_peer_id != peer_id { return Some(Ok(data)); }  // 不解密，直接放行
+   ```
+   这里的 `peer_id` 是**对端自己记录的"这条连接的对端 id"**，
+   在本场景下等于它自己的 `my_peer_id`（实测两者相同）。
+   所以：
+   - `from_peer_id = 我的 id`（正确语义）→ **检查不通过 → 静默丢弃或当明文放行**
+   - `from_peer_id = 对端 id` → 检查通过 → 进入解密，但**密钥方向对不上**
 
-结论：响应包在对端的 `after_received` 或更早的管道环节被丢弃，
-而该处的丢弃是静默的。要继续必须读通 `peer_conn.rs` 的接收管道
-与 `peer_manager` 的 filter 链——这不是靠试探能完成的。
+   这就是死结：语义正确的 from 进不了解密分支，能进解密分支的 from 语义错误。
+
+### 结论：这条路径在官方连接模型下走不通
+
+官方把连接分成"发起方/接受方"两种角色，`RpcResp` 只由**接受方**回给发起方。
+我们作为**发起方（客户端）**去回 RpcResp，即使字段全对，也会被
+`after_received` 的 `from_peer_id` 检查挡掉——因为那一项期望的是
+"接受方视角的对端 id"。
+
+**要真正走通数据面，正确做法是让本实现充当"接受方"**：
+自己监听端口，等官方节点来连我们，然后按接受方的角色回 RpcResp。
+这需要实现 Noise 握手的**服务端**方向（`do_noise_handshake_as_server`），
+而不是现在的客户端方向。
+
+这条路成本明显更高（要重写握手为服务端角色、处理 admission 流程），
+而生产路径本来就走原生模块，所以这里停在此处，把结论记录清楚。
 
 ## 还没实现
 
