@@ -24,6 +24,7 @@ import { chatToResponsesResponse } from '../gateway/convert/chatToResponses';
 import { AGENT_DEFINITIONS, AgentPathResolver } from '../agents/registry';
 import { DEFAULT_TENANT_ID } from '../domain/identity';
 import fs from 'node:fs';
+import { NetworkingRuntime, type NativeLayerCheck } from '../networking/runtime';
 
 /**
  * 读磁盘上真实的 Codex 目录文件，返回其中的 slug 列表。
@@ -578,6 +579,51 @@ export function registerDiagnosticsRoutes(
           },
           agents: Object.keys(AGENT_DEFINITIONS),
         },
+      };
+    },
+  );
+
+  defineRoute(
+    app,
+    registry,
+    { method: 'GET', url: '/api/diagnostics/networking', access: 'settings:write' },
+    async () => {
+      assertEnabled(ctx);
+
+      // 设备互联的协议级自检。
+      //
+      // 这一项回答的是"原生模块编出来的字节对不对"，而不是"组网成不成功"。
+      // 后者是不可靠的信号：协议字段错了可能被对端宽容忽略，某个能力没生效
+      // （比如 liveness feature 字符串写错）完全看不出来，且没有任何日志。
+      //
+      // 自检是纯计算：不启动实例、不联网，所以随时可以跑，也不会有副作用。
+      const runtime = new NetworkingRuntime(ctx.logger);
+      const report = runtime.protocolSelfCheck();
+
+      if (report === null) {
+        return {
+          available: false,
+          ok: false,
+          reason:
+            '原生模块未编译或加载失败，无法做协议自检。' +
+            '这**不代表协议有问题**——只是没有可检查的对象。' +
+            '需要在 native/easytier-node 下编译（需 Rust 工具链）。',
+          checks: [],
+        };
+      }
+
+      return {
+        available: true,
+        ok: report.ok,
+        version: report.version,
+        checks: report.checks.map((check: NativeLayerCheck) => ({
+          name: check.layer,
+          ok: check.ok,
+          detail: check.detail,
+        })),
+        summary: report.ok
+          ? `协议自检全部通过（${report.checks.length} 层）`
+          : `有 ${report.checks.filter((c: NativeLayerCheck) => !c.ok).length} 层未通过，详见 checks`,
       };
     },
   );

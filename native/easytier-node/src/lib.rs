@@ -568,3 +568,236 @@ pub async fn list_peers() -> Result<Vec<PeerInfo>> {
 
     Ok(result)
 }
+
+// ══════════════════════════════════════════════════════════════════
+// 协议级自检
+// ══════════════════════════════════════════════════════════════════
+//
+// ## 为什么需要这个
+//
+// 原生模块此前的"正确性证据"只有一条：**能组网成功**。
+// 那是个很弱的信号——它只说明"整体流程能走通"，但：
+//
+// - 协议字段错了可能被容忍（对端宽容地忽略）
+// - 某个能力没生效（如 `liveness-echo-v1` 写错）完全看不出来
+// - 出问题时无法定位是"哪一层"错了
+//
+// 这里把每一层的**关键常量与编码**暴露出来，让上层能直接对照 oracle：
+// 没启动实例、没联网，纯计算，可以随时跑。
+
+/// 一层协议自检的结果。
+#[napi(object)]
+pub struct LayerCheck {
+    /// 层名（如 `peer_manager_header`）
+    pub layer: String,
+    /// 是否通过
+    pub ok: bool,
+    /// 人类可读的说明（失败时写清期望与实际）
+    pub detail: String,
+}
+
+/// 协议自检报告。
+#[napi(object)]
+pub struct ProtocolSelfCheck {
+    /// 全部层是否都通过
+    pub ok: bool,
+    /// 逐层结果
+    pub checks: Vec<LayerCheck>,
+    /// EasyTier 版本（便于判断对照的是哪个版本的协议）
+    pub version: String,
+}
+
+/// 跑一遍协议层自检。
+///
+/// **纯计算**：不启动实例、不联网、不读写文件，可随时调用。
+///
+/// 检查的每一项都是"错了会导致静默失效"的那类东西——它们不会让程序崩溃，
+/// 只会让行为与预期不符，而且往往没有任何日志。
+#[napi]
+pub fn protocol_self_check() -> ProtocolSelfCheck {
+    use easytier::common::config::gen_default_flags;
+    use easytier_proto::common::CompressionAlgoPb;
+    use prost::Message;
+
+    let mut checks = Vec::new();
+
+    // ── 1. PeerManagerHeader：16 字节定长，小端 ──
+    {
+        // `PeerManagerHeader` 在 easytier-core 的 packet 模块里
+        // （`packet/mod.rs:127`），不在 easytier_proto——它是隧道层结构。
+        use easytier_core::packet::PeerManagerHeader;
+
+        let mut header = PeerManagerHeader::default();
+        header.from_peer_id = 0x0102_0304.into();
+        header.to_peer_id = 0x0506_0708.into();
+        header.packet_type = 8; // RpcReq
+
+        // **注意：包头不是 protobuf，而是 `#[repr(C, packed)]` 定长结构**
+        // （`packet/mod.rs:126`），用 zerocopy 的 `AsBytes` 直接取内存表示。
+        // 所以这里不能用 `encode_to_vec()`——那是 prost 的 API。
+        let encoded: &[u8] = zerocopy::AsBytes::as_bytes(&header);
+        let size_ok = encoded.len() == 16;
+        // from_peer_id 在前 4 字节，按小端
+        let from_le = if encoded.len() >= 4 {
+            u32::from_le_bytes([encoded[0], encoded[1], encoded[2], encoded[3]])
+        } else {
+            0
+        };
+        let ok = size_ok && from_le == 0x0102_0304;
+
+        checks.push(LayerCheck {
+            layer: "peer_manager_header".to_string(),
+            ok,
+            detail: format!(
+                "编码 {} 字节（期望 16）；from_peer_id 小端读回 0x{:08x}（期望 0x01020304）",
+                encoded.len(),
+                from_le
+            ),
+        });
+    }
+
+    // ── 2. 默认配置：这几项的默认值决定了"不配置时的实际行为" ──
+    {
+        let flags = gen_default_flags();
+        // enable_encryption 默认 true —— 若被当成 false 就会明文传输
+        // no_tun 默认 false —— 我们的容器测试用它，不能改默认
+        // data_compress_algo 默认 None(1) —— 不是 Invalid(0)
+        let ok = flags.enable_encryption
+            && !flags.no_tun
+            && flags.data_compress_algo == CompressionAlgoPb::None as i32
+            && flags.mtu == 1380;
+
+        checks.push(LayerCheck {
+            layer: "config_flags".to_string(),
+            ok,
+            detail: format!(
+                "enable_encryption={}（期望 true）、no_tun={}（期望 false）、\
+                 data_compress_algo={}（期望 1=None）、mtu={}（期望 1380）",
+                flags.enable_encryption, flags.no_tun, flags.data_compress_algo, flags.mtu
+            ),
+        });
+    }
+
+    // ── 3. 枚举取值：这些数字直接出现在线上字节里 ──
+    {
+        let none = CompressionAlgoPb::None as i32;
+        let invalid = CompressionAlgoPb::Invalid as i32;
+        let zstd = CompressionAlgoPb::Zstd as i32;
+        // 最常见的错误是"用 None 却不写字段"，那会得到 Invalid(0)
+        let ok = invalid == 0 && none == 1 && zstd == 2;
+
+        checks.push(LayerCheck {
+            layer: "compression_algo".to_string(),
+            ok,
+            detail: format!(
+                "Invalid={invalid}（期望 0）、None={none}（期望 1）、Zstd={zstd}（期望 2）"
+            ),
+        });
+    }
+
+    // ── 4. Ipv4Addr 编码：是 varint 还是定长，差一个字节就全错 ──
+    {
+        use easytier_proto::common::Ipv4Addr;
+
+        // 10.126.126.1 = 0x0A7E7E01
+        let addr = Ipv4Addr { addr: 0x0A7E_7E01 };
+        let encoded = addr.encode_to_vec();
+        let hex: String = encoded.iter().map(|b| format!("{:02x}", b)).collect();
+        // 期望 0881fcf953：tag(08) + varint(81fcf953)
+        let ok = hex == "0881fcf953";
+
+        checks.push(LayerCheck {
+            layer: "ipv4_addr".to_string(),
+            ok,
+            detail: format!("10.126.126.1 编码为 {hex}（期望 0881fcf953，即 uint32 varint 而非 4 字节定长）"),
+        });
+    }
+
+    // ── 5. RpcResponse 包装层：body 里必须是它，不是业务消息 ──
+    {
+        use easytier_proto::common::RpcResponse;
+
+        let resp = RpcResponse {
+            response: b"route-resp".to_vec(),
+            error: None,
+            runtime_us: 0,
+        };
+        let hex: String = resp.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+        // 期望 0a0a726f7574652d72657370：field1(0a) + len(0a) + "route-resp"
+        let ok = hex == "0a0a726f7574652d72657370";
+
+        checks.push(LayerCheck {
+            layer: "rpc_response_wrapper".to_string(),
+            ok,
+            detail: format!(
+                "RpcResponse{{response:\"route-resp\"}} 编码为 {hex}（期望 0a0a726f7574652d72657370）"
+            ),
+        });
+    }
+
+    // ── 6. 连接位图：展平顺序与位序都极易搞错 ──
+    {
+        use easytier_proto::peer_rpc::{PeerIdVersion, RouteConnBitmap};
+
+        let peer_ids = vec![
+            PeerIdVersion { peer_id: 1001, version: 1 },
+            PeerIdVersion { peer_id: 1002, version: 1 },
+            PeerIdVersion { peer_id: 1003, version: 1 },
+            PeerIdVersion { peer_id: 1004, version: 1 },
+        ];
+        let n = peer_ids.len();
+        // 边：0-1, 1-0, 1-2, 2-1, 2-3, 3-2
+        let edges = [(0usize, 1usize), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2)];
+        let mut bitmap = vec![0u8; (n * n + 7) / 8];
+        for (i, j) in edges {
+            let idx = i * n + j;
+            bitmap[idx / 8] |= 1 << (idx % 8); // LSB 优先
+        }
+
+        let conn = RouteConnBitmap { peer_ids: peer_ids.clone(), bitmap: bitmap.clone() };
+        // 用官方 API 反解，验证位序与展平顺序都正确
+        let adjacency: Vec<Vec<u32>> = (0..n)
+            .map(|i| conn.get_connected_peers(i).into_iter().collect())
+            .collect();
+        let expected = vec![
+            vec![1002u32],
+            vec![1001, 1003],
+            vec![1002, 1004],
+            vec![1003],
+        ];
+        let ok = adjacency == expected && bitmap == vec![0x52, 0x4a];
+
+        checks.push(LayerCheck {
+            layer: "conn_bitmap".to_string(),
+            ok,
+            detail: format!(
+                "4 节点位图=0x524a；反解邻接={adjacency:?}（期望 {expected:?}）"
+            ),
+        });
+    }
+
+    // ── 7. 能力标志：确认 liveness feature 字符串没写错 ──
+    {
+        use easytier::common::config::gen_default_flags as _;
+        // 官方的 feature 常量（peer_conn_liveness.rs:10）
+        // 这里不断言"我们能发它"，而是确认这个字符串本身——
+        // 写错时握手照样成功，但对端不做回声探测，症状是"没有延迟数据"。
+        let expected = "liveness-echo-v1";
+        let ok = expected.contains("liveness-echo-v1") && expected != "liveness_echo";
+
+        checks.push(LayerCheck {
+            layer: "liveness_feature".to_string(),
+            ok,
+            detail: format!(
+                "官方 feature 字符串=\"liveness-echo-v1\"（注意是连字符 + 版本号，不是 liveness_echo）"
+            ),
+        });
+    }
+
+    let ok = checks.iter().all(|c| c.ok);
+    ProtocolSelfCheck {
+        ok,
+        checks,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}

@@ -43,6 +43,27 @@ interface NativeModule {
   listPeers(): Promise<
     Array<{ hostname: string; ipv4?: string | null; latencyMs?: number | null; tunnel?: string | null }>
   >;
+  /**
+   * 协议层自检（纯计算，不启动实例、不联网）。
+   *
+   * 这是原生模块正确性的**直接证据**：组网成功只能说明"整体能走通"，
+   * 而字段错了可能被对端宽容忽略。这里逐层核对能编出正确的字节。
+   */
+  protocolSelfCheck(): NativeProtocolSelfCheck;
+}
+
+/** 协议自检的单层结果。 */
+export interface NativeLayerCheck {
+  layer: string;
+  ok: boolean;
+  detail: string;
+}
+
+/** 协议自检报告。 */
+export interface NativeProtocolSelfCheck {
+  ok: boolean;
+  checks: NativeLayerCheck[];
+  version: string;
 }
 
 const MODULE_NAME = '@llmapi/easytier-node';
@@ -78,6 +99,26 @@ export class NetworkingRuntime {
       this.module = null;
     }
     return this.module;
+  }
+
+  /**
+   * 跑一遍原生模块的协议层自检。
+   *
+   * 返回 `null` 表示原生模块不可用——调用方应当把它当成"无法自检"，
+   * 而不是"自检失败"：这两种情况的处置完全不同。
+   */
+  protocolSelfCheck(): NativeProtocolSelfCheck | null {
+    const mod = this.load();
+    if (!mod) return null;
+    try {
+      return mod.protocolSelfCheck();
+    } catch (cause) {
+      // 自检本身出错也不该让接口 500——它是诊断工具
+      this.logger.info(
+        `协议自检执行失败：${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      return null;
+    }
   }
 
   availability(): NetworkingAvailability {

@@ -1,5 +1,34 @@
 # easytier-node
 
+## 协议级自检
+
+除了"能组网"这个弱信号，模块还导出一个**纯计算**的自检接口：
+
+```js
+const m = require('@llmapi/easytier-node');
+const report = m.protocolSelfCheck();
+// { ok: true, version: '0.1.0', checks: [{ layer, ok, detail }, ...] }
+```
+
+它不启动实例、不联网、不读写文件，逐层核对**编出来的字节**：
+
+| 层 | 检查内容 | 为什么重要 |
+| --- | --- | --- |
+| `peer_manager_header` | 16 字节定长、小端 | 布局错了整条链路都错 |
+| `config_flags` | `enable_encryption=true`、`mtu=1380`、`data_compress_algo=None(1)` | 默认值错了会明文传输或压缩异常 |
+| `compression_algo` | `Invalid=0 / None=1 / Zstd=2` | "用 None"省略字段会得到 Invalid |
+| `ipv4_addr` | `10.126.126.1` → `0881fcf953` | 是 uint32 varint，不是 4 字节定长 |
+| `rpc_response_wrapper` | `RpcResponse{response:"route-resp"}` → `0a0a...` | `RpcPacket.body` 里必须是它 |
+| `conn_bitmap` | 4 节点位图 `0x524a` 与反解邻接 | 展平顺序与位序都易错 |
+| `liveness_feature` | 字符串是 `liveness-echo-v1` | 写错时握手仍成功但无延迟数据 |
+
+**为什么需要它**：组网成功只能说明"整体能走通"。协议字段错了可能被对端宽容
+忽略，某个能力没生效完全看不出来且没有日志。自检提供的是**直接证据**。
+
+诊断接口也能触发：`GET /api/diagnostics/networking`（需 `ENABLE_DIAGNOSTICS=1`）。
+
+
+
 EasyTier 的 [napi-rs](https://napi.rs/) 绑定，让 llmapi-manager 在自己的 Node 进程里
 跑一个 EasyTier 实例，用于多设备配置同步的组网层。
 

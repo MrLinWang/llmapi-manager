@@ -59,6 +59,21 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 # url：构造监听地址（`TomlConfig::set_listeners` 收 `Vec<url::Url>`）。
 # 版本与 easytier 内部使用的保持一致，避免出现两个 url crate。
 url = "2"
+# easytier-proto：协议级自检要用 protobuf 类型（PeerManagerHeader、
+# CompressionAlgoPb、RouteConnBitmap 等）直接编码出字节与 oracle 对照。
+# 它本身是 git 依赖 `easytier` 的传递依赖，这里显式声明是为了能在本 crate
+# 里直接 `use easytier_proto::...`——否则只能通过 easytier 的 re-export 拿，
+# 而那边并非所有类型都 re-export 出来。
+easytier-proto = { git = "https://github.com/EasyTier/EasyTier.git", tag = "v2.7.0" }
+# prost：自检要用 `Message::encode_to_vec()` 直接编码 protobuf 结构。
+# 官方用 0.13.x，这里跟随，避免两个 prost 版本导致类型不兼容。
+prost = "0.14"
+# zerocopy：`PeerManagerHeader` 是 `#[repr(C, packed)]` 结构，用 AsBytes 取字节。
+# 版本跟随 easytier-core 的依赖，避免出现两个 zerocopy。
+zerocopy = { version = "0.7.35", features = ["derive"] }
+# easytier-core：`PeerManagerHeader` 定义在这里（packet/mod.rs:127），
+# 不在 easytier-proto。自检要直接构造它来验证 16 字节布局。
+easytier-core = { git = "https://github.com/EasyTier/EasyTier.git", tag = "v2.7.0" }
 easytier = { git = "https://github.com/EasyTier/EasyTier.git", tag = "v2.7.0", default-features = false, features = [
   "tun",
   "wireguard",
