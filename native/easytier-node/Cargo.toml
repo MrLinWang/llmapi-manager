@@ -88,6 +88,22 @@ easytier = { git = "https://github.com/EasyTier/EasyTier.git", tag = "v2.7.0", d
   # （`instance/config.rs:324` 的 `force_smoltcp` 分支）。没有这个 feature，
   # 关掉 TUN 就等于关掉网络层——节点会显示 running 但连不上任何人。
   "smoltcp",
+  # socks5：**port-forward gateway 的开关**。名字看起来只和 SOCKS5 代理有关，
+  # 实际它同时门控整个 gateway（含 port_forwards）。
+  #
+  # 源码里 `easytier/src/instance/config.rs:52` 是：
+  #     gateway_enabled: cfg!(feature = "socks5")
+  # 而 `easytier-core/src/instance/config.rs:311` 会据此清空转发规则：
+  #     port_forwards: if host.ignore_unsupported_config && !host.gateway_enabled {
+  #         Vec::new()   // ← 规则在这一步被丢掉
+  #     } else { config.get_port_forwards() }
+  #
+  # 症状极具误导性：`set_port_forwards()` 写入成功、回读也存在，
+  # 但端口始终不监听；EasyTier 日志里没有任何 gateway 相关输出，
+  # 既没成功也没报错。查这个花了很久，所以在这里写明。
+  #
+  # 除了数据面，它也是"无需 TUN 就能验证端口转发"的前提。
+  "socks5",
   # tcp-hole-punch：TCP 打洞。两端都在 NAT 后时靠它建连；
   # 缺了它就只能等对端直连或走中继。
   "tcp-hole-punch",

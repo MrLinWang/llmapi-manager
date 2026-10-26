@@ -105,3 +105,40 @@ describe('原生模块协议自检', () => {
     expect(detail).toContain('mtu=1380');
   });
 });
+
+describe('原生模块的 gateway 能力（port-forward 的前提）', () => {
+  it('Cargo.toml 启用 socks5 feature（否则 port_forwards 静默失效）', () => {
+    // 这条断言防的是"有人清理 feature 列表时误删 socks5"。
+    //
+    // 为什么值得单独测：`socks5` 名字看起来只与 SOCKS5 代理有关，
+    // 实际它门控整个 gateway——
+    //   easytier/src/instance/config.rs:52  gateway_enabled: cfg!(feature = "socks5")
+    //   easytier-core/src/instance/config.rs:311  据此清空 port_forwards
+    //
+    // 缺了它时：set_port_forwards 写入成功、回读也有、但端口永不监听，
+    // 且日志里没有任何 gateway 输出。症状毫无指向性，排查成本极高。
+    const cargoToml = fs.readFileSync(
+      path.join(__dirname, '../../native/easytier-node/Cargo.toml'),
+      'utf8',
+    );
+
+    // 只看 easytier 依赖块的 features 列表
+    const easytierBlock = cargoToml.slice(cargoToml.indexOf('easytier = {'));
+    const featuresStart = easytierBlock.indexOf('features = [');
+    const featuresEnd = easytierBlock.indexOf(']', featuresStart);
+    const features = easytierBlock.slice(featuresStart, featuresEnd);
+
+    expect(features).toContain('"socks5"');
+    // smoltcp 是 socks5 的依赖，也必须在
+    expect(features).toContain('"smoltcp"');
+  });
+
+  it('Cargo.toml 启用 smoltcp feature（noTun 模式的前提）', () => {
+    // noTun 时 EasyTier 走用户态协议栈；缺 smoltcp 会"启动了但连不上任何人"
+    const cargoToml = fs.readFileSync(
+      path.join(__dirname, '../../native/easytier-node/Cargo.toml'),
+      'utf8',
+    );
+    expect(cargoToml).toContain('"smoltcp"');
+  });
+});

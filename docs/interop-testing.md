@@ -147,68 +147,88 @@ node scripts/interop-check.mjs --ipv4 10.126.126
 
 ## 八、数据面（数据能否通过虚拟网络传输）
 
-控制面通了（`peerCount` 到 1）不等于数据能过。要验证数据面，需要一条
-**能在用户态走的通道**。
+控制面通了（`peerCount` 到 1）不等于数据能过。数据面要单独验证。
 
-### 方案一：端口转发（当前环境不可用）
+### 前提：原生模块必须启用 `socks5` feature
 
-EasyTier 有个 port-forward gateway，能把本机端口映射到虚拟网络内的地址，
-理论上不需要 TUN 就能验证：
+`native/easytier-node/Cargo.toml` 的 `easytier` 依赖里必须有 `"socks5"`。
+
+这一点**极易踩坑**：`socks5` 名字看起来只与 SOCKS5 代理有关，实际它门控
+整个 port-forward gateway。源码两处：
+
+```rust
+// easytier/src/instance/config.rs:52
+gateway_enabled: cfg!(feature = "socks5"),
+
+// easytier-core/src/instance/config.rs:311 —— 转发规则在这里被清空
+port_forwards: if host.ignore_unsupported_config && !host.gateway_enabled {
+    Vec::new()
+} else {
+    config.get_port_forwards()
+}
+```
+
+缺这个 feature 的症状**完全没有指向性**：
+
+- `set_port_forwards()` 写入成功
+- `config.get_port_forwards()` 回读得到规则
+- `CoreInstanceConfig::from_toml()` 之后也还在
+- 但端口永远不监听
+- EasyTier 日志里没有任何 gateway 输出，既没成功也没报错
+
+排查时先确认这一条，能省掉大量时间。
+
+### 运行
+
+```bash
+node scripts/dataplane-check.mjs
+```
+
+实测输出：
 
 ```
+  控制面已建连（B 看到 node-a）
+  转发端口就绪（127.0.0.1:18081）
+
+  开始传输 65536 字节……
+
+结果
+  ✅ 数据成功通过虚拟网络传输
+     收到 65536 字节，耗时 4ms
+     约 16000 KiB/s
+     内容校验：✅ 一致
+```
+
+大数据量：
+
+```bash
+node scripts/dataplane-check.mjs --size 1048576
+# 收到 1048576 字节，耗时 11ms，约 93091 KiB/s，内容校验一致
+```
+
+### 它验证了什么
+
+不只是"能连上"——脚本会校验字节内容（服务端发 `i % 251` 的确定性序列），
+所以能发现数据损坏，而不只是连接失败。
+
+### 原理
+
+`noTun` 模式没有内核网卡，无法 ping 虚拟 IP。改用 EasyTier 自己的
+port-forward gateway，全程用户态：
+
+```
+节点 A 监听虚拟网络里的 10.126.126.1:18080
 节点 B 配转发：127.0.0.1:18081 → 10.126.126.1:18080
 在 B 上访问 127.0.0.1:18081，流量经虚拟网络到达 A 的服务
 ```
 
-`scripts/dataplane-check.mjs` 就是按这个思路写的（含内容校验，
-不只验证"能连上"）。
+### 备选：真实 TUN
 
-**但在当前环境实测不工作**：gateway 不绑定端口。
-
-这不是脚本或调用方式的问题，做过对照实验：
-
-| 怀疑点 | 实测结果 |
-| --- | --- |
-| `set_port_forwards` 调用方式 | 去掉原生模块，用纯 Rust 直接调，同样不绑定 |
-| 配置没写进去 | 回读确认规则存在、地址正确 |
-| `no_tun = true` 导致 | `no_tun` 是否为 true 都不绑定 |
-| `smoltcp` feature 缺失 | `cargo tree` 确认 `proxy-smoltcp-stack` 已启用 |
-| `gateway_enabled` / `startup_plan.gateway` | 源码里默认都是 true |
-| 绑定慢 | 等 17 秒仍不绑定 |
-
-且 EasyTier 日志里**没有任何 gateway 相关输出**——既没成功也没报错。
-
-> 这是 EasyTier v2.7.0 在 `create_native_instance` 路径下的行为，
-> 尚未查到根因。若上游修复或找到正确的启用方式，脚本不需要改。
-
-### 方案二：真实 TUN（需要特权）
-
-去掉 `noTun`，用 root 或 `CAP_NET_ADMIN` 运行，然后直接验证虚拟 IP：
-
-```bash
-# 两个节点都要 noTun: false，且能建 /dev/net/tun
-# 然后：
-ping 10.126.126.2
-nc -zv 10.126.126.2 8080
-```
-
-前提条件（缺一不可）：
+需要能 ping 虚拟 IP 时，去掉 `noTun` 并要求：
 
 - `/dev/net/tun` 存在
-- 进程有 `CAP_NET_ADMIN`
-- 或者说：以 root 运行
+- 有 `CAP_NET_ADMIN`（或 root）
 
-容器里通常需要 `--cap-add=NET_ADMIN --device /dev/net/tun`。
-
-**本仓库的开发环境不具备这些条件**（非 root、无 `/dev/net/tun`、
-`CapEff` 全零），所以这条路径没有在此验证过。
-
-### 判断该用哪个
-
-```bash
-# 有没有 TUN 能力
-ls /dev/net/tun && grep CapEff /proc/self/status
-```
-
-- 能建 TUN → 用方案二，最直接
-- 不能 → 方案一目前不可用，数据面验证只能推迟
+容器里需要 `--cap-add=NET_ADMIN --device /dev/net/tun`。
+本仓库开发环境不具备这些条件（非 root、无 `/dev/net/tun`、`CapEff` 全零），
+所以走的是端口转发这条路。
