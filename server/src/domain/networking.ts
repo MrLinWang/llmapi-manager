@@ -77,6 +77,22 @@ export interface NetworkingStatus extends NetworkingAvailability {
   running: boolean;
   virtualIpv4: string | null;
   peerCount: number;
+  /**
+   * 组网是否**真的**工作起来了。
+   *
+   * `running` 只表示 EasyTier 的实例对象已建立（`is_ready()` 为真），
+   * 而它可能在没有 TUN 设备的环境里"成功"启动——容器缺 `CAP_NET_ADMIN`
+   * 或宿主机没有 `/dev/net/tun` 时就是如此：
+   * `startNode()` 返回成功、`running` 为真，但虚拟网卡根本没建、
+   * 也就永远连不上任何节点。
+   *
+   * 这种"两端都不报错、只是不工作"的状态必须能被看出来，否则用户会以为
+   * 配错了网络名或密钥，去反复改那些其实没问题的参数。
+   * 判据是"拿到了虚拟 IP"——没有 IP 就没有可用的虚拟网络。
+   */
+  functional: boolean;
+  /** 不工作的原因，直接展示给用户 */
+  functionalReason: string | null;
 }
 
 /** 对端节点信息，用于在界面上确认"两台机器互相看见了"。 */

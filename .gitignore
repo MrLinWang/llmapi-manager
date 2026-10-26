@@ -94,3 +94,13 @@ Desktop.ini
 .cxtest
 .wt
 *.bak-*
+
+# ── Rust 工具链与构建（native/ 下的 N-API 模块）───────────────────────
+# 本地安装的 Rust 工具链（家目录只读时临时装到仓库内，绝不能提交）
+/.rust-toolchain/
+# cargo 的构建产物与缓存；原生模块的 .node 二进制由构建生成
+/native/*/target/
+/native/*/.cargo/
+# 编译出的原生二进制（各平台各自构建，不入库）
+/native/*/*.node
+# Cargo.lock 对二进制 crate 应当提交（锁定依赖版本），所以不忽略它

@@ -3,9 +3,14 @@
 //! 目标：让 llmapi-manager 在自己的 Node 进程内跑一个 EasyTier 实例，
 //! 复用官方协议实现，从而天然兼容官方中继服务器与其它 EasyTier 节点。
 //!
-//! ## 未在本地编译验证
+//! ## 已验证
 //!
-//! 本机**没有 Rust 工具链**（`cargo` / `rustc` 都不存在），无法 `cargo build`。
+//! 已在 Linux x86_64 上 `cargo build --release` 通过，产物可被 Node 加载，
+//! 四个接口均可用，`start_node` 能真实启动实例。Windows / macOS 未验证。
+//!
+//! 写作初期本机没有 Rust 工具链，所以下面每个调用都先在 `ref/EasyTier/` 里
+//! 确认过签名；后来装上工具链做了真编译，发现的两处问题已修（`ipv4: null`
+//! 的 napi 映射、缺失的 `index.js` 加载器），详见 README。
 //! 因此这里每个调用都先在 `ref/EasyTier/` 里确认过签名，源码位置写在调用旁边。
 //! 核对清单与构建步骤见 `README.md`。
 //!

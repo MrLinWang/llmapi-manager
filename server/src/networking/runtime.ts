@@ -28,7 +28,15 @@ interface NativeModule {
     networkSecret: string;
     peers: string[];
     hostname: string;
-    ipv4?: string | null;
+    /**
+     * 期望的虚拟 IP。
+     *
+     * **类型只写 `string | undefined`，不要写 `null`**：napi-rs 在
+     * `#[napi(object)]` 的结构体上把 `Option<String>` 映射成"可省略但不可为 null"，
+     * 传 `null` 会抛 `Failed to convert JavaScript value Null into rust type String`。
+     * 这个错误在启动时才出现、且文案像类型系统内部问题，很容易被误判成 Rust 代码写错了。
+     */
+    ipv4?: string;
   }): Promise<void>;
   stopNode(): Promise<void>;
   nodeStatus(): Promise<{ running: boolean; virtualIpv4?: string | null; peerCount: number }>;
@@ -95,17 +103,31 @@ export class NetworkingRuntime {
         running: false,
         virtualIpv4: null,
         peerCount: 0,
+        functional: false,
+        functionalReason: null,
       };
     }
 
     try {
       const status = await this.load()!.nodeStatus();
+      const virtualIpv4 = status.virtualIpv4 ?? null;
+      // 没有虚拟 IP 说明网卡没建起来——最常见的原因是容器缺 CAP_NET_ADMIN、
+      // 或宿主机没有 /dev/net/tun。此时 startNode 是"成功"的、running 也是 true，
+      // 但网络实际不存在。必须显式标出来，否则用户会去反复改网络名/密钥。
+      const functional = status.running && virtualIpv4 !== null;
       return {
         ...availability,
         enabled: config.enabled,
         running: status.running,
-        virtualIpv4: status.virtualIpv4 ?? null,
+        virtualIpv4,
         peerCount: status.peerCount ?? 0,
+        functional,
+        functionalReason:
+          status.running && !functional
+            ? 'EasyTier 已启动但未取得虚拟 IP，说明虚拟网卡没能创建。' +
+              '常见原因：容器缺少 CAP_NET_ADMIN 权限，或宿主机没有 /dev/net/tun。' +
+              '请用 `--cap-add=NET_ADMIN` 并挂载 /dev/net/tun，或以 root 运行。'
+            : null,
       };
     } catch (cause) {
       this.logger.warn('读取 EasyTier 状态失败', cause);
@@ -115,6 +137,8 @@ export class NetworkingRuntime {
         running: false,
         virtualIpv4: null,
         peerCount: 0,
+        functional: false,
+        functionalReason: null,
       };
     }
   }
@@ -162,7 +186,9 @@ export class NetworkingRuntime {
       networkSecret: config.networkSecret,
       peers: config.peers,
       hostname: config.hostname,
-      ipv4: config.ipv4,
+      // null → undefined：见上面 NativeModule.startNode 的说明。
+      // 配置层用 null 表示"让 EasyTier 自动分配"，而 napi 只接受省略。
+      ...(config.ipv4 === null ? {} : { ipv4: config.ipv4 }),
     });
   }
 

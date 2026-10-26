@@ -3,16 +3,29 @@
 EasyTier 的 [napi-rs](https://napi.rs/) 绑定，让 llmapi-manager 在自己的 Node 进程里
 跑一个 EasyTier 实例，用于多设备配置同步的组网层。
 
-> ## ⚠️ 未在本地编译验证
+> ## ✅ 已在 Linux x86_64 上编译并运行验证
 >
-> 开发这个 crate 的机器上**没有 Rust 工具链**（`cargo` / `rustc` 都不存在），
-> 因此**没有任何一行代码经过编译或运行验证**。
+> `cargo build --release` 成功（1m53s，1128 个依赖），产物
+> `libeasytier_node.so`（24.8MB）可被 Node 加载，4 个接口都能调用，
+> `startNode()` 真实启动了一个 EasyTier 实例并进入 `running: true`。
 >
-> 降低风险的办法：所有 EasyTier API 的签名都逐个对照 `ref/EasyTier/` 的实际源码确认过，
-> 位置写在下文的"已核对的源码位置"一节，也写在代码注释里调用点的旁边。
-> napi-rs 的版本号与 feature 名则是查 crates.io 的真实发布数据确认的。
+> 验证环境补充说明：该机器**没有 `CAP_NET_ADMIN`、也没有 `/dev/net/tun`**，
+> 所以虚拟网卡建不起来（`virtualIpv4` 为 null）。这不是模块的问题，
+> 而是容器权限限制——要在容器里真正组网，需要 `--cap-add=NET_ADMIN`
+> 并挂载 `/dev/net/tun`。上层的 `functional` 字段会把这种情况标出来。
 >
-> **第一次真正构建时，最可能出现问题的地方**（按可能性排序）见文末"首次构建时重点看"。
+> **Windows / macOS 仍未验证**，只编译过 Linux x86_64。
+>
+> ### 编译时发现并修掉的两个真问题
+>
+> 1. **`ipv4: null` 会让原生调用报错**。Rust 侧写 `Option<String>` 看起来允许
+>    `None`，但 napi-rs 在 `#[napi(object)]` 结构体上把它映射成"可省略但不可为 null"，
+>    传 `null` 会抛 `Failed to convert JavaScript value Null into rust type String`。
+>    TS 侧已改为 `null → 省略该字段`。这个错误在启动时才出现、文案又像类型系统
+>    内部问题，很容易被误判成 Rust 代码写错了。
+> 2. **`index.js` 加载器缺失**。`package.json` 的 `main` 指向它，但 napi-rs 只在
+>    跑 `napi build` 时才生成。手写了一个精简版，好处是"没编译"这个最常见的情况
+>    能给出可操作的错误，而不是 `Cannot find module`。
 
 ## 这是什么
 

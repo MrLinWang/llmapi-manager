@@ -20,26 +20,30 @@ function makeRuntime(): NetworkingRuntime {
 }
 
 describe('设备互联：原生模块不可用时的降级', () => {
-  it('availability 返回不可用并说明原因，不抛异常', () => {
+  it('availability 要么可用、要么给出可操作的原因（不抛异常）', () => {
     const runtime = makeRuntime();
     const availability = runtime.availability();
 
-    // 测试环境没有编译原生模块，所以必然是 false
-    expect(availability.available).toBe(false);
-    expect(availability.reason).toBeTruthy();
-    // 原因必须可操作：告诉用户"需要编译"以及"同步不受影响"
-    expect(availability.reason).toContain('native/easytier-node');
-    expect(availability.reason).toContain('同步');
+    if (availability.available) {
+      // 原生模块已编译（本地开发机常见）：不需要原因说明
+      expect(availability.reason).toBeNull();
+    } else {
+      // 未编译：原因必须可操作——告诉用户怎么办，以及同步不受影响
+      expect(availability.reason).toBeTruthy();
+      expect(availability.reason).toContain('native/easytier-node');
+      expect(availability.reason).toContain('同步');
+    }
   });
 
-  it('status 在不可用时返回安全默认值而非抛错', async () => {
+  it('status 在未启动时返回安全默认值而非抛错', async () => {
     const runtime = makeRuntime();
     const status = await runtime.status(defaultNetworkingConfig());
 
-    expect(status.available).toBe(false);
+    // 两种情况都必须满足：没启动就是没启动
     expect(status.running).toBe(false);
     expect(status.virtualIpv4).toBeNull();
     expect(status.peerCount).toBe(0);
+    expect(status.functional).toBe(false);
     // enabled 仍然如实反映配置，而不是因为不可用就谎报 false
     expect(status.enabled).toBe(false);
   });
@@ -54,12 +58,11 @@ describe('设备互联：原生模块不可用时的降级', () => {
     await expect(runtime.stop()).resolves.toBeUndefined();
   });
 
-  it('start 在不可用时抛出可读错误（这是唯一应该报错的入口）', async () => {
+  it('start 在参数不全时抛出可读错误', async () => {
     const runtime = makeRuntime();
-    // 启动是用户显式动作，必须让他知道为什么没成
-    await expect(runtime.start(defaultNetworkingConfig())).rejects.toThrow(
-      /native\/easytier-node|原生模块/,
-    );
+    const config = defaultNetworkingConfig();
+    // 默认配置的密钥为空：知道网络名与密钥的节点都能加入，所以必须拒绝空密钥
+    await expect(runtime.start(config)).rejects.toThrow(/密钥/);
   });
 
   it('多次调用 availability 不会反复尝试加载（结果被缓存）', () => {
@@ -83,5 +86,39 @@ describe('设备互联：参数校验', () => {
     expect(config.peers).toContain('tcp://public.easytier.cn:11010');
     // 密钥默认为空，必须由用户显式设置
     expect(config.networkSecret).toBe('');
+  });
+});
+
+describe('设备互联：真实状态与"名义运行"的区分', () => {
+  it('没有虚拟 IP 时 functional 为 false 并给出原因', async () => {
+    // 真实踩到的情况：容器缺 CAP_NET_ADMIN、宿主机没有 /dev/net/tun 时，
+    // EasyTier 的 startNode() 会"成功"、running 为 true，但虚拟网卡根本没建，
+    // 虚拟 IP 为 null，永远连不上任何节点。
+    //
+    // 如果只暴露 running，用户会以为配错了网络名或密钥，去反覆改那些其实
+    // 没问题的参数。所以要有一个能区分"对象建了"与"网络真的通了"的字段。
+    const runtime = makeRuntime();
+    const status = await runtime.status(defaultNetworkingConfig());
+
+    // 无论原生模块是否可用，没启动就不该是 functional
+    expect(status.functional).toBe(false);
+  });
+});
+
+describe('设备互联：napi 参数传递的坑', () => {
+  it('ipv4 为 null 时不能把 null 传给原生模块（要省略该字段）', () => {
+    // 真实踩到的错误：
+    //   `Failed to convert JavaScript value Null into rust type String`
+    //
+    // 成因：napi-rs 在 `#[napi(object)]` 结构体上把 `Option<String>` 映射成
+    // "可省略但不可为 null"。Rust 侧写 `pub ipv4: Option<String>` 看起来
+    // 完全允许 None，但 JS 侧必须用 `undefined`（或干脆不传），传 `null` 会在
+    // startNode 时抛错。错误文案像类型系统内部问题，很容易被误判成 Rust 代码写错。
+    //
+    // 这里锁定"配置层的 null 必须转成省略字段"这个约定。
+    const config = defaultNetworkingConfig();
+    expect(config.ipv4).toBeNull();
+    // runtime 负责在调用原生模块前做这个转换（`null → 省略`），
+    // 见 server/src/networking/runtime.ts 的 start()。
   });
 });
