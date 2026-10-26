@@ -110,6 +110,10 @@ fn main() {
     let credentials = credential_vectors();
     let routes = route_vectors();
     let rpc = rpc_vectors();
+    let flags_out = flags_vectors();
+    let enums = enum_vectors();
+    let addresses = address_vectors();
+    let topology = topology_vectors();
 
     let output = json!({
         "_comment": "由 native/protocol-oracle 从官方 easytier-core 生成，供 TS 协议实现对照",
@@ -133,6 +137,10 @@ fn main() {
         "credentials": credentials,
         "routes": routes,
         "rpc": rpc,
+        "config_flags": flags_out,
+        "enums": enums,
+        "addresses": addresses,
+        "topology": topology,
         "packet_types": packet_types,
         "flags": flags,
     });
@@ -589,6 +597,196 @@ fn rpc_vectors() -> serde_json::Value {
             "my_peer_id": 1, "my_session_id": 2, "is_initiator": 3,
             "peer_infos": 4, "conn_bitmap": 5, "foreign_network_infos": 6,
             "conn_peer_list": 7,
+        },
+    })
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 补充覆盖面：Flags、枚举、地址结构
+// ══════════════════════════════════════════════════════════════════
+
+/// 导出 `Flags`（即设置项）的真实字段号与默认值。
+///
+/// 为什么重要：`Flags` 是 `easytier-cli` 与配置文件的共同来源，
+/// 它的默认值决定了"不填某个设置时实际是什么行为"。
+/// 我们改过 `no_tun`（第 8 号字段），这类改动必须与官方默认值对齐——
+/// 例如 `enable_encryption` 默认 true，若我们误当成 false 就会明文传输。
+fn flags_vectors() -> serde_json::Value {
+    use easytier::common::config::gen_default_flags;
+
+    let defaults = gen_default_flags();
+
+    json!({
+        "_comment": "Flags 的字段号与官方默认值；默认值决定'不配置时的实际行为'",
+        "field_numbers": {
+            "default_protocol": 1, "dev_name": 2, "enable_encryption": 3,
+            "enable_ipv6": 4, "mtu": 5, "latency_first": 6,
+            "enable_exit_node": 7, "no_tun": 8, "use_smoltcp": 9,
+            "relay_network_whitelist": 10, "disable_p2p": 11,
+            "relay_all_peer_rpc": 12, "disable_udp_hole_punching": 13,
+            "multi_thread": 15, "data_compress_algo": 16, "bind_device": 17,
+            "enable_kcp_proxy": 18, "disable_kcp_input": 19,
+            "disable_relay_kcp": 20, "proxy_forward_by_system": 21,
+            "accept_dns": 22, "private_mode": 23, "enable_quic_proxy": 24,
+            "disable_quic_input": 25, "foreign_relay_bps_limit": 26,
+            "multi_thread_count": 27, "enable_relay_foreign_network_kcp": 28,
+        },
+        "defaults": {
+            "default_protocol": defaults.default_protocol,
+            "dev_name": defaults.dev_name,
+            "enable_encryption": defaults.enable_encryption,
+            "enable_ipv6": defaults.enable_ipv6,
+            "mtu": defaults.mtu,
+            "latency_first": defaults.latency_first,
+            "enable_exit_node": defaults.enable_exit_node,
+            "no_tun": defaults.no_tun,
+            "use_smoltcp": defaults.use_smoltcp,
+            "relay_network_whitelist": defaults.relay_network_whitelist,
+            "disable_p2p": defaults.disable_p2p,
+            "multi_thread": defaults.multi_thread,
+            "data_compress_algo": defaults.data_compress_algo as i32,
+            "bind_device": defaults.bind_device,
+            "accept_dns": defaults.accept_dns,
+            "private_mode": defaults.private_mode,
+            "multi_thread_count": defaults.multi_thread_count,
+        },
+    })
+}
+
+/// 导出枚举的完整取值。这些数字出现在线上字节里，差一个就误判。
+fn enum_vectors() -> serde_json::Value {
+    use easytier_proto::common::{CompressionAlgoPb, NatType, SocketType};
+
+    json!({
+        "nat_type": {
+            "Unknown": NatType::Unknown as i32,
+            "OpenInternet": NatType::OpenInternet as i32,
+            "NoPAT": NatType::NoPat as i32,
+            "FullCone": NatType::FullCone as i32,
+            "Restricted": NatType::Restricted as i32,
+            "PortRestricted": NatType::PortRestricted as i32,
+            "Symmetric": NatType::Symmetric as i32,
+            "SymUdpFirewall": NatType::SymUdpFirewall as i32,
+            "SymmetricEasyInc": NatType::SymmetricEasyInc as i32,
+            "SymmetricEasyDec": NatType::SymmetricEasyDec as i32,
+        },
+        "compression_algo": {
+            "Invalid": CompressionAlgoPb::Invalid as i32,
+            "None": CompressionAlgoPb::None as i32,
+            "Zstd": CompressionAlgoPb::Zstd as i32,
+        },
+        "socket_type": {
+            "_comment": "只有 TCP/UDP 两种；隧道类型字符串（tcp/wg/quic 等）不是这个枚举",
+            "TCP": SocketType::Tcp as i32,
+            "UDP": SocketType::Udp as i32,
+        },
+    })
+}
+
+/// 导出地址结构的编码。`Ipv4Addr` 的 `uint32 addr` 到底是主机序还是网络序，
+/// 只能靠真实字节看出来。
+fn address_vectors() -> serde_json::Value {
+    use easytier_proto::common::{Ipv4Addr, Ipv4Inet, NatType};
+    use easytier_proto::peer_rpc::RoutePeerInfo;
+    use prost::Message;
+
+    // 用 10.126.126.1 = 0x0A7E7E01 作样本，两种字节序看起来完全不同
+    let ipv4 = Ipv4Addr { addr: 0x0A7E_7E01 };
+    let ipv4_hex: String = ipv4.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    let inet = Ipv4Inet {
+        address: Some(Ipv4Addr { addr: 0x0A7E_7E01 }),
+        network_length: 24,
+    };
+    let inet_hex: String = inet.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    // RoutePeerInfo 带 ipv4_addr 与 nat_type 的变异，验证嵌套消息
+    let route_with_addr = RoutePeerInfo {
+        peer_id: 7,
+        ipv4_addr: Some(Ipv4Addr { addr: 0x0A7E_7E01 }),
+        udp_nat_type: NatType::Symmetric as i32,
+        network_length: 24,
+        ..Default::default()
+    };
+    let route_hex: String = route_with_addr
+        .encode_to_vec()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+
+    json!({
+        "ipv4_addr": {
+            "field_numbers": { "addr": 1 },
+            "input": { "addr": 0x0A7E_7E01u32, "dotted": "10.126.126.1" },
+            "protobuf_hex": ipv4_hex,
+            "note": "addr 是 uint32 varint，按数值编码而非 4 字节网络序",
+        },
+        "ipv4_inet": {
+            "field_numbers": { "address": 1, "network_length": 2 },
+            "input": { "addr": 0x0A7E_7E01u32, "network_length": 24 },
+            "protobuf_hex": inet_hex,
+        },
+        "route_with_addr": {
+            "input": {
+                "peer_id": 7, "ipv4_addr": 0x0A7E_7E01u32,
+                "udp_nat_type": NatType::Symmetric as i32, "network_length": 24,
+            },
+            "protobuf_hex": route_hex,
+        },
+        "field_numbers": {
+            "route_ipv4_addr": 4,
+            "route_udp_nat_type": 7,
+            "route_network_length": 13,
+        },
+    })
+}
+
+/// 导出 `TunnelInfo` / `SocketAddr` / `Url` 的编码。
+/// 这些出现在 `PeerConnInfo` 里，是"查看节点列表"要解析的东西。
+fn topology_vectors() -> serde_json::Value {
+    use easytier_proto::common::{Ipv4Addr, SocketAddr, TunnelInfo, Url};
+    use prost::Message;
+
+    // SocketAddr 的 ip 是 oneof，所以是 Option<socket_addr::Ip>
+    let socket_addr = SocketAddr {
+        ip: Some(easytier_proto::common::socket_addr::Ip::Ipv4(Ipv4Addr {
+            addr: 0x0A7E_7E01,
+        })),
+        port: 11010,
+    };
+    let socket_hex: String = socket_addr.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    let url = Url { url: "tcp://10.126.126.1:11010".to_string() };
+    let url_hex: String = url.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    let tunnel = TunnelInfo {
+        tunnel_type: "tcp".to_string(),
+        local_addr: Some(Url { url: "tcp://0.0.0.0:11010".to_string() }),
+        remote_addr: Some(Url { url: "tcp://10.126.126.1:43201".to_string() }),
+        resolved_remote_addr: Some(Url { url: "tcp://10.126.126.1:43201".to_string() }),
+    };
+    let tunnel_hex: String = tunnel.encode_to_vec().iter().map(|b| format!("{:02x}", b)).collect();
+
+    json!({
+        "socket_addr": {
+            "field_numbers": { "ipv4": 1, "ipv6": 2, "port": 3 },
+            "input": { "ipv4": 0x0A7E_7E01u32, "port": 11010 },
+            "protobuf_hex": socket_hex,
+        },
+        "url": {
+            "field_numbers": { "url": 1 },
+            "input": { "url": "tcp://10.126.126.1:11010" },
+            "protobuf_hex": url_hex,
+        },
+        "tunnel_info": {
+            "field_numbers": { "tunnel_type": 1, "local_addr": 2, "remote_addr": 3, "resolved_remote_addr": 4 },
+            "input": {
+                "tunnel_type": "tcp",
+                "local_addr": "tcp://0.0.0.0:11010",
+                "remote_addr": "tcp://10.126.126.1:43201",
+                "resolved_remote_addr": "tcp://10.126.126.1:43201",
+            },
+            "protobuf_hex": tunnel_hex,
         },
     })
 }

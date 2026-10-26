@@ -33,6 +33,13 @@
    空 message → 空字节、`optional bool` 的 presence 语义
 7. **路由条目**：导出 `RoutePeerInfo` 的真实序列化字节与解码结果，
    以及"只有 peer_id 时编码为 `08 01`"这类 proto3 默认值规则
+8. **RPC 层**：`RpcPacket` / `RpcDescriptor` 的真实取值与编码
+   （`descriptor.protoName` 实际是 `OspfRouteRpc` 而非 `peer_rpc.OspfRouteRpc`）
+9. **配置 Flags**：`Flags` 的全部字段号与**官方默认值**（如
+   `enable_encryption=true`、`mtu=1380`、`no_tun=false`）
+10. **枚举**：`CompressionAlgoPb`（`None=1` 不是 0）、`NatType`（10 个）、
+    `SocketType`（**只有 TCP/UDP**）
+11. **地址结构**：`Ipv4Addr` / `Ipv4Inet` / `SocketAddr` / `Url` / `TunnelInfo`
 
 ## 用法
 
@@ -48,6 +55,9 @@ cd ../.. && npx vitest run --root server test/easytierOracle.test.ts
 | --- | --- |
 | protobuf 里 `optional bool` 当普通 bool 处理 | `reusable=false` 被省略，HMAC 与官方不同、对方验签失败 |
 | X25519 裸私钥无法直接派公钥 | Node 的 JWK 导入要求同时给 `x`；需封装成 PKCS#8 DER |
+| `Ipv4Addr.addr` 当成 4 字节定长 | 它其实是 **uint32 varint**；按定长写会得到完全错误的地址 |
+| `CompressionAlgo.None` 当成 0 | `None=1`、`Invalid=0`；"用 None"不等于"省略字段" |
+| `SocketType` 当成隧道类型枚举 | 它只有 TCP/UDP；`tcp`/`wg`/`quic` 是 `TunnelInfo.tunnel_type` 字符串 |
 
 第一条尤其隐蔽：proto3 里普通标量取默认值不写，但 `optional` 一旦显式设置
 （哪怕 false/0）**必须写出来**。这两者混为一谈时，字段看起来都对、字节却不同。

@@ -34,6 +34,20 @@ import {
   pickBestRoute,
   type RoutePeerInfo,
 } from '../src/networking/easytier/route';
+import { CompressionAlgo } from '../src/networking/easytier/rpc';
+import {
+  NatType,
+  SocketType,
+  decodeIpv4Addr,
+  decodeTunnelInfo,
+  encodeIpv4Addr,
+  encodeIpv4Inet,
+  encodeSocketAddr,
+  encodeTunnelInfo,
+  encodeUrl,
+  ipv4ToNumber,
+  numberToIpv4,
+} from '../src/networking/easytier/address';
 import {
   decodeFields,
   decodeVarint,
@@ -685,5 +699,189 @@ describe('协议对照：X25519 密钥', () => {
     const proof = signCredential(credential, 'network-secret');
     expect(verifyCredential(proof, 'network-secret')).toBe(true);
     expect(verifyCredential(proof, 'wrong-secret')).toBe(false);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 补充覆盖面：Flags / 枚举 / 地址 / 拓扑
+// ══════════════════════════════════════════════════════════════════
+
+interface OracleConfigFlags {
+  field_numbers: Record<string, number>;
+  defaults: Record<string, string | number | boolean>;
+}
+
+interface OracleEnums {
+  nat_type: Record<string, number>;
+  compression_algo: Record<string, number>;
+  socket_type: Record<string, number>;
+}
+
+interface OracleAddresses {
+  ipv4_addr: {
+    field_numbers: Record<string, number>;
+    input: { addr: number; dotted: string };
+    protobuf_hex: string;
+  };
+  ipv4_inet: {
+    input: { addr: number; network_length: number };
+    protobuf_hex: string;
+  };
+  field_numbers: Record<string, number>;
+}
+
+interface OracleTopology {
+  socket_addr: { field_numbers: Record<string, number>; input: { ipv4: number; port: number }; protobuf_hex: string };
+  url: { input: { url: string }; protobuf_hex: string };
+  tunnel_info: {
+    field_numbers: Record<string, number>;
+    input: {
+      tunnel_type: string;
+      local_addr: string;
+      remote_addr: string;
+      resolved_remote_addr: string;
+    };
+    protobuf_hex: string;
+  };
+}
+
+describe('配置 Flags 与官方默认值一致', () => {
+  const flags = oracle as unknown as { config_flags: OracleConfigFlags };
+
+  it('关键默认值与官方一致（决定"不配置时的实际行为"）', () => {
+    const d = flags.config_flags.defaults;
+    // enable_encryption 默认 true —— 若误当成 false 就会明文传输
+    expect(d.enable_encryption).toBe(true);
+    // no_tun 默认 false —— 我们用它做容器内测试，不能改默认
+    expect(d.no_tun).toBe(false);
+    // mtu 默认 1380（不是常见的 1500）
+    expect(d.mtu).toBe(1380);
+    expect(d.default_protocol).toBe('tcp');
+    expect(d.dev_name).toBe('');
+    expect(d.enable_ipv6).toBe(true);
+    expect(d.bind_device).toBe(true);
+    expect(d.multi_thread).toBe(true);
+    // magic-dns / private mode 默认关闭
+    expect(d.accept_dns).toBe(false);
+    expect(d.private_mode).toBe(false);
+  });
+
+  it('data_compress_algo 默认是 None(1) 而不是 Invalid(0)', () => {
+    // 这一条印证了 RPC 层 compression_info 的坑：
+    // 官方默认就是 None=1，从不使用 Invalid=0
+    expect(flags.config_flags.defaults.data_compress_algo).toBe(1);
+  });
+
+  it('no_tun 的字段号是 8', () => {
+    // 我们改过这个 setting，字段号写错会静默失效
+    expect(flags.config_flags.field_numbers.no_tun).toBe(8);
+    expect(flags.config_flags.field_numbers.enable_encryption).toBe(3);
+    expect(flags.config_flags.field_numbers.dev_name).toBe(2);
+  });
+});
+
+describe('枚举取值与官方一致', () => {
+  const enums = (oracle as unknown as { enums: OracleEnums }).enums;
+
+  it('CompressionAlgoPb：Invalid=0 / None=1 / Zstd=2', () => {
+    expect(enums.compression_algo.Invalid).toBe(0);
+    expect(enums.compression_algo.None).toBe(1);
+    expect(enums.compression_algo.Zstd).toBe(2);
+    // 与 TS 侧常量对照
+    expect(CompressionAlgo.Invalid).toBe(enums.compression_algo.Invalid);
+    expect(CompressionAlgo.None).toBe(enums.compression_algo.None);
+    expect(CompressionAlgo.Zstd).toBe(enums.compression_algo.Zstd);
+  });
+
+  it('SocketType 只有 TCP=0 / UDP=1', () => {
+    // 隧道类型字符串（tcp/wg/quic…）不是这个枚举，别混用
+    expect(enums.socket_type.TCP).toBe(0);
+    expect(enums.socket_type.UDP).toBe(1);
+    expect(SocketType.TCP).toBe(enums.socket_type.TCP);
+    expect(SocketType.UDP).toBe(enums.socket_type.UDP);
+    expect(Object.keys(enums.socket_type).filter((k) => !k.startsWith('_'))).toHaveLength(2);
+  });
+
+  it('NatType 全部 10 个取值一致', () => {
+    for (const [name, value] of Object.entries(enums.nat_type)) {
+      expect(NatType[name as keyof typeof NatType], `NatType.${name}`).toBe(value);
+    }
+    // 反向：TS 侧不多出官方没有的项
+    const officialNames = new Set(Object.keys(enums.nat_type));
+    for (const name of Object.keys(NatType)) {
+      expect(officialNames.has(name), `TS 侧多出 NatType.${name}`).toBe(true);
+    }
+  });
+});
+
+describe('IPv4 地址：addr 是 uint32 varint，不是 4 字节定长', () => {
+  const addr = (oracle as unknown as { addresses: OracleAddresses }).addresses;
+
+  it('点分地址与 u32 数值互转与官方一致', () => {
+    // 官方 oracle 用 10.126.126.1 = 0x0A7E7E01 = 176061953
+    expect(addr.ipv4_addr.input.dotted).toBe('10.126.126.1');
+    expect(addr.ipv4_addr.input.addr).toBe(0x0a7e7e01);
+    expect(ipv4ToNumber('10.126.126.1')).toBe(addr.ipv4_addr.input.addr);
+    expect(numberToIpv4(addr.ipv4_addr.input.addr)).toBe('10.126.126.1');
+  });
+
+  it('编码结果与官方逐字节相同（关键：不是 4 字节网络序）', () => {
+    const encoded = encodeIpv4Addr('10.126.126.1');
+    expect(encoded.toString('hex')).toBe(addr.ipv4_addr.protobuf_hex);
+    // 官方编码是 5 字节（tag + 4 字节 varint），不是 1+4 的定长布局
+    expect(encoded).toHaveLength(5);
+    // 若错误地按 4 字节大端写，会得到 0a7e7e01 而不是 81fcf953
+    expect(encoded.subarray(1).toString('hex')).not.toBe('0a7e7e01');
+  });
+
+  it('解码官方字节得到正确点分地址', () => {
+    expect(decodeIpv4Addr(Buffer.from(addr.ipv4_addr.protobuf_hex, 'hex'))).toBe('10.126.126.1');
+  });
+
+  it('Ipv4Inet 编码与官方一致', () => {
+    const encoded = encodeIpv4Inet({
+      address: '10.126.126.1',
+      networkLength: addr.ipv4_inet.input.network_length,
+    });
+    expect(encoded.toString('hex')).toBe(addr.ipv4_inet.protobuf_hex);
+  });
+
+  it('非法地址被拒绝', () => {
+    expect(() => ipv4ToNumber('1.2.3')).toThrow(/四段/);
+    expect(() => ipv4ToNumber('1.2.3.256')).toThrow(/255/);
+    expect(() => ipv4ToNumber('a.b.c.d')).toThrow(/不是数字/);
+  });
+});
+
+describe('拓扑结构：SocketAddr / Url / TunnelInfo', () => {
+  const topo = (oracle as unknown as { topology: OracleTopology }).topology;
+
+  it('SocketAddr 编码与官方一致（ip 是 oneof）', () => {
+    const encoded = encodeSocketAddr({
+      ipv4: numberToIpv4(topo.socket_addr.input.ipv4),
+      port: topo.socket_addr.input.port,
+    });
+    expect(encoded.toString('hex')).toBe(topo.socket_addr.protobuf_hex);
+  });
+
+  it('Url 编码与官方一致', () => {
+    expect(encodeUrl(topo.url.input.url).toString('hex')).toBe(topo.url.protobuf_hex);
+  });
+
+  it('TunnelInfo 编码与官方一致', () => {
+    const encoded = encodeTunnelInfo({
+      tunnelType: topo.tunnel_info.input.tunnel_type,
+      localAddr: topo.tunnel_info.input.local_addr,
+      remoteAddr: topo.tunnel_info.input.remote_addr,
+      resolvedRemoteAddr: topo.tunnel_info.input.resolved_remote_addr,
+    });
+    expect(encoded.toString('hex')).toBe(topo.tunnel_info.protobuf_hex);
+  });
+
+  it('TunnelInfo 解码能还原各字段', () => {
+    const decoded = decodeTunnelInfo(Buffer.from(topo.tunnel_info.protobuf_hex, 'hex'));
+    expect(decoded.tunnelType).toBe(topo.tunnel_info.input.tunnel_type);
+    expect(decoded.localAddr).toBe(topo.tunnel_info.input.local_addr);
+    expect(decoded.remoteAddr).toBe(topo.tunnel_info.input.remote_addr);
   });
 });

@@ -1,5 +1,94 @@
 {
   "_comment": "由 native/protocol-oracle 从官方 easytier-core 生成，供 TS 协议实现对照",
+  "addresses": {
+    "field_numbers": {
+      "route_ipv4_addr": 4,
+      "route_network_length": 13,
+      "route_udp_nat_type": 7
+    },
+    "ipv4_addr": {
+      "field_numbers": {
+        "addr": 1
+      },
+      "input": {
+        "addr": 176061953,
+        "dotted": "10.126.126.1"
+      },
+      "note": "addr 是 uint32 varint，按数值编码而非 4 字节网络序",
+      "protobuf_hex": "0881fcf953"
+    },
+    "ipv4_inet": {
+      "field_numbers": {
+        "address": 1,
+        "network_length": 2
+      },
+      "input": {
+        "addr": 176061953,
+        "network_length": 24
+      },
+      "protobuf_hex": "0a050881fcf9531018"
+    },
+    "route_with_addr": {
+      "input": {
+        "ipv4_addr": 176061953,
+        "network_length": 24,
+        "peer_id": 7,
+        "udp_nat_type": 6
+      },
+      "protobuf_hex": "080722050881fcf95338066818"
+    }
+  },
+  "config_flags": {
+    "_comment": "Flags 的字段号与官方默认值；默认值决定'不配置时的实际行为'",
+    "defaults": {
+      "accept_dns": false,
+      "bind_device": true,
+      "data_compress_algo": 1,
+      "default_protocol": "tcp",
+      "dev_name": "",
+      "disable_p2p": false,
+      "enable_encryption": true,
+      "enable_exit_node": false,
+      "enable_ipv6": true,
+      "latency_first": false,
+      "mtu": 1380,
+      "multi_thread": true,
+      "multi_thread_count": 2,
+      "no_tun": false,
+      "private_mode": false,
+      "relay_network_whitelist": "*",
+      "use_smoltcp": false
+    },
+    "field_numbers": {
+      "accept_dns": 22,
+      "bind_device": 17,
+      "data_compress_algo": 16,
+      "default_protocol": 1,
+      "dev_name": 2,
+      "disable_kcp_input": 19,
+      "disable_p2p": 11,
+      "disable_quic_input": 25,
+      "disable_relay_kcp": 20,
+      "disable_udp_hole_punching": 13,
+      "enable_encryption": 3,
+      "enable_exit_node": 7,
+      "enable_ipv6": 4,
+      "enable_kcp_proxy": 18,
+      "enable_quic_proxy": 24,
+      "enable_relay_foreign_network_kcp": 28,
+      "foreign_relay_bps_limit": 26,
+      "latency_first": 6,
+      "mtu": 5,
+      "multi_thread": 15,
+      "multi_thread_count": 27,
+      "no_tun": 8,
+      "private_mode": 23,
+      "proxy_forward_by_system": 21,
+      "relay_all_peer_rpc": 12,
+      "relay_network_whitelist": 10,
+      "use_smoltcp": 9
+    }
+  },
   "credentials": {
     "edge_cases": {
       "empty_len": 0,
@@ -50,6 +139,30 @@
   },
   "default_header_hex": "00000000000000000000000000000000",
   "easytier_version": "0.1.0",
+  "enums": {
+    "compression_algo": {
+      "Invalid": 0,
+      "None": 1,
+      "Zstd": 2
+    },
+    "nat_type": {
+      "FullCone": 3,
+      "NoPAT": 2,
+      "OpenInternet": 1,
+      "PortRestricted": 5,
+      "Restricted": 4,
+      "SymUdpFirewall": 7,
+      "Symmetric": 6,
+      "SymmetricEasyDec": 9,
+      "SymmetricEasyInc": 8,
+      "Unknown": 0
+    },
+    "socket_type": {
+      "TCP": 0,
+      "UDP": 1,
+      "_comment": "只有 TCP/UDP 两种；隧道类型字符串（tcp/wg/quic 等）不是这个枚举"
+    }
+  },
   "flags": {
     "COMPRESSED": {
       "header_hex": "00000000000000000010000000000000",
@@ -124,7 +237,7 @@
       "initiator": true,
       "responder": true
     },
-    "msg1_prefix": "3d26b8f86d15d716",
+    "msg1_prefix": "ff1a21a7e8a167c3",
     "msg_lengths": {
       "msg1": 32,
       "msg2": 96,
@@ -288,6 +401,44 @@
       "missing_conn_peer_ids": 5,
       "missing_peer_ids": 4,
       "session_id": 2
+    }
+  },
+  "topology": {
+    "socket_addr": {
+      "field_numbers": {
+        "ipv4": 1,
+        "ipv6": 2,
+        "port": 3
+      },
+      "input": {
+        "ipv4": 176061953,
+        "port": 11010
+      },
+      "protobuf_hex": "0a050881fcf953188256"
+    },
+    "tunnel_info": {
+      "field_numbers": {
+        "local_addr": 2,
+        "remote_addr": 3,
+        "resolved_remote_addr": 4,
+        "tunnel_type": 1
+      },
+      "input": {
+        "local_addr": "tcp://0.0.0.0:11010",
+        "remote_addr": "tcp://10.126.126.1:43201",
+        "resolved_remote_addr": "tcp://10.126.126.1:43201",
+        "tunnel_type": "tcp"
+      },
+      "protobuf_hex": "0a0374637012150a137463703a2f2f302e302e302e303a31313031301a1a0a187463703a2f2f31302e3132362e3132362e313a3433323031221a0a187463703a2f2f31302e3132362e3132362e313a3433323031"
+    },
+    "url": {
+      "field_numbers": {
+        "url": 1
+      },
+      "input": {
+        "url": "tcp://10.126.126.1:11010"
+      },
+      "protobuf_hex": "0a187463703a2f2f31302e3132362e3132362e313a3131303130"
     }
   }
 }
