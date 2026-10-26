@@ -23,6 +23,18 @@ import {
   verifySecretProof,
 } from '../src/networking/easytier/noiseHandshake';
 import { networkSecretDigest } from '../src/networking/easytier/siphash';
+import {
+  AEAD_NONCE_SIZE,
+  AEAD_TAG_SIZE,
+  decryptPayload,
+  deriveTrafficKey,
+  directionForSender,
+  encryptPayload,
+  keyForAlgorithm,
+  nodeCipherName,
+  parseNonce,
+  shouldSkipEncrypt,
+} from '../src/networking/easytier/dataPlane';
 import { decodeFields } from '../src/networking/easytier/protobuf';
 import { framePacket, extractFrame } from '../src/networking/easytier/framing';
 import { PacketType, decodeHeader } from '../src/networking/easytier/protocol';
@@ -540,4 +552,102 @@ describe.skipIf(!sessionAvailable)('与真实 EasyTier 节点完成 Noise 握手
     // Msg3 之后对端不再报握手错误，而是开始同步路由
     // （我们没实现 OSPF 应答，所以它会超时——但那属于数据面，不是握手问题）
   }, 40_000);
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 数据面：HKDF 派生与 AEAD 加密
+// ══════════════════════════════════════════════════════════════════
+
+describe('数据面：traffic key 派生', () => {
+  // 基准值由独立实现（Python）算出，与官方 `hkdf_traffic_key` 的算法一致：
+  //   prk  = HMAC-SHA256(key=zeros32, msg=root_key)
+  //   info = "et-traffic" || epoch(4B BE) || dir_idx(1B)
+  //   okm  = HMAC-SHA256(key=prk, msg=info || 0x01)
+  //   key  = okm[0..32]
+  const rootKey = Buffer.from(Array.from({ length: 32 }, (_, i) => i));
+
+  it('epoch 0 / 方向 aToB', () => {
+    expect(deriveTrafficKey(rootKey, 0, 'aToB').toString('hex').slice(0, 32)).toBe(
+      '5f6aeafd4b1a023ef03ae837e7138631',
+    );
+  });
+
+  it('epoch 0 / 方向 bToA', () => {
+    expect(deriveTrafficKey(rootKey, 0, 'bToA').toString('hex').slice(0, 32)).toBe(
+      'd94974e68e9f7b5756f7111b449bfec9',
+    );
+  });
+
+  it('epoch 1 得到不同的 key（epoch 真的参与派生）', () => {
+    const e0 = deriveTrafficKey(rootKey, 0, 'aToB');
+    const e1 = deriveTrafficKey(rootKey, 1, 'aToB');
+    expect(e0.equals(e1)).toBe(false);
+  });
+
+  it('两个方向得到不同的 key', () => {
+    expect(deriveTrafficKey(rootKey, 0, 'aToB').equals(deriveTrafficKey(rootKey, 0, 'bToA'))).toBe(
+      false,
+    );
+  });
+
+  it('派生出的 key 不是 root_key 本身（必须经过 KDF）', () => {
+    // 这是踩过的坑：直接把 root_key 当 AES 密钥用，全部解密失败
+    expect(deriveTrafficKey(rootKey, 0, 'aToB').equals(rootKey)).toBe(false);
+  });
+
+  it('方向按 peer_id 大小决定，不看角色', () => {
+    // secure_datagram.rs: direction 由 (sender < receiver) 决定
+    expect(directionForSender(100, 200)).toBe('aToB');
+    expect(directionForSender(200, 100)).toBe('bToA');
+    // 同一个 peer 对，双方看到的发送方向相反
+    expect(directionForSender(100, 200)).not.toBe(directionForSender(200, 100));
+  });
+});
+
+describe('数据面：AES-GCM 加解密', () => {
+  it('往返', () => {
+    const key = Buffer.alloc(32, 5);
+    const payload = Buffer.from('rpc payload bytes');
+    const encrypted = encryptPayload({ key, payload, epoch: 0, seq: 0n, algorithm: 'aes-gcm' });
+    // 密文 = 明文 + tag(16) + nonce(12)
+    expect(encrypted.length).toBe(payload.length + AEAD_TAG_SIZE + AEAD_NONCE_SIZE);
+    expect(decryptPayload({ key, ciphertextWithTail: encrypted, algorithm: 'aes-gcm' }).equals(payload)).toBe(true);
+  });
+
+  it('aes-gcm 用 16 字节密钥（AES-128），不是 32 字节', () => {
+    // 这是踩过的坑：官方算法名 `aes-gcm` 指 AES-128。
+    // 见 tunnel/encrypt/mod.rs:308 —— AesGcm => create_aes_128(key_128)
+    expect(nodeCipherName('aes-gcm')).toBe('aes-128-gcm');
+    expect(nodeCipherName('aes-256-gcm')).toBe('aes-256-gcm');
+    // 32 字节输入会被截到 16 字节
+    expect(keyForAlgorithm('aes-gcm', Buffer.alloc(32, 9))).toHaveLength(16);
+    expect(keyForAlgorithm('aes-256-gcm', Buffer.alloc(32, 9))).toHaveLength(32);
+  });
+
+  it('nonce 在尾部，且能从尾部解析回来', () => {
+    const key = Buffer.alloc(32, 1);
+    const encrypted = encryptPayload({ key, payload: Buffer.from('x'), epoch: 7, seq: 42n, algorithm: 'aes-gcm' });
+    const parsed = parseNonce(encrypted.subarray(encrypted.length - AEAD_NONCE_SIZE));
+    expect(parsed.epoch).toBe(7);
+    expect(parsed.seq).toBe(42n);
+  });
+
+  it('篡改密文导致解密失败', () => {
+    const key = Buffer.alloc(32, 1);
+    const encrypted = encryptPayload({ key, payload: Buffer.from('data'), epoch: 0, seq: 0n, algorithm: 'aes-gcm' });
+    encrypted[0] ^= 0xff;
+    expect(() => decryptPayload({ key, ciphertextWithTail: encrypted, algorithm: 'aes-gcm' })).toThrow();
+  });
+
+  it('哪个包不加密与官方一致（peer_conn.rs:125）', () => {
+    // 握手包与 Ping/Pong 不加密，其余全加密
+    expect(shouldSkipEncrypt(PacketType.NoiseHandshakeMsg1)).toBe(true);
+    expect(shouldSkipEncrypt(PacketType.NoiseHandshakeMsg2)).toBe(true);
+    expect(shouldSkipEncrypt(PacketType.NoiseHandshakeMsg3)).toBe(true);
+    expect(shouldSkipEncrypt(PacketType.Ping)).toBe(true);
+    expect(shouldSkipEncrypt(PacketType.Pong)).toBe(true);
+    // RPC 必须加密
+    expect(shouldSkipEncrypt(PacketType.RpcReq)).toBe(false);
+    expect(shouldSkipEncrypt(PacketType.RpcResp)).toBe(false);
+  });
 });

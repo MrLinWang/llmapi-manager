@@ -22,6 +22,9 @@
 | `handshake.ts` | `HandshakeRequest` / `Response` 编解码与校验 | **与真实节点握手成功** |
 | `noiseXX.ts` | Noise_XX_25519_ChaChaPoly_SHA256 完整实现 | 与 snow（官方同款）三轮握手成功 |
 | `noiseHandshake.ts` | Noise Msg1/2/3 编解码 + `secret_proof` | **与真实节点完成 Noise 握手** |
+| `dataPlane.ts` | HKDF traffic key 派生 + AES-GCM 加解密 | 密钥派生对照独立实现；**成功解密对端真实 RPC** |
+| `rpc.ts` | `RpcPacket` / `RpcDescriptor` 编解码 | oracle 逐字节对照 |
+| `ospf.ts` | OSPF 同步应答（SecureChannel）| 能解密请求并加密应答 |
 
 ## 关键验证：真实建连
 
@@ -61,17 +64,43 @@ EasyTier 有**两条互斥**的握手路径，由对端的 secure mode 决定
 ```
 ① 明文握手           ✅ 与真实节点互通
 ② Noise XX 三段      ✅ 与真实节点互通（secure mode）
-③ 数据面             ❌ 未实现
+③ 数据面解密         ✅ 能解密对端的加密 RPC 请求
+④ 数据面加密应答     ⚠️ 已能发出，但对端未确认（见下）
 ```
 
-第 ② 步通过后的证据：对端不再报任何握手错误，而是开始向我同步路由
-（`sync_route_info failed ... dst_peer_id=<my id> e=Timeout`）——
-它已经把我当成合法节点，只是我还没实现 OSPF 应答。
+### 已实证的成果
+
+解密对端真实 OSPF 请求成功，拿到明文：
+
+```
+RPC OspfRouteRpc method=1 txn=8162031826263190000
+body: 12ab0108b49bfce00f10efa1ec8ee4dab8fed30118012a150a06...
+  → field 1 = my_peer_id    field 3 = is_initiator
+  → field 5 = conn_bitmap
+```
+
+这证明数据面的密钥派生与 AEAD 实现是正确的——能解开官方加密的数据。
+
+### 四个只有真跑才会发现的关键事实
+
+| 我最初的假设 | 实际 |
+| --- | --- |
+| 密钥直接用 root_key | **必须经 HKDF 派生**（`"et-traffic"‖epoch‖dir`）|
+| 算法 32 字节 → AES-256 | `aes-gcm` = **AES-128**，只用 key[..16] |
+| descriptor `peer_rpc.OspfRouteRpc` / method 0 | **`OspfRouteRpc`** / method **1**，domain 是网络名 |
+| 方向按客户端/服务端 | **按 peer_id 大小**（sender < receiver 即 aToB）|
+
+### 剩余问题（诚实记录）
+
+加密应答已经发出，但对端仍报 `sync_route_info failed ... Timeout`。
+已排除的项：密钥（能解密对端数据）、算法、方向、transaction_id 回显、
+`ENCRYPTED` 标志、seq 起点（从 0 递增）。
+
+尚未查清的是对端是否要求响应满足其他条件（例如需要先发一次自己的
+`SyncRouteInfoRequest`，或对 `conn_bitmap` 内容有校验）。
 
 ## 还没实现
 
-- 数据面：加密帧的收发（Noise `Split()` 之后的双向密钥已能导出，但没用起来）
-- OSPF 路由广播的应答与收敛
+- OSPF 同步应答被对端接受（当前发出但对端仍超时）
+- 真正的 OSPF 路由收敛（内核职责，本实现不做）
 - 除 TCP 之外的隧道（udp / wg / quic / ws）
-
-也就是说：**能建连到"双方认可为合法节点"，但还不能传流量**。

@@ -124,7 +124,7 @@
       "initiator": true,
       "responder": true
     },
-    "msg1_prefix": "555161c098efd2af",
+    "msg1_prefix": "3d26b8f86d15d716",
     "msg_lengths": {
       "msg1": 32,
       "msg2": 96,
@@ -227,6 +227,67 @@
       "peer_route_id": "varint",
       "proxy_cidrs": "length-delimited",
       "version": "varint"
+    }
+  },
+  "rpc": {
+    "_comment": "OSPF 路由同步走 EasyTier 自己的 RPC 框架，不是裸 protobuf",
+    "empty_packet_hex": "",
+    "ospf_sync_route_info": {
+      "method_index": 0,
+      "method_name": "SyncRouteInfo",
+      "package": "peer_rpc",
+      "proto_name": "peer_rpc.OspfRouteRpc",
+      "service_name": "OspfRouteRpc"
+    },
+    "rpc_descriptor_fields": {
+      "domain_name": 1,
+      "method_index": 4,
+      "proto_name": 2,
+      "service_name": 3
+    },
+    "rpc_packet_fields": {
+      "body": 5,
+      "compression_info": 10,
+      "descriptor": 4,
+      "from_peer": 1,
+      "is_request": 6,
+      "piece_idx": 8,
+      "to_peer": 2,
+      "total_pieces": 7,
+      "trace_id": 9,
+      "transaction_id": 3
+    },
+    "sample_request": {
+      "input": {
+        "body_hex": "082a1001",
+        "descriptor": {
+          "domain_name": "",
+          "method_index": 0,
+          "proto_name": "peer_rpc.OspfRouteRpc",
+          "service_name": "OspfRouteRpc"
+        },
+        "from_peer": 1001,
+        "is_request": true,
+        "to_peer": 2002,
+        "transaction_id": 12345
+      },
+      "protobuf_hex": "08e90710d20f18b96022251215706565725f7270632e4f737066526f7574655270631a0c4f737066526f7574655270632a04082a10013001"
+    },
+    "sync_route_info_request_fields": {
+      "conn_bitmap": 5,
+      "conn_peer_list": 7,
+      "foreign_network_infos": 6,
+      "is_initiator": 3,
+      "my_peer_id": 1,
+      "my_session_id": 2,
+      "peer_infos": 4
+    },
+    "sync_route_info_response_fields": {
+      "error": 3,
+      "is_initiator": 1,
+      "missing_conn_peer_ids": 5,
+      "missing_peer_ids": 4,
+      "session_id": 2
     }
   }
 }

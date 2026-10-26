@@ -109,6 +109,7 @@ fn main() {
     let noise = run_noise_handshake();
     let credentials = credential_vectors();
     let routes = route_vectors();
+    let rpc = rpc_vectors();
 
     let output = json!({
         "_comment": "由 native/protocol-oracle 从官方 easytier-core 生成，供 TS 协议实现对照",
@@ -131,6 +132,7 @@ fn main() {
                 "noise_handshake": noise,
         "credentials": credentials,
         "routes": routes,
+        "rpc": rpc,
         "packet_types": packet_types,
         "flags": flags,
     });
@@ -500,5 +502,93 @@ fn route_vectors() -> serde_json::Value {
             "note": "proto3 不序列化默认值；identity 里 version=0 等字段都不会出现",
         },
         "default_protobuf_hex": hex::encode(&default_encoded),
+    })
+}
+
+/// 导出 RPC 层的真实结构：`RpcDescriptor` 的取值与 `RpcPacket` 编码。
+///
+/// 为什么需要：OSPF 路由同步走的是 EasyTier 自己的 RPC 框架，
+/// 而不是裸 protobuf 包。要回应它，必须知道：
+/// - `RpcDescriptor` 的 `domain_name` / `proto_name` / `service_name` / `method_index`
+/// - `RpcPacket` 怎么编（尤其 `transaction_id` 是否 int64、body 在哪层）
+///
+/// 这些值从代码生成器出来，靠读源码推演容易错一位，
+/// 所以直接从官方类型里取。
+fn rpc_vectors() -> serde_json::Value {
+    use easytier_proto::common::{RpcDescriptor, RpcPacket};
+    use prost::Message;
+
+    // 构造一个典型的 SyncRouteInfo 请求 RPC 包
+    let descriptor = RpcDescriptor {
+        domain_name: String::new(),
+        proto_name: "peer_rpc.OspfRouteRpc".to_string(),
+        service_name: "OspfRouteRpc".to_string(),
+        method_index: 0,
+    };
+
+    // body 用一个可识别的占位（真实的是 SyncRouteInfoRequest 的编码）
+    let body = vec![0x08u8, 0x2a, 0x10, 0x01];
+    let packet = RpcPacket {
+        from_peer: 1001,
+        to_peer: 2002,
+        transaction_id: 12345,
+        descriptor: Some(descriptor.clone()),
+        body: body.clone(),
+        is_request: true,
+        total_pieces: 0,
+        piece_idx: 0,
+        trace_id: 0,
+        compression_info: None,
+    };
+
+    let encoded = packet.encode_to_vec();
+    let encoded_hex: String = encoded.iter().map(|b| format!("{:02x}", b)).collect();
+
+    // 空 descriptor 与空 packet 的编码（验证 proto3 默认值规则）
+    let empty_packet = RpcPacket {
+        from_peer: 0, to_peer: 0, transaction_id: 0, descriptor: None,
+        body: vec![], is_request: false, total_pieces: 0, piece_idx: 0,
+        trace_id: 0, compression_info: None,
+    };
+
+    json!({
+        "_comment": "OSPF 路由同步走 EasyTier 自己的 RPC 框架，不是裸 protobuf",
+        "rpc_descriptor_fields": {
+            "domain_name": 1, "proto_name": 2, "service_name": 3, "method_index": 4,
+        },
+        "rpc_packet_fields": {
+            "from_peer": 1, "to_peer": 2, "transaction_id": 3, "descriptor": 4,
+            "body": 5, "is_request": 6, "total_pieces": 7, "piece_idx": 8,
+            "trace_id": 9, "compression_info": 10,
+        },
+        "ospf_sync_route_info": {
+            "proto_name": "peer_rpc.OspfRouteRpc",
+            "service_name": "OspfRouteRpc",
+            "method_name": "SyncRouteInfo",
+            "method_index": 0,
+            "package": "peer_rpc",
+        },
+        "sample_request": {
+            "input": {
+                "from_peer": 1001, "to_peer": 2002, "transaction_id": 12345,
+                "descriptor": {
+                    "domain_name": "", "proto_name": "peer_rpc.OspfRouteRpc",
+                    "service_name": "OspfRouteRpc", "method_index": 0,
+                },
+                "body_hex": hex::encode(&body),
+                "is_request": true,
+            },
+            "protobuf_hex": encoded_hex,
+        },
+        "empty_packet_hex": hex::encode(empty_packet.encode_to_vec()),
+        "sync_route_info_response_fields": {
+            "is_initiator": 1, "session_id": 2, "error": 3,
+            "missing_peer_ids": 4, "missing_conn_peer_ids": 5,
+        },
+        "sync_route_info_request_fields": {
+            "my_peer_id": 1, "my_session_id": 2, "is_initiator": 3,
+            "peer_infos": 4, "conn_bitmap": 5, "foreign_network_infos": 6,
+            "conn_peer_list": 7,
+        },
     })
 }
