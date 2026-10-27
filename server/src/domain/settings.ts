@@ -60,9 +60,43 @@ export interface AgentTargetPreference {
   directModel: string | null;
 }
 
+/**
+ * 控制台界面语言。
+ *
+ * 只存 `zh` / `en` 两个值，`null` 表示"跟随浏览器"——没有显式选择过语言时，
+ * 前端按 `navigator.languages` 决定，因此不把浏览器探测结果写进服务端：
+ * 换一台英文系统的机器打开控制台，就该看到英文。
+ *
+ * **语言是界面偏好，不是安全配置**：读它只需要登录（`/api/auth/me`），
+ * 改它需要 `settings:write`（与其它租户级设置一致）。
+ */
+export const UI_LANGUAGES = ['zh', 'en'] as const;
+export type UiLanguage = (typeof UI_LANGUAGES)[number];
+
+export function isUiLanguage(value: unknown): value is UiLanguage {
+  return typeof value === 'string' && (UI_LANGUAGES as readonly string[]).includes(value);
+}
+
+/**
+ * 把存储里的任意值收敛成合法语言。
+ *
+ * 读路径必须走它：`settings.json` 是手改得动的纯文本文件，写进 `"jp"` 这类
+ * 未知值时，若原样返回前端，界面会退化成"显示键名"或空白。降级为 `null`
+ * （跟随浏览器）比报错更合适——语言坏了不该让整个控制台打不开。
+ */
+export function normalizeUiLanguage(value: unknown): UiLanguage | null {
+  return isUiLanguage(value) ? value : null;
+}
+
 export interface TenantSettings {
   defaultProviderId: string | null;
   defaultModel: string | null;
+  /**
+   * 界面语言；`null` 表示跟随浏览器（见 `UI_LANGUAGES`）。
+   *
+   * 它只影响前端文案，不参与网关转发与 Agent 下发，因此改完不需要重新 apply。
+   */
+  language: UiLanguage | null;
   /**
    * 「Approve for me」自动审批请求的模型名 → 实际要用的模型。
    *
@@ -147,6 +181,8 @@ export function defaultTenantSettings(): TenantSettings {
   return {
     defaultProviderId: null,
     defaultModel: null,
+    // 未显式选择语言时跟随浏览器，由前端按 navigator.languages 决定。
+    language: null,
     approvalReviewModel: null,
     protocolConversion: false,
     gatewayToken: null,

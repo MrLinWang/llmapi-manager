@@ -80,9 +80,10 @@ lam-<providerKey>/<model>
 | `/v1/responses` | `responses`（OpenAI Responses API） |
 
 对应的前端文案统一为「<厂商> 兼容（<API 形态>）」：**OpenAI 兼容（Chat Completions）** /
-**OpenAI 兼容（Responses）** / **Anthropic 兼容（Messages）**。三段文案在
-`web/src/lib/labels.ts`（下拉、徽标）与 `server/src/domain/provider.ts`（报错）各有一份，
-口径必须一致；判断"接哪条路"看括号里的 API 形态，不要只看厂商名。
+**OpenAI 兼容（Responses）** / **Anthropic 兼容（Messages）**。中文文案在
+`web/src/i18n/locales/zh/labels.ts`、英文在 `web/src/i18n/locales/en/labels.ts`，
+服务端报错文案在 `server/src/domain/provider.ts`（`apiTypeLabel`）——两处口径必须一致，
+改文案时一起改；判断"接哪条路"看括号里的 API 形态，不要只看厂商名。
 
 默认是**严格匹配**：不匹配时返回 **501**，不会静默转发到错误路径。
 唯一的例外是设置项 `protocolConversion` 打开后的 `/v1/responses → openai`，

@@ -32,10 +32,11 @@ server/               Fastify + TypeScript
   test/               单元测试 + 端到端冒烟（含假上游）
 log/                  运行日志（app.log + 滚动文件），已 gitignore
 web/                  React 18 + Vite + Tailwind
-  src/lib/            api 封装、鉴权上下文、useAsync、类型
+  src/lib/            api 封装、鉴权上下文、useAsync、类型、labels（枚举文案键）
+  src/i18n/           i18next 初始化、语言探测、日期本地化、locales/{zh,en}/ 按区域字典
   src/pages/          Login / Setup / Layout / Overview / Providers / Models / Agents / Settings
-  src/components/     ui 基础件、ProviderForm、CopyButton
-  test/               页面装配测试（jsdom + testing-library）
+  src/components/     ui 基础件、ProviderForm、CopyButton、LanguageSelect
+  test/               页面装配测试 + 字典契约 + 硬编码扫描（jsdom + testing-library）
 ```
 
 ## 常用命令
@@ -330,9 +331,36 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
   （工具调不动、思考区转圈、列表少一家），读日志定位不了。
 - 改这些接口时，确认四条都在：路由预演、全链路、自检清单、转换器纯函数自检。
 
+### 16. 界面文案必须走 i18n，服务端文案仍是中文
+
+控制台是双语的（`zh` / `en`），实现是 `i18next` + `react-i18next`。界面文案的
+**唯一来源**是 `web/src/i18n/locales/{zh,en}/` 下的字典；组件里硬编码中文会被
+`web/test/i18n-guard.test.tsx` 扫出来并判失败。
+
+- **键集必须成对**：英文对象声明成 `typeof zhXxx`，漏译/多键直接编译失败。
+  改中文时必须在同一提交里改英文，别留 TODO。
+- **计数文案写三份**：`key_one` / `key_other`（中文两份相同），调用 `t(key, { count })`。
+  只写基名时英文 `count=1` 会说 `1 items`。
+- **组件里用 `useTranslation()`，不要 import 全局 i18n 实例**：前者订阅语言变化，
+  后者要等下一次渲染才更新（症状是"点了切换、页面不刷新"）。
+- **时间用 `web/src/i18n/format.ts`**，不要用 `toLocaleString()`：后者跟随浏览器语言，
+  会出现"界面英文、时间中文格式"。
+- **服务端 `message` 保持中文**：`AppError` 文案、启动告警、Agent 描述、诊断输出
+  都不翻译，前端原样显示。这是刻意的边界（翻译它们要在服务端引入消息键，
+  且会牵动所有测试断言）。**不要为了"看起来更全"在前端字典里复刻一遍**，
+  那会得到两份迟早不一致的文案。
+- **语言偏好存服务端**（`TenantSettings.language`，`null` = 跟随浏览器），
+  接口 `PATCH /api/settings/language`，随 `GET /api/auth/me` 下发。
+  **不要改用 localStorage**：换设备会丢设置，也可能与另一台机器打架。
+- **不翻译**：品牌名、模型名、`lam-` 别名、`/v1/...`、`Codex`、`Claude Code`、
+  `web_search` 等标识符。翻译它们会让用户无法照抄命令或对照日志。
+- 新增语言 = 加一份 `locales/<lang>/` + 在 `i18n/language.ts` 的 `UI_LANGUAGES`
+  与服务端 `domain/settings.ts` 的 `UI_LANGUAGES` 各加一个值——**两处必须同步**，
+  否则会出现"保存成功但界面不认"。
+
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 272 + web 14 = 286 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 278 + web 27 = 305 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
@@ -353,6 +381,10 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
 - 改 web 测试 → 记住 `globals: false` 让 RTL **不自动 cleanup**，清理靠
   `web/test/setup.ts` 的 `afterEach(cleanup)`。少了它，上一个用例的 DOM 会留到下一个，
   症状是"单独跑通过、整个文件跑失败"或读到上一条用例的 mock 数据。
+- 改界面文案 → 中文与英文两份字典一起改，跑 `npm test -w web`（字典契约 +
+  硬编码扫描）；计数文案确认 `_one`/`_other` 成对。
+- 改语言设置接口/存储 → 补 `server/test/smoke.test.ts` 的「界面语言设置」用例组
+  （默认 null、落盘、非法值 400、读路径降级、只读令牌 403、不影响其它设置）。
 - 改了品牌名 / 对外文案 → 同步 `README.md`、`web/index.html`、登录页与侧边栏。
 
 ## 明确不做的事
@@ -362,7 +394,8 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
   即便 `protocolConversion` 开着也不会转换——别偷偷转发到错误路径。
 - 不做计费、配额、多用户 UI、MCP/Skills/会话管理、桌面打包。
 - 不把 JSON 文件存储换成数据库，除非任务明确要求；Repository 接口已就位，替换时不要改路由契约。
-- 不要引入第二套状态管理或数据请求库来"重写"现有 `useAsync`；当前页面刻意保持零额外依赖。
+- 不要引入第二套状态管理或数据请求库来"重写"现有 `useAsync`。前端依赖刻意保持精简
+  （目前额外依赖只有 i18n 的 `i18next` + `react-i18next`，见第 16 条）；新增依赖要有明确必要性。
 - 不要提交 `data/`、`.env`、`node_modules/`、`dist/`。
 
 ## 文档

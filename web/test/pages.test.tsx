@@ -47,6 +47,9 @@ const routes: RouteMap = {
       'settings:write',
     ],
     allPermissions: ['providers:read', 'providers:write'],
+    // language 由下面的 serverLanguage 统一注入（初值 'zh'）：jsdom 的
+    // navigator.language 是 en-US，按浏览器语言初始化会让整页渲染成英文，
+    // 本文件里断言中文文案的用例会全部变红。
   },
   '/api/health': { ok: true, warnings: [], gatewayBaseUrl: 'http://127.0.0.1:8787/v1' },
   '/api/setup/status': {
@@ -130,19 +133,58 @@ const routes: RouteMap = {
  */
 let overrides: RouteMap = {};
 
+/**
+ * 记录发出的请求。
+ *
+ * 语言切换这类"点了之后还要落盘"的交互，只断言界面变了是不够的：
+ * 请求根本没发出去、或者发到了错的路径/方法，界面也会因为乐观更新而变化。
+ */
+let requests: Array<{ method: string; path: string; body: string | null }> = [];
+
+/**
+ * 服务端当前的界面语言（模拟 settings.json 里那一个字段）。
+ *
+ * 语言是"服务端为真源"的状态：`/api/auth/me` 返回它，`PATCH /api/settings/language`
+ * 改写它。用可变状态而不是固定 mock，才能验证"改完之后刷新仍然是新值"这条
+ * ——固定 mock 会让测试在"刷新把语言又拉回旧值"时依然通过。
+ */
+let serverLanguage: 'zh' | 'en' | null = 'zh';
+
 function setOverrides(next: RouteMap): void {
   overrides = next;
 }
 
 function installFetch(): void {
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     const path = url.split('?')[0];
-    const body = path in overrides ? overrides[path] : routes[path];
+    const method = init?.method ?? 'GET';
+    const body = typeof init?.body === 'string' ? init.body : null;
+    requests.push({ method, path, body });
+
+    // 语言设置按真实行为模拟：写入后 `/api/auth/me` 也要跟着返回新值，
+    // 否则测不出"刷新之后语言又跳回旧值"这种真实故障。
+    if (path === '/api/settings/language' && method === 'PATCH') {
+      serverLanguage = (JSON.parse(body ?? '{}') as { language: 'zh' | 'en' | null }).language;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ language: serverLanguage }),
+      } as Response;
+    }
+    if (path === '/api/auth/me' && !(path in overrides)) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ...(routes[path] as object), language: serverLanguage }),
+      } as Response;
+    }
+
+    const payload = path in overrides ? overrides[path] : routes[path];
     return {
-      ok: body !== undefined,
-      status: body === undefined ? 404 : 200,
-      text: async () => JSON.stringify(body ?? { error: { code: 'not_found' } }),
+      ok: payload !== undefined,
+      status: payload === undefined ? 404 : 200,
+      text: async () => JSON.stringify(payload ?? { error: { code: 'not_found' } }),
     } as Response;
   }) as typeof fetch;
 }
@@ -491,12 +533,18 @@ describe('前端页面装配', () => {
 
   it('协议类型三个选项句式一致，且都能在表格里显示可读短名', async () => {
     const { API_TYPE_META } = await import('../src/lib/labels');
+    const i18n = (await import('../src/i18n')).default;
     expect(API_TYPE_META).toHaveLength(3);
     for (const meta of API_TYPE_META) {
-      // 统一句式：<厂商> 兼容（<API 形态>）
-      expect(meta.label).toMatch(/兼容（.+）$/);
+      // 文案现在来自字典，断言取 zh / en 两种语言下的实际渲染结果。
+      // 统一句式：<厂商> 兼容（<API 形态>）；英文侧用 "OpenAI-compatible (...)"
+      const zhLabel = i18n.t(meta.labelKey, { lng: 'zh' });
+      const enLabel = i18n.t(meta.labelKey, { lng: 'en' });
+      expect(zhLabel).toMatch(/兼容（.+）$/);
+      expect(enLabel).toMatch(/-compatible \(.+\)$/);
       // 短名不能是原始枚举值
-      expect(meta.short).not.toBe(meta.value);
+      expect(i18n.t(meta.shortKey, { lng: 'zh' })).not.toBe(meta.value);
+      expect(i18n.t(meta.shortKey, { lng: 'en' })).not.toBe(meta.value);
       expect(meta.path.startsWith('/v1/')).toBe(true);
     }
     expect(API_TYPE_META.map((item) => item.value)).toEqual([
@@ -558,5 +606,85 @@ describe('前端页面装配', () => {
     // 点 × 移除该片段
     fireEvent.click(view.getByLabelText('移除模型 gpt-brand-new'));
     expect(view.queryByLabelText('移除模型 gpt-brand-new')).toBeNull();
+  });
+
+  it('设置页切换界面语言会落盘并立即生效', async () => {
+    // 语言偏好存服务端（不是 localStorage）：换浏览器/清缓存后仍应保持。
+    // 这里同时钉住三件事：请求真的发出去了（PATCH + 正确 body）、界面立刻切换、
+    // 下拉框的值来自服务端设置而不是写死的默认值。
+    requests = [];
+    const { render, screen, fireEvent, waitFor } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const SettingsPage = (await import('../src/pages/SettingsPage')).default;
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <SettingsPage />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // 等服务端身份（含 language: 'zh'）到位，下拉框才会是受控可用状态
+    const select = (await screen.findByLabelText('界面语言')) as HTMLSelectElement;
+    // 下拉框的值来自服务端设置（mock 的 me.language = 'zh'），不是写死的默认值
+    expect(select.value).toBe('zh');
+
+    fireEvent.change(select, { target: { value: 'en' } });
+
+    // 界面立即切换（LanguageSelect 内部乐观 applyLanguage）
+    expect(await screen.findByText('Interface language')).toBeTruthy();
+
+    // 且真的落盘了：PATCH /api/settings/language，body 是 { language: 'en' }
+    await waitFor(() => {
+      const patched = requests.find(
+        (item) => item.method === 'PATCH' && item.path === '/api/settings/language',
+      );
+      expect(patched).toBeDefined();
+      expect(JSON.parse(patched!.body ?? '{}')).toEqual({ language: 'en' });
+    });
+
+    // 落盘后要重新拉一次身份：侧边栏那个选择器与这里共用服务端真源，
+    // 不刷新就会出现"这里 English、侧边栏中文"。
+    await waitFor(() => {
+      const meCalls = requests.filter((item) => item.path === '/api/auth/me');
+      expect(meCalls.length).toBeGreaterThan(1);
+    });
+    // 刷新后下拉框仍是新值（不能跳回旧值）
+    await waitFor(() => expect(select.value).toBe('en'));
+
+    setOverrides({});
+    serverLanguage = 'zh';
+  });
+
+  it('无 settings:write 时语言下拉只读', async () => {
+    // member 只有 gateway:read：能看界面语言是什么，但不能改（保存会 403）。
+    // 让它可点只会把 403 当成交互反馈。
+    setOverrides({
+      '/api/auth/me': {
+        user: { id: 'u_member', tenantId: 't_default', role: 'member', username: 'member' },
+        permissions: ['gateway:read'],
+        allPermissions: ['gateway:read'],
+        language: 'zh',
+      },
+      '/api/tokens': { tokens: [], availableScopes: ['gateway:read'] },
+    });
+    const { render, screen } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const SettingsPage = (await import('../src/pages/SettingsPage')).default;
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <SettingsPage />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const select = (await screen.findByLabelText('界面语言')) as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    setOverrides({});
   });
 });

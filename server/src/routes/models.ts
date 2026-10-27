@@ -11,6 +11,8 @@ import {
   AGENT_CONNECTION_MODES,
   CODEX_STREAM_IDLE_TIMEOUT_RANGE,
   CODEX_STREAM_MAX_RETRIES_RANGE,
+  UI_LANGUAGES,
+  isUiLanguage,
   type AgentConnectionMode,
   type TenantSettings,
 } from '../domain/settings';
@@ -96,6 +98,7 @@ export function registerModelRoutes(
       return {
         defaultProviderId: settings.defaultProviderId,
         defaultModel: settings.defaultModel,
+        language: settings.language,
         disableCodexWebSearch: settings.disableCodexWebSearch,
         approvalReviewModel: settings.approvalReviewModel,
         protocolConversion: settings.protocolConversion,
@@ -105,6 +108,37 @@ export function registerModelRoutes(
         gatewayBaseUrl: `${ctx.config.publicBaseUrl}/v1`,
         token: viewTokenMeta(settings),
       };
+    },
+  );
+
+  // 界面语言。放在这里与其它租户级设置共用同一份 settings.json。
+  //
+  // 它是纯前端文案偏好：不参与网关转发、不改任何下发文件，所以**不返回
+  // requiresReapply**——提示用户去重新 apply 只会让人以为不点就没生效。
+  defineRoute(
+    app,
+    registry,
+    { method: 'PATCH', url: '/api/settings/language', access: 'settings:write' },
+    async (request) => {
+      const body = (request.body ?? {}) as { language?: unknown };
+      if (!('language' in body)) {
+        throw badRequest('language 字段必须提供（可为 null 表示跟随浏览器）');
+      }
+      // 显式写 null 是"回到跟随浏览器"，与"字段缺失"是两回事：前者是用户的选择，
+      // 后者多半是调用方写错了字段名，静默接受会让界面语言看起来没生效。
+      const language = body.language === null ? null : body.language;
+      if (language !== null && !isUiLanguage(language)) {
+        throw badRequest(`language 必须是 ${UI_LANGUAGES.join(' 或 ')}，或 null`);
+      }
+
+      const settings = repos.settings.read();
+      const next: TenantSettings = {
+        ...settings,
+        language,
+        updatedAt: new Date().toISOString(),
+      };
+      repos.settings.write(next);
+      return { language: next.language };
     },
   );
 

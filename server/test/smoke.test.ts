@@ -1949,6 +1949,122 @@ describe('冒烟：API 令牌与信息接口', () => {
   });
 });
 
+describe('冒烟：界面语言设置', () => {
+  // 语言偏好存服务端（settings.json），前端不落 localStorage：
+  // 换浏览器/清缓存后仍然是同一语言，这样"我在公司配成英文"不会在家里变回中文。
+  let langCookie = '';
+
+  beforeAll(async () => {
+    const login = await call('POST', '/api/auth/login', {
+      username: 'admin',
+      password: 'brand-new-password',
+    });
+    expect(login.statusCode).toBe(200);
+    langCookie = String(login.headers['set-cookie']).split(';')[0];
+  });
+
+  it('默认是 null（跟随浏览器），并随身份一起返回', async () => {
+    // 从没设置过语言时必须是 null 而不是 'zh'：null 才代表"按浏览器语言显示"，
+    // 硬编码 zh 会让英文系统打开控制台看到中文。
+    const me = await call('GET', '/api/auth/me', undefined, { cookie: langCookie });
+    expect(me.statusCode).toBe(200);
+    expect(me.json().language).toBeNull();
+
+    const settings = await call('GET', '/api/settings', undefined, { cookie: langCookie });
+    expect(settings.json().language).toBeNull();
+  });
+
+  it('可以设为 en，settings 与 me 同时生效并落盘', async () => {
+    const patched = await call(
+      'PATCH', '/api/settings/language', { language: 'en' }, { cookie: langCookie },
+    );
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json().language).toBe('en');
+
+    // me 也要跟着变：前端启动时只调 me，不能要求它再发一次 /api/settings
+    const me = await call('GET', '/api/auth/me', undefined, { cookie: langCookie });
+    expect(me.json().language).toBe('en');
+
+    // 落盘检查：语言是租户数据，必须在 tenant 目录里
+    const raw = fs.readFileSync(
+      path.join(dataDir, 'tenants', 't_default', 'settings.json'),
+      'utf8',
+    );
+    expect((JSON.parse(raw) as { data: { language: string } }).data.language).toBe('en');
+  });
+
+  it('显式传 null 回到跟随浏览器', async () => {
+    const patched = await call(
+      'PATCH', '/api/settings/language', { language: null }, { cookie: langCookie },
+    );
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json().language).toBeNull();
+  });
+
+  it('非法语言与缺失字段返回 400，且不覆盖已有设置', async () => {
+    await call('PATCH', '/api/settings/language', { language: 'zh' }, { cookie: langCookie });
+
+    const invalid = await call(
+      'PATCH', '/api/settings/language', { language: 'jp' }, { cookie: langCookie },
+    );
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json().error.code).toBe('bad_request');
+
+    // 字段缺失也要拒：多半是调用方字段名写错，静默接受会让用户以为设置生效了
+    const missing = await call('PATCH', '/api/settings/language', {}, { cookie: langCookie });
+    expect(missing.statusCode).toBe(400);
+
+    // 两次失败都不该把上一轮设置改掉
+    const me = await call('GET', '/api/auth/me', undefined, { cookie: langCookie });
+    expect(me.json().language).toBe('zh');
+  });
+
+  it('手改坏的 language 被读路径降级为 null，而不是让控制台打不开', async () => {
+    // settings.json 是纯文本，用户/脚本可能写进任意值。原样透给前端会让界面
+    // 退化成显示键名，所以读路径必须收敛。这里直接改盘再读。
+    const file = path.join(dataDir, 'tenants', 't_default', 'settings.json');
+    const envelope = JSON.parse(fs.readFileSync(file, 'utf8')) as {
+      schemaVersion: number;
+      data: Record<string, unknown>;
+    };
+    envelope.data.language = 'klingon';
+    fs.writeFileSync(file, JSON.stringify(envelope));
+
+    const me = await call('GET', '/api/auth/me', undefined, { cookie: langCookie });
+    expect(me.statusCode).toBe(200);
+    expect(me.json().language).toBeNull();
+
+    // 收尾：恢复成默认，避免影响后续用例（本文件共享同一个服务实例）
+    await call('PATCH', '/api/settings/language', { language: null }, { cookie: langCookie });
+  });
+
+  it('只读令牌不能改语言；语言不影响其它设置', async () => {
+    const created = await call(
+      'POST', '/api/tokens',
+      { name: '语言只读', scopes: ['settings:read'] },
+      { cookie: langCookie },
+    );
+    const token = created.json().token as string;
+
+    const denied = await call(
+      'PATCH', '/api/settings/language', { language: 'en' },
+      { authorization: `Bearer ${token}` },
+    );
+    expect(denied.statusCode).toBe(403);
+
+    // 改语言不该顺手刷掉 codex 的下发数值（真实风险：整体覆盖 settings）
+    const before = (await call('GET', '/api/settings', undefined, { cookie: langCookie })).json() as {
+      codexStreamMaxRetries: number | null;
+    };
+    await call('PATCH', '/api/settings/language', { language: 'zh' }, { cookie: langCookie });
+    const after = (await call('GET', '/api/settings', undefined, { cookie: langCookie })).json() as {
+      codexStreamMaxRetries: number | null;
+    };
+    expect(after.codexStreamMaxRetries).toBe(before.codexStreamMaxRetries);
+    await call('PATCH', '/api/settings/language', { language: null }, { cookie: langCookie });
+  });
+});
+
 describe('补充信息接口', () => {
   let infoCookie = '';
   beforeAll(async () => {

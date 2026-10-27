@@ -1,6 +1,10 @@
 import { useEffect, useId, useState, type ReactNode } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { api, ApiError } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
+import { formatDateTime } from '../i18n/format';
+import type { MessageKey } from '../lib/labels';
 import type { AgentConnectionMode, AgentTargetPreference, AgentPreview, Provider } from '../lib/types';
 import {
   Badge,
@@ -41,17 +45,31 @@ interface ApprovalCandidate {
  * "能直通"是用户做选择时最该知道的信息（转换有信息损失，且多一层可能失败）。
  * 但两侧重名时仍可能看混，因此再带上 providerKey（唯一）。
  */
-function approvalLabel(item: ApprovalCandidate): string {
-  const tag = item.direct ? '直通' : '需转换';
-  const base = `${item.model} — 走 ${item.providerName} (${item.providerKey}/${item.apiType}, ${tag})`;
+function approvalLabel(t: TFunction, item: ApprovalCandidate): string {
+  const tag = t(item.direct ? 'agents.approval.direct' : 'agents.approval.convert');
+  const base = t('agents.approval.option', {
+    model: item.model,
+    providerName: item.providerName,
+    providerKey: item.providerKey,
+    apiType: item.apiType,
+    tag,
+  });
   // 同名模型被多家声明时说清楚：最终由网关按协议匹配挑，用户不必也不能指定
   return item.sharedWith.length === 0
     ? base
-    : `${base}；${item.sharedWith.join('、')} 也声明了同名模型`;
+    : t('agents.approval.sharedWith', {
+        base,
+        names: item.sharedWith.join(t('agents.separators.enumeration')),
+      });
 }
 
 function agentIcon(id: string): IconName {
   return id === 'codex' ? 'terminal' : 'agents';
+}
+
+/** Agent 显示名：与服务端下发的 id 对应，标识符不翻译。 */
+function agentDisplayName(id: string): string {
+  return id === 'codex' ? 'Codex' : 'Claude Code';
 }
 
 /**
@@ -61,15 +79,37 @@ function agentIcon(id: string): IconName {
  * 自定义安装位置的进程也可能匹配不到。此时只报"已结束/没有进程"会让用户以为按钮
  * 无效，而不知道下一步该做什么，所以每次都把这条命令一起给出。
  *
- * 用 <code> 而不是纯文本，是为了让命令在中文提示里能一眼看清（与页面其他内联命令一致）。
+ * 文案本体（含 <code> 标记）在字典里，这里只声明标记要渲染成什么元素：
+ * 用 <code> 而不是纯文本，是为了让命令在提示里能一眼看清（与页面其他内联命令一致）。
  */
 const MANUAL_CODEX_KILL_HINT: ReactNode = (
-  <>
-    也可手动执行 <code className="font-mono">pkill -9 -f codex</code> 来清理相关进程。
-  </>
+  <Trans
+    i18nKey="agents.messages.manualKillHint"
+    components={{ code: <code className="font-mono" /> }}
+  />
 );
 
+/**
+ * 连接方式的两个选项。
+ *
+ * 用键而不是文案：文案在字典里，切换语言时组件重渲染即可换掉；
+ * 第一项 `mode` 仍是决定写入哪套配置的机器标识，不参与翻译。
+ */
+const CONNECTION_MODES: Array<
+  [AgentConnectionMode, MessageKey, MessageKey]
+> = [
+  ['gateway', 'agents.connection.gateway.label', 'agents.connection.gateway.desc'],
+  ['direct', 'agents.connection.direct.label', 'agents.connection.direct.desc'],
+];
+
+/** 该 Agent 直连时必须匹配的上游协议（Codex 只认 responses，Claude Code 只认 anthropic）。 */
+function requiredApiType(id: string): string {
+  return id === 'claude-code' ? 'anthropic' : 'responses';
+}
+
 export default function AgentsPage(): JSX.Element {
+  // 用 useTranslation 的 t 而不是全局实例：它订阅语言变化，切换语言时本页会重渲染。
+  const { t } = useTranslation();
   const agents = useAsync(() => api.agents());
   const settings = useAsync(() => api.settings());
   const providers = useAsync(() => api.providers());
@@ -124,8 +164,20 @@ export default function AgentsPage(): JSX.Element {
     try {
       await action();
     } catch (cause) {
-      const text = cause instanceof ApiError ? cause.message : '操作失败';
-      setError(failureHint ? <>{text}。{failureHint}</> : text);
+      // 服务端返回的 message 是中文，原样显示（i18n 只覆盖前端文案）；
+      // 只有完全没有 message 的意外异常才用本地兜底。
+      const text = cause instanceof ApiError ? cause.message : t('common.actionFailed');
+      setError(
+        failureHint ? (
+          <>
+            {text}
+            {t('agents.separators.sentence')}
+            {failureHint}
+          </>
+        ) : (
+          text
+        ),
+      );
     } finally {
       setBusy(null);
     }
@@ -144,8 +196,11 @@ export default function AgentsPage(): JSX.Element {
       const running = result.binding.runningProcesses ?? 0;
       setMessage(
         running > 0
-          ? `配置已写入，但检测到 ${running} 个 ${id === 'codex' ? 'Codex' : 'Claude Code'} 进程仍在运行。它们用的是旧配置，必须退出后重新启动才生效。`
-          : '配置已写入。若该 Agent 正在运行，请重启以加载新配置。',
+          ? t('agents.messages.appliedWithRunning', {
+              count: running,
+              agent: agentDisplayName(id),
+            })
+          : t('agents.messages.applied'),
       );
       agents.reload();
       if (preview?.agentId === id) setPreview(await api.previewAgent(id));
@@ -167,17 +222,26 @@ export default function AgentsPage(): JSX.Element {
         // 前端不再自己推断，避免两处逻辑各说一套。
         const parts: string[] = [...result.actions];
         if (result.warnings.length > 0) parts.push(...result.warnings);
-        const text = parts.join('；');
+        // actions/warnings 由后端下发、是中文原文：只在中间拼接分隔符，
+        // 分隔符随界面语言变化（不能硬编码 `；`）。
+        const text = parts.join(t('agents.separators.list'));
         if (result.warnings.length > 0 && result.actions.length === 0) {
           setError(
             <>
-              {text}。{MANUAL_CODEX_KILL_HINT}
+              {text}
+              {t('agents.separators.sentence')}
+              {MANUAL_CODEX_KILL_HINT}
             </>,
           );
         } else {
           setMessage(
             <>
-              {text}。重新打开 Codex 即可加载最新配置。{MANUAL_CODEX_KILL_HINT}
+              {text}
+              {t('agents.separators.sentence')}
+              <Trans
+                i18nKey="agents.messages.reopenCodexHint"
+                components={{ code: <code className="font-mono" /> }}
+              />
             </>,
           );
         }
@@ -199,9 +263,7 @@ export default function AgentsPage(): JSX.Element {
       await api.setCodexOptions({ disableCodexWebSearch: next });
       await api.applyAgent('codex');
       setMessage(
-        next
-          ? '已关闭联网搜索并重新应用配置。Codex 不再发送 web_search 工具。'
-          : '已开启联网搜索并重新应用配置。上游若不支持该工具会报 unsupported_tool。',
+        next ? t('agents.messages.webSearchOff') : t('agents.messages.webSearchOn'),
       );
       settings.reload();
       agents.reload();
@@ -221,7 +283,8 @@ export default function AgentsPage(): JSX.Element {
   const saveCodexStreamOptions = (input: {
     codexStreamMaxRetries?: number | null;
     codexStreamIdleTimeoutMs?: number | null;
-    hint: string;
+    /** 成功提示的字典键（清空与保存是两句不同的话）。 */
+    messageKey: MessageKey;
   }): Promise<void> =>
     run('toggle:stream', async () => {
       await api.setCodexOptions({
@@ -229,7 +292,7 @@ export default function AgentsPage(): JSX.Element {
         codexStreamIdleTimeoutMs: input.codexStreamIdleTimeoutMs,
       });
       await api.applyAgent('codex');
-      setMessage(`${input.hint}已重新应用配置。重启 Codex 后生效。`);
+      setMessage(t(input.messageKey));
       settings.reload();
       agents.reload();
       if (preview?.agentId === 'codex') setPreview(await api.previewAgent('codex'));
@@ -254,17 +317,17 @@ export default function AgentsPage(): JSX.Element {
       (nextRetries !== null && !Number.isFinite(nextRetries)) ||
       (nextIdle !== null && !Number.isFinite(nextIdle))
     ) {
-      setError('流式参数必须是数字，或留空使用默认值');
+      setError(t('agents.messages.streamInvalid'));
       return Promise.resolve();
     }
 
     return saveCodexStreamOptions({
       codexStreamMaxRetries: nextRetries,
       codexStreamIdleTimeoutMs: nextIdle,
-      hint:
+      messageKey:
         nextRetries === null && nextIdle === null
-          ? '已清空流式参数（改用 Codex 默认）。'
-          : '已保存流式参数并',
+          ? 'agents.messages.streamCleared'
+          : 'agents.messages.streamSaved',
     });
   };
 
@@ -308,8 +371,8 @@ export default function AgentsPage(): JSX.Element {
       await api.setCodexOptions({ approvalReviewModel: model || null });
       setMessage(
         model
-          ? `已设置：审批请求里的 gpt-5.6-luna 会被换成 ${model}。`
-          : '已清除审批模型映射，审批将按 Codex 默认行为调用。',
+          ? t('agents.messages.approvalSet', { model })
+          : t('agents.messages.approvalCleared'),
       );
       settings.reload();
     });
@@ -326,9 +389,7 @@ export default function AgentsPage(): JSX.Element {
     run('toggle:conversion', async () => {
       await api.setCodexOptions({ protocolConversion: next });
       setMessage(
-        next
-          ? '已开启跨协议转发：Responses 请求会被转成 Chat 发给上游。托管工具（如 web_search）无等价物，会被丢弃。'
-          : '已关闭跨协议转发：协议不匹配的请求将返回 501。',
+        next ? t('agents.messages.conversionOn') : t('agents.messages.conversionOff'),
       );
       settings.reload();
     });
@@ -345,8 +406,8 @@ export default function AgentsPage(): JSX.Element {
       await api.applyAgent(id);
       setMessage(
         providerId
-          ? '已选定直连供应商并写入配置。之后不启动本服务也能用。'
-          : '已清除直连供应商选择。',
+          ? t('agents.messages.directProviderSet')
+          : t('agents.messages.directProviderCleared'),
       );
       settings.reload();
       agents.reload();
@@ -357,13 +418,27 @@ export default function AgentsPage(): JSX.Element {
     run(`revert:${id}`, async () => {
       const result = await api.revertAgent(id);
       if (result.conflicts.length > 0) {
+        // 两句各自带计数（还原了几个 / 保留了几个），各自取复数：
+        // 合成一句会出现"Reverted 1 keys"这种英文单复数错误。
         setMessage(
-          `已还原 ${result.restored.length} 个键；${result.conflicts.length} 个键因被手动修改而保留：${result.conflicts
-            .map((item) => item.key)
-            .join('、')}`,
+          <>
+            {t('agents.messages.reverted', { count: result.restored.length })}
+            {t('agents.separators.list')}
+            {t('agents.messages.conflictsKept', {
+              count: result.conflicts.length,
+              keys: result.conflicts
+                .map((item) => item.key)
+                .join(t('agents.separators.enumeration')),
+            })}
+          </>,
         );
       } else {
-        setMessage(`已还原 ${result.restored.length} 个键。`);
+        setMessage(
+          <>
+            {t('agents.messages.reverted', { count: result.restored.length })}
+            {t('agents.separators.sentence')}
+          </>,
+        );
       }
       agents.reload();
       setPreview(null);
@@ -464,7 +539,7 @@ export default function AgentsPage(): JSX.Element {
    * 用户选中后必然 501 或启动失败 —— 在候选列表里就排除，比事后报错好。
    */
   const directCandidates = (id: string): Provider[] => {
-    const needed = id === 'claude-code' ? 'anthropic' : 'responses';
+    const needed = requiredApiType(id);
     return (providers.data?.providers ?? []).filter(
       (provider) => provider.enabled && provider.apiType === needed,
     );
@@ -473,10 +548,14 @@ export default function AgentsPage(): JSX.Element {
   return (
     <div className="space-y-5">
       <PageHeader
-        eyebrow="本机集成"
-        title="Agent 配置"
-        description="把聚合后的网关地址与令牌写入各 Agent 的配置文件。只改本系统拥有的键，写入前自动备份。"
-        actions={<Badge tone="neutral">{agents.data?.agents.length ?? 0} 个 Agent</Badge>}
+        eyebrow={t('agents.header.eyebrow')}
+        title={t('app.nav.agents')}
+        description={t('agents.header.description')}
+        actions={
+          <Badge tone="neutral">
+            {t('agents.header.count', { count: agents.data?.agents.length ?? 0 })}
+          </Badge>
+        }
       />
 
       {error && <Notice tone="error">{error}</Notice>}
@@ -484,7 +563,7 @@ export default function AgentsPage(): JSX.Element {
 
       {agents.loading && <Spinner />}
       {agents.data && agents.data.agents.length === 0 && (
-        <Empty icon="agents">没有可用的 Agent</Empty>
+        <Empty icon="agents">{t('agents.empty')}</Empty>
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -503,16 +582,17 @@ export default function AgentsPage(): JSX.Element {
                   <h2 className="text-sm font-semibold text-ink">{agent.name}</h2>
                   {agent.applied ? (
                     <Badge tone="ok" dot>
-                      已接管
+                      {t('agents.status.applied')}
                     </Badge>
                   ) : (
-                    <Badge dot>未接管</Badge>
+                    <Badge dot>{t('agents.status.notApplied')}</Badge>
                   )}
                 </div>
                 <p className="mt-1 text-xs leading-5 text-muted">{agent.description}</p>
                 {agent.appliedAt && (
                   <p className="mt-1 text-[11px] text-muted">
-                    最近下发：{new Date(agent.appliedAt).toLocaleString()}
+                    {/* 时间必须按界面语言格式化，不能用 toLocaleString（它跟随浏览器） */}
+                    {t('agents.card.appliedAt', { time: formatDateTime(agent.appliedAt) })}
                     {agent.appliedBy ? ` · ${agent.appliedBy}` : ''}
                   </p>
                 )}
@@ -527,7 +607,9 @@ export default function AgentsPage(): JSX.Element {
                 onClick={() => void doPreview(agent.id)}
               >
                 <Icon name="play" className="size-3.5" />
-                {busy === `preview:${agent.id}` ? '预览中…' : '预览'}
+                {busy === `preview:${agent.id}`
+                  ? t('agents.actions.previewing')
+                  : t('agents.actions.preview')}
               </button>
               <button
                 type="button"
@@ -536,7 +618,11 @@ export default function AgentsPage(): JSX.Element {
                 onClick={() => void doApply(agent.id)}
               >
                 <Icon name="zap" className="size-3.5" />
-                {busy === `apply:${agent.id}` ? '写入中…' : agent.applied ? '重新应用' : '应用配置'}
+                {busy === `apply:${agent.id}`
+                  ? t('agents.actions.applying')
+                  : agent.applied
+                    ? t('agents.actions.reapply')
+                    : t('agents.actions.apply')}
               </button>
               {/* 只有 Codex 有常驻进程与启动时快照的模型目录，Claude Code 不需要 */}
               {agent.id === 'codex' && (
@@ -544,11 +630,13 @@ export default function AgentsPage(): JSX.Element {
                   type="button"
                   className="btn-outline btn-sm"
                   disabled={busy === `stop:${agent.id}`}
-                  title="结束本机正在运行的 Codex（TUI 与托管守护进程），让它重新读取配置与模型目录"
+                  title={t('agents.actions.stopTitle')}
                   onClick={() => void doStopProcesses(agent.id)}
                 >
                   <Icon name="refresh" className="size-3.5" />
-                  {busy === `stop:${agent.id}` ? '结束中…' : '退出 Codex 进程'}
+                  {busy === `stop:${agent.id}`
+                    ? t('agents.actions.stopping')
+                    : t('agents.actions.stop')}
                 </button>
               )}
               <button
@@ -557,7 +645,9 @@ export default function AgentsPage(): JSX.Element {
                 disabled={!agent.applied || busy === `revert:${agent.id}`}
                 onClick={() => void doRevert(agent.id)}
               >
-                {busy === `revert:${agent.id}` ? '还原中…' : '还原'}
+                {busy === `revert:${agent.id}`
+                  ? t('agents.actions.reverting')
+                  : t('agents.actions.revert')}
               </button>
             </div>
 
@@ -569,14 +659,11 @@ export default function AgentsPage(): JSX.Element {
               却还没选供应商），自动 apply 会拿 400 当反馈。用户点「应用配置」才写入。
             */}
             <div className="mt-3 border-t border-line pt-3">
-              <span className="block text-xs font-medium text-ink">连接方式</span>
+              <span className="block text-xs font-medium text-ink">
+                {t('agents.connection.label')}
+              </span>
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                {(
-                  [
-                    ['gateway', '走网关', '请求经本服务转发，可换源、回退并记录请求日志。'],
-                    ['direct', '直连上游', '把上游地址与 Key 直接写进配置；不启动本服务也能用。'],
-                  ] as Array<[AgentConnectionMode, string, string]>
-                ).map(([mode, label, desc]) => {
+                {CONNECTION_MODES.map(([mode, labelKey, descKey]) => {
                   const active = (currentTarget?.mode ?? 'gateway') === mode;
                   return (
                     <button
@@ -592,10 +679,10 @@ export default function AgentsPage(): JSX.Element {
                     >
                       <span className="flex items-center gap-1.5 text-xs font-medium text-ink">
                         {active && <Icon name="check" className="size-3.5 text-accent" />}
-                        {label}
+                        {t(labelKey)}
                       </span>
                       <span className="mt-0.5 block text-[11px] leading-4 text-muted">
-                        {desc}
+                        {t(descKey)}
                       </span>
                     </button>
                   );
@@ -617,7 +704,7 @@ export default function AgentsPage(): JSX.Element {
                     htmlFor={`direct-provider-${agent.id}`}
                     className="block text-[11px] font-medium text-ink"
                   >
-                    直连供应商
+                    {t('agents.connection.providerLabel')}
                   </label>
                   <select
                     id={`direct-provider-${agent.id}`}
@@ -626,21 +713,27 @@ export default function AgentsPage(): JSX.Element {
                     disabled={busy === `provider:${agent.id}` || settings.data === null}
                     onChange={(event) => void pickDirectProvider(agent.id, event.target.value)}
                   >
-                    <option value="">请选择供应商…</option>
+                    <option value="">{t('agents.connection.providerPlaceholder')}</option>
                     {directCandidates(agent.id).map((provider) => (
                       <option key={provider.id} value={provider.id}>
-                        {provider.name}（{provider.apiType}）· {provider.models.length} 个模型
+                        {t('agents.connection.providerOption', {
+                          name: provider.name,
+                          // 协议标识符是机器值（决定路由），不翻译
+                          apiType: provider.apiType,
+                          count: provider.models.length,
+                        })}
                       </option>
                     ))}
                   </select>
                   {directCandidates(agent.id).length === 0 && (
                     <p className="mt-1.5 text-[11px] leading-4 text-danger">
-                      没有可用的供应商：该 Agent 需要{' '}
-                      {agent.id === 'claude-code' ? 'anthropic' : 'responses'} 协议的供应商。
+                      {t('agents.connection.noCandidates', {
+                        apiType: requiredApiType(agent.id),
+                      })}
                     </p>
                   )}
                   <p className="mt-1.5 text-[11px] leading-4 text-muted">
-                    选定后会把该供应商的地址与 Key 写进配置。切换供应商后记得点「应用配置」。
+                    {t('agents.connection.hint')}
                   </p>
                 </div>
               )}
@@ -660,7 +753,7 @@ export default function AgentsPage(): JSX.Element {
                   htmlFor={`approval-model-${agent.id}`}
                   className="block text-xs font-medium text-ink"
                 >
-                  Approve for me 使用的模型
+                  {t('agents.approval.label')}
                 </label>
                 <select
                   id={`approval-model-${agent.id}`}
@@ -669,24 +762,24 @@ export default function AgentsPage(): JSX.Element {
                   disabled={busy === 'approval-model' || settings.data === null}
                   onChange={(event) => void pickApprovalModel(event.target.value)}
                 >
-                  <option value="">不映射（跟随 Codex 默认）</option>
+                  <option value="">{t('agents.approval.none')}</option>
                   {approvalCandidates().map((item) => (
                     <option key={item.model} value={item.model}>
-                      {approvalLabel(item)}
+                      {approvalLabel(t, item)}
                     </option>
                   ))}
                 </select>
                 <p className="mt-1.5 text-[11px] leading-4 text-muted">
-                  Codex 把审批模型写死为{' '}
-                  <code className="font-mono">gpt-5.6-luna</code>，无法配置。走网关时本服务
-                  能识别审批请求（<code className="font-mono">turn_trigger=guardian_review</code>
-                  ），把其中的模型名替换成这里选定的模型。只在走网关时生效。
+                  <Trans
+                    i18nKey="agents.approval.description"
+                    components={{ code: <code className="font-mono" /> }}
+                  />
                 </p>
                 <p className="mt-1 text-[11px] leading-4 text-muted">
-                  每项标注了会走哪家供应商：<strong className="text-ink">直通</strong>
-                  表示协议匹配、不转换；<strong className="text-ink">需转换</strong>
-                  表示要经过跨协议转换（有信息损失）。同名模型被多家声明时，
-                  由网关优先选协议匹配的那家——这里只锁定模型名，不锁定供应商。
+                  <Trans
+                    i18nKey="agents.approval.legend"
+                    components={{ strong: <strong className="text-ink" /> }}
+                  />
                 </p>
               </div>
             )}
@@ -701,8 +794,7 @@ export default function AgentsPage(): JSX.Element {
             {needsConversionHint(agent.id) && (
               <div className="mt-3 rounded-xl border border-warn/40 bg-warn/5 p-3">
                 <p className="text-[11px] leading-4 text-ink">
-                  当前没有「Responses」协议的可启用供应商。已有「Chat」供应商，
-                  下次请求会自动开启跨协议转发并由网关转换；你也可以现在就勾选下方开关。
+                  {t('agents.conversion.hint')}
                 </p>
               </div>
             )}
@@ -728,17 +820,16 @@ export default function AgentsPage(): JSX.Element {
                   />
                   <span className="min-w-0">
                     <span className="block text-xs font-medium text-ink">
-                      跨协议转发（Responses → Chat）
+                      {t('agents.conversion.label')}
                       {busy === 'toggle:conversion' && (
-                        <span className="ml-1 text-muted">切换中…</span>
+                        <span className="ml-1 text-muted">{t('agents.actions.toggling')}</span>
                       )}
                     </span>
                     <span className="mt-0.5 block text-[11px] leading-4 text-muted">
-                      打开后，发往 <code className="font-mono">/v1/responses</code> 的请求可以落到
-                      「OpenAI 兼容（Chat）」供应商上，由网关转换请求、响应与流式事件（含工具调用）。
-                      关闭时协议不匹配一律返回 501。转换有信息损失：托管工具（如{' '}
-                      <code className="font-mono">web_search</code>）没有 Chat 等价物会被丢弃，
-                      依赖会话状态的字段会直接报错。
+                      <Trans
+                        i18nKey="agents.conversion.description"
+                        components={{ code: <code className="font-mono" /> }}
+                      />
                     </span>
                   </span>
                 </label>
@@ -766,15 +857,16 @@ export default function AgentsPage(): JSX.Element {
                   />
                   <span className="min-w-0">
                     <span className="block text-xs font-medium text-ink">
-                      关闭联网搜索（web_search = "disabled"）
+                      {t('agents.webSearch.label')}
                       {busy === 'toggle:web_search' && (
-                        <span className="ml-1 text-muted">切换中…</span>
+                        <span className="ml-1 text-muted">{t('agents.actions.toggling')}</span>
                       )}
                     </span>
                     <span className="mt-0.5 block text-[11px] leading-4 text-muted">
-                      Codex 默认把 <code className="font-mono">web_search</code> 作为 Responses
-                      托管工具塞进请求，多数聚合上游转 Chat 线路时不支持，会报{' '}
-                      <code className="font-mono">unsupported_tool</code>。直连官方上游可关掉此项以保留联网搜索。
+                      <Trans
+                        i18nKey="agents.webSearch.description"
+                        components={{ code: <code className="font-mono" /> }}
+                      />
                     </span>
                   </span>
                 </label>
@@ -795,9 +887,11 @@ export default function AgentsPage(): JSX.Element {
                       与 ProviderForm 的处理保持一致。
                     */}
                     <label className="label flex items-center gap-1.5" htmlFor={streamRetriesId}>
-                      流式重连上限
+                      {t('agents.stream.retriesLabel')}
                       {busy === 'toggle:stream' && (
-                        <span className="text-[11px] font-normal text-muted">保存中…</span>
+                        <span className="text-[11px] font-normal text-muted">
+                          {t('common.saving')}
+                        </span>
                       )}
                     </label>
                     <input
@@ -809,16 +903,16 @@ export default function AgentsPage(): JSX.Element {
                       step={1}
                       value={streamMaxRetries}
                       disabled={settings.loading || busy === 'toggle:stream'}
-                      placeholder="5（Codex 默认）"
+                      placeholder={t('agents.stream.retriesPlaceholder')}
                       onChange={(event) => setStreamMaxRetries(event.target.value)}
                       onBlur={() => void persistStreamOptions()}
                     />
-                    <p className="field-hint">
-                      单位：次，允许 0–100。留空表示不写该键、使用 Codex 默认 5 次。
-                    </p>
+                    <p className="field-hint">{t('agents.stream.retriesHint')}</p>
                   </div>
                   <div>
-                    <label className="label" htmlFor={streamIdleId}>流式空闲超时</label>
+                    <label className="label" htmlFor={streamIdleId}>
+                      {t('agents.stream.idleLabel')}
+                    </label>
                     <input
                       id={streamIdleId}
                       type="number"
@@ -828,20 +922,21 @@ export default function AgentsPage(): JSX.Element {
                       step={1000}
                       value={streamIdleTimeoutMs}
                       disabled={settings.loading || busy === 'toggle:stream'}
-                      placeholder="300000（Codex 默认）"
+                      placeholder={t('agents.stream.idlePlaceholder')}
                       onChange={(event) => setStreamIdleTimeoutMs(event.target.value)}
                       onBlur={() => void persistStreamOptions()}
                     />
-                    <p className="field-hint">
-                      单位：毫秒，允许 1000–3600000。留空表示使用 Codex 默认 300000（5 分钟）。
-                    </p>
+                    <p className="field-hint">{t('agents.stream.idleHint')}</p>
                   </div>
                 </div>
                 <p className="mt-2 text-[11px] leading-4 text-muted">
-                  链路在空闲约 60 秒时被上游/反向代理掐断的情况下，提高重连上限能减少
-                  「重试耗尽后整轮失败」，但<strong className="text-ink">不能消除重连本身</strong>
-                  ——它只是让每次被掐断后更可能接上。空闲超时放宽的是{' '}
-                  <code className="font-mono">Codex 自己的判据</code>，管不了对端主动断连。
+                  <Trans
+                    i18nKey="agents.stream.note"
+                    components={{
+                      strong: <strong className="text-ink" />,
+                      code: <code className="font-mono" />,
+                    }}
+                  />
                 </p>
               </div>
             )}
@@ -852,12 +947,12 @@ export default function AgentsPage(): JSX.Element {
 
       {preview && (
         <Card
-          title={`${preview.name} · 配置预览`}
-          desc={`网关地址：${preview.gatewayBaseUrl}`}
+          title={t('agents.preview.title', { name: preview.name })}
+          desc={t('agents.preview.gatewayBaseUrl', { url: preview.gatewayBaseUrl })}
           actions={
             <IconButton
               icon="x"
-              label="关闭预览"
+              label={t('agents.preview.close')}
               onClick={() => setPreview(null)}
             />
           }
@@ -874,23 +969,24 @@ export default function AgentsPage(): JSX.Element {
                   </span>
                   <code className="font-mono text-xs text-ink">{file.path}</code>
                   {file.exists ? (
-                    <Badge tone="neutral">已存在</Badge>
+                    <Badge tone="neutral">{t('agents.preview.exists')}</Badge>
                   ) : (
-                    <Badge tone="accent">将创建</Badge>
+                    <Badge tone="accent">{t('agents.preview.willCreate')}</Badge>
                   )}
+                  {/* file.role 是机器标识（auth / settings / config），不翻译 */}
                   <Badge tone="neutral">{file.role}</Badge>
                 </div>
                 {file.entries.length === 0 ? (
-                  <Empty>该文件无需写入</Empty>
+                  <Empty>{t('agents.preview.emptyFile')}</Empty>
                 ) : (
                   <div className="overflow-hidden rounded-xl border border-line">
                     <div className="overflow-x-auto">
                       <table className="table-base">
                         <thead>
                           <tr>
-                            <th>键</th>
-                            <th>当前值</th>
-                            <th>将写入</th>
+                            <th>{t('agents.preview.columns.key')}</th>
+                            <th>{t('agents.preview.columns.current')}</th>
+                            <th>{t('agents.preview.columns.next')}</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -898,12 +994,15 @@ export default function AgentsPage(): JSX.Element {
                             <tr key={entry.key}>
                               <td className="font-mono text-xs text-ink">{entry.key}</td>
                               <td className="max-w-[18rem] break-all font-mono text-[11px] text-muted">
-                                {entry.current ?? '（未设置）'}
+                                {entry.current ?? t('agents.preview.currentUnset')}
                               </td>
                               <td className="max-w-[18rem] break-all font-mono text-[11px] text-ink">
                                 {entry.next}
                                 {entry.differs && (
-                                  <span className="ml-1 text-danger" title="与当前值不同">
+                                  <span
+                                    className="ml-1 text-danger"
+                                    title={t('agents.preview.differs')}
+                                  >
                                     ●
                                   </span>
                                 )}

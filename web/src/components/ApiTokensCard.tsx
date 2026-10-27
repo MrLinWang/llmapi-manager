@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { api, ApiError } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { useAsync } from '../lib/useAsync';
@@ -6,6 +7,7 @@ import type { ApiTokenView } from '../lib/types';
 import { Badge, Card, Icon, Notice } from '../components/ui';
 import { CopyButton } from '../components/CopyButton';
 import { permissionLabel } from '../lib/labels';
+import { formatTimestamp } from '../i18n/format';
 
 /**
  * API 令牌管理。
@@ -15,6 +17,7 @@ import { permissionLabel } from '../lib/labels';
  */
 export function ApiTokensCard(): JSX.Element {
   const { can } = useAuth();
+  const { t } = useTranslation();
   const tokens = useAsync(() => api.apiTokens());
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<string[]>([]);
@@ -34,11 +37,11 @@ export function ApiTokensCard(): JSX.Element {
     setError(null);
     setMessage(null);
     if (name.trim() === '') {
-      setError('请填写用途名称');
+      setError(t('tokens.name.required'));
       return;
     }
     if (scopes.length === 0) {
-      setError('至少勾选一个权限');
+      setError(t('tokens.scopes.required'));
       return;
     }
     setBusy(true);
@@ -55,7 +58,7 @@ export function ApiTokensCard(): JSX.Element {
       setExpiresAt('');
       tokens.reload();
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : '创建失败');
+      setError(cause instanceof ApiError ? cause.message : t('common.createFailed'));
     } finally {
       setBusy(false);
     }
@@ -64,28 +67,26 @@ export function ApiTokensCard(): JSX.Element {
   const revoke = async (token: ApiTokenView): Promise<void> => {
     setError(null);
     setMessage(null);
-    if (!window.confirm(`吊销令牌「${token.name}」？使用它的脚本会立刻失效。`)) return;
+    if (!window.confirm(t('tokens.revokeConfirm', { name: token.name }))) return;
     setBusy(true);
     try {
       await api.revokeApiToken(token.id);
-      setMessage(`已吊销「${token.name}」`);
+      setMessage(t('tokens.revokeDone', { name: token.name }));
       tokens.reload();
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : '吊销失败');
+      setError(cause instanceof ApiError ? cause.message : t('common.revokeFailed'));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <Card
-      title="API 令牌"
-      desc="让脚本或 CI 调用本服务的管理接口。与网关令牌（lam_）是两套，别混用。"
-    >
+    <Card title={t('tokens.title')} desc={t('tokens.desc')}>
       {revealed && (
         <div className="mb-4 rounded-xl border border-accent/40 bg-accent-soft/60 p-4">
           <p className="text-xs font-medium text-ink">
-            令牌已创建，<strong>关闭后无法再次查看</strong>
+            {/* `<strong>` 是对"看不到第二次"的强调，交给内联标记，避免拆句后语序别扭 */}
+            <Trans i18nKey="tokens.revealed.title" components={{ strong: <strong /> }} />
           </p>
           <div className="mt-2 flex items-center gap-2">
             <code className="min-w-0 flex-1 truncate rounded-lg bg-canvas px-2 py-1.5 font-mono text-[11px] text-ink">
@@ -93,11 +94,13 @@ export function ApiTokensCard(): JSX.Element {
             </code>
             <CopyButton value={revealed} />
             <button type="button" className="btn-ghost btn-sm" onClick={() => setRevealed(null)}>
-              我已保存
+              {t('tokens.revealed.saved')}
             </button>
           </div>
           <p className="mt-2 text-[11px] leading-4 text-muted">
-            调用方式：<code className="font-mono">Authorization: Bearer &lt;令牌&gt;</code>
+            {/* `Authorization: Bearer` 与 `<令牌>` 是照抄用的标识符，不翻译 */}
+            {t('tokens.revealed.usage')}
+            <code className="font-mono">{t('tokens.revealed.authorizationHeader')}</code>
           </p>
         </div>
       )}
@@ -117,12 +120,12 @@ export function ApiTokensCard(): JSX.Element {
         <div className="grid gap-3 sm:grid-cols-2">
           <div>
             <label className="label" htmlFor="token-name">
-              用途名称
+              {t('tokens.name.label')}
             </label>
             <input
               id="token-name"
               className="input"
-              placeholder="例如：CI 部署脚本"
+              placeholder={t('tokens.name.placeholder')}
               value={name}
               maxLength={64}
               onChange={(event) => setName(event.target.value)}
@@ -130,7 +133,7 @@ export function ApiTokensCard(): JSX.Element {
           </div>
           <div>
             <label className="label" htmlFor="token-expires">
-              过期时间（留空不过期）
+              {t('tokens.expires.label')}
             </label>
             <input
               id="token-expires"
@@ -143,7 +146,7 @@ export function ApiTokensCard(): JSX.Element {
         </div>
 
         <div>
-          <span className="label">权限</span>
+          <span className="label">{t('tokens.scopes.label')}</span>
           <div className="mt-1 grid gap-1.5 sm:grid-cols-2">
             {grantable.map((item) => (
               <label key={item} className="flex cursor-pointer items-center gap-2 text-xs text-ink">
@@ -158,25 +161,23 @@ export function ApiTokensCard(): JSX.Element {
                   }
                 />
                 <span className="font-mono text-[11px]">{item}</span>
-                <span className="text-muted">{permissionLabel(item)}</span>
+                <span className="text-muted">{permissionLabel(t, item)}</span>
               </label>
             ))}
           </div>
-          <p className="mt-1.5 text-[11px] leading-4 text-muted">
-            只能授予自己拥有的权限——令牌是收窄授权，不能用来提权。
-          </p>
+          <p className="mt-1.5 text-[11px] leading-4 text-muted">{t('tokens.scopes.hint')}</p>
         </div>
 
         <button type="submit" className="btn-primary" disabled={busy}>
-          {busy ? '处理中…' : '创建令牌'}
+          {busy ? t('tokens.submitting') : t('tokens.submit')}
         </button>
       </form>
 
       <div className="mt-5 border-t border-line pt-4">
         {tokens.loading ? (
-          <p className="text-xs text-muted">加载中…</p>
+          <p className="text-xs text-muted">{t('common.loading')}</p>
         ) : (tokens.data?.tokens.length ?? 0) === 0 ? (
-          <p className="text-xs text-muted">还没有创建任何令牌。</p>
+          <p className="text-xs text-muted">{t('tokens.empty')}</p>
         ) : (
           <ul className="space-y-2">
             {tokens.data?.tokens.map((token) => {
@@ -194,19 +195,19 @@ export function ApiTokensCard(): JSX.Element {
                     {token.prefix}…{token.tail}
                   </code>
                   {revoked ? (
-                    <Badge tone="danger">已吊销</Badge>
+                    <Badge tone="danger">{t('tokens.status.revoked')}</Badge>
                   ) : expired ? (
-                    <Badge tone="warn">已过期</Badge>
+                    <Badge tone="warn">{t('tokens.status.expired')}</Badge>
                   ) : (
-                    <Badge tone="ok">有效</Badge>
+                    <Badge tone="ok">{t('tokens.status.active')}</Badge>
                   )}
                   <span className="text-[11px] text-muted">
-                    {token.scopes.map(permissionLabel).join('、')}
+                    {token.scopes.map((permission) => permissionLabel(t, permission)).join(t('tokens.scopes.separator'))}
                   </span>
                   <span className="text-[11px] text-muted">
                     {token.lastUsedAt
-                      ? `最后使用 ${token.lastUsedAt.slice(0, 16).replace('T', ' ')}`
-                      : '从未使用'}
+                      ? t('tokens.lastUsed', { time: formatTimestamp(token.lastUsedAt) })
+                      : t('tokens.neverUsed')}
                   </span>
                   {!revoked && can('settings:write') && (
                     <button
@@ -215,7 +216,7 @@ export function ApiTokensCard(): JSX.Element {
                       disabled={busy}
                       onClick={() => void revoke(token)}
                     >
-                      吊销
+                      {t('tokens.revoke')}
                     </button>
                   )}
                 </li>

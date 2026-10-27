@@ -1,3 +1,5 @@
+import type { UiLanguage } from '../i18n/language';
+
 export type ApiType = 'openai' | 'anthropic' | 'responses';
 
 /**
@@ -197,6 +199,13 @@ export interface Me {
   user: { id: string; tenantId: string; role: string; username: string };
   permissions: string[];
   allPermissions: string[];
+  /**
+   * 界面语言偏好；`null` 表示跟随浏览器。
+   *
+   * 放在 `/api/auth/me` 里而不是只放 `/api/settings`：member 角色没有 `settings:read`，
+   * 但同样要看到正确语言的界面。
+   */
+  language: UiLanguage | null;
 }
 
 /** 首次初始化状态（GET /api/setup/status，免鉴权） */

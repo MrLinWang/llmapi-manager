@@ -102,6 +102,10 @@ export function registerAuthRoutes(
         },
         permissions: ROLE_PERMISSIONS[principal.role],
         allPermissions: PERMISSIONS,
+        // 界面语言随身份一起返回，前端不用额外发一次请求。
+        // 放这里而不是只在 /api/settings：member 角色没有 settings:read，
+        // 但同样要看到正确语言的界面。
+        language: ctx.store.forTenant(principal.tenantId).settings.read().language,
       };
     },
   );

@@ -63,15 +63,20 @@
 
 ### GET /api/auth/me
 
-需登录。返回身份与权限清单（前端据此决定显示哪些菜单）。
+需登录。返回身份与权限清单（前端据此决定显示哪些菜单），以及界面语言偏好。
 
 ```json
 {
   "user": { "id": "u_owner", "tenantId": "t_default", "role": "owner", "username": "admin" },
   "permissions": ["providers:read", "..."],
-  "allPermissions": ["providers:read", "..."]
+  "allPermissions": ["providers:read", "..."],
+  "language": "zh"
 }
 ```
+
+`language` 取 `"zh"` / `"en"` / `null`；`null` 表示"跟随浏览器"，由前端按
+`navigator.languages` 决定。它放在这里（而不是只放 `/api/settings`）的原因：
+`member` 角色没有 `settings:read`，但同样需要看到正确语言的界面。
 
 ### POST /api/auth/password
 
@@ -159,7 +164,8 @@
 | `anthropic` | Anthropic 兼容（Messages） | `/v1/messages` |
 
 协议不符的请求由网关返回 501，供应商本身不会被调用。前端下拉顺序是
-`openai` → `responses` → `anthropic`（`web/src/lib/labels.ts` 的 `API_TYPE_META`）。
+`openai` → `responses` → `anthropic`（`web/src/lib/labels.ts` 的 `API_TYPE_META`，
+文案键在 `web/src/i18n/locales/{zh,en}/labels.ts`）。
 
 连通性测试返回：
 
@@ -263,7 +269,29 @@
 
 ### GET /api/settings
 
-权限 `settings:read`。返回 `defaultProviderId` / `defaultModel` / `disableCodexWebSearch` / `approvalReviewModel` / `protocolConversion` / `agentTargets` / `gatewayBaseUrl` / `token`（脱敏）。
+权限 `settings:read`。返回 `defaultProviderId` / `defaultModel` / `language` / `disableCodexWebSearch` / `approvalReviewModel` / `protocolConversion` / `codexStreamMaxRetries` / `codexStreamIdleTimeoutMs` / `agentTargets` / `gatewayBaseUrl` / `token`（脱敏）。
+
+### PATCH /api/settings/language
+
+权限 `settings:write`。设置控制台界面语言。
+
+```json
+{ "language": "en" }
+```
+
+| 字段 | 取值 | 说明 |
+| --- | --- | --- |
+| `language` | `"zh"` / `"en"` / `null` | `null` = 跟随浏览器语言（前端按 `navigator.languages` 探测） |
+
+返回 `{ "language": "en" }`。字段缺失、或值不在允许集合内 → 400
+（`language 必须是 zh 或 en，或 null`）。**字段缺失与显式 `null` 不同**：
+后者是用户选择"跟随浏览器"，前者多半是调用方字段名写错，静默接受会让
+"设置了语言却没生效"变得无从排查。
+
+这是租户级设置，与其它设置共用 `data/tenants/<tenantId>/settings.json`。
+它只是界面偏好：不参与网关转发、不改任何 Agent 下发文件，因此响应里**没有**
+`requiresReapply`。读路径会把非法值（例如手改成 `"jp"`）降级为 `null`，
+写接口则严格返回 400。
 
 ### PUT /api/settings/default
 

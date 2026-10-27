@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import type { SetupStatus } from '../lib/types';
 import { Icon, Notice } from '../components/ui';
+import { LanguageSelect } from '../components/LanguageSelect';
 
 /**
  * 首次初始化页。
@@ -14,12 +16,15 @@ import { Icon, Notice } from '../components/ui';
 export default function SetupPage(): JSX.Element {
   const navigate = useNavigate();
   const { refresh } = useAuth();
+  const { t } = useTranslation();
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [token, setToken] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [error, setError] = useState<string | null>(null);
+  /** 读状态失败：存标记而不是句子，渲染时再取字典，切语言后提示也会跟着变 */
+  const [statusFailed, setStatusFailed] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -33,7 +38,9 @@ export default function SetupPage(): JSX.Element {
           navigate('/login', { replace: true });
         }
       } catch {
-        setError('无法读取初始化状态，请确认服务已启动');
+        // 这里刻意不放 `t` 进依赖：切语言会重跑一遍 effect，把用户已填的用户名
+        // 重新覆盖成 defaultUsername。提示文案在渲染处取即可。
+        setStatusFailed(true);
       }
     })();
   }, [navigate]);
@@ -58,29 +65,35 @@ export default function SetupPage(): JSX.Element {
       await refresh();
       navigate('/', { replace: true });
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : '初始化失败');
+      setError(cause instanceof ApiError ? cause.message : t('common.setupFailed'));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="auth-canvas flex min-h-full items-center justify-center px-4 py-12">
+    <div className="auth-canvas relative flex min-h-full items-center justify-center px-4 py-12">
+      {/*
+       * 首次初始化时同样读不到服务端设置（还没有账号），所以只做本地切换：
+       * 不传 `onChange`、不落盘，`value` 固定 `null` 表示按浏览器探测。
+       */}
+      <div className="absolute right-4 top-4 w-36">
+        <LanguageSelect value={null} />
+      </div>
+
       <div className="w-full max-w-[440px]">
         <div className="mb-6 flex flex-col items-center text-center">
           <span className="mb-3 flex size-12 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-accent-strong text-white shadow-sm">
             <Icon name="shield" className="size-6" />
           </span>
-          <h1 className="text-xl font-semibold tracking-tight text-ink">设置管理员账号</h1>
-          <p className="mt-1 text-sm text-muted">
-            这是首次启动。请设置你自己的用户名与口令，完成后即可登录。
-          </p>
+          <h1 className="text-xl font-semibold tracking-tight text-ink">{t('setup.title')}</h1>
+          <p className="mt-1 text-sm text-muted">{t('setup.description')}</p>
         </div>
 
         <form onSubmit={(event) => void submit(event)} className="card space-y-4 p-6">
           <div>
             <label className="label" htmlFor="token">
-              初始化令牌
+              {t('setup.token.label')}
             </label>
             <input
               id="token"
@@ -88,18 +101,21 @@ export default function SetupPage(): JSX.Element {
               value={token}
               autoComplete="off"
               spellCheck={false}
-              placeholder="setup_…"
+              placeholder={t('setup.token.placeholder')}
               onChange={(event) => setToken(event.target.value)}
             />
             <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
-              首次启动时打印在服务端控制台。令牌只用于认领管理员账号，设置完成后立即失效。
-              看不到？删除 <code className="font-mono">data/setup.json</code> 后重启服务会重新生成。
+              {/* 路径 `data/setup.json` 是标识符，不翻译，交给内联标记 */}
+              <Trans
+                i18nKey="setup.token.hint"
+                components={{ code: <code className="font-mono" /> }}
+              />
             </p>
           </div>
 
           <div>
             <label className="label" htmlFor="username">
-              用户名
+              {t('setup.username.label')}
             </label>
             <input
               id="username"
@@ -110,15 +126,17 @@ export default function SetupPage(): JSX.Element {
             />
             {status && (
               <p className="mt-1.5 text-[11px] text-muted">
-                {status.rules.minUsernameLength}–{status.rules.maxUsernameLength} 个字符，
-                只用字母、数字、点、下划线与连字符。
+                {t('setup.username.rules', {
+                  min: status.rules.minUsernameLength,
+                  max: status.rules.maxUsernameLength,
+                })}
               </p>
             )}
           </div>
 
           <div>
             <label className="label" htmlFor="password">
-              口令
+              {t('setup.password.label')}
             </label>
             <input
               id="password"
@@ -129,13 +147,15 @@ export default function SetupPage(): JSX.Element {
               onChange={(event) => setPassword(event.target.value)}
             />
             {passwordTooShort && (
-              <p className="mt-1.5 text-[11px] text-danger">口令至少 {minPassword} 位</p>
+              <p className="mt-1.5 text-[11px] text-danger">
+                {t('setup.password.tooShort', { count: minPassword })}
+              </p>
             )}
           </div>
 
           <div>
             <label className="label" htmlFor="confirm">
-              确认口令
+              {t('setup.confirm.label')}
             </label>
             <input
               id="confirm"
@@ -145,24 +165,25 @@ export default function SetupPage(): JSX.Element {
               autoComplete="new-password"
               onChange={(event) => setConfirm(event.target.value)}
             />
-            {mismatch && <p className="mt-1.5 text-[11px] text-danger">两次输入的口令不一致</p>}
+            {mismatch && (
+              <p className="mt-1.5 text-[11px] text-danger">{t('setup.confirm.mismatch')}</p>
+            )}
           </div>
 
           {error && <Notice tone="error">{error}</Notice>}
+          {!error && statusFailed && <Notice tone="error">{t('setup.statusFailed')}</Notice>}
 
           <button type="submit" className="btn-primary w-full" disabled={!canSubmit}>
-            {busy ? '正在创建…' : '创建管理员并登录'}
+            {busy ? t('setup.submitting') : t('setup.submit')}
           </button>
 
           <div className="flex items-start gap-1.5 text-[11px] leading-relaxed text-muted">
             <Icon name="shield" className="mt-0.5 size-3.5 shrink-0" />
-            口令只保存 scrypt 哈希，服务端无法还原明文；初始化令牌在完成后作废。
+            {t('setup.securityNote')}
           </div>
         </form>
 
-        <p className="mt-5 text-center text-[11px] text-muted">
-          自托管 · 单进程 · 数据留在本机
-        </p>
+        <p className="mt-5 text-center text-[11px] text-muted">{t('app.selfHostedNote')}</p>
       </div>
     </div>
   );

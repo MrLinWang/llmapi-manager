@@ -1,7 +1,7 @@
 import type { Logger } from '../logger';
 import type { ProvidersData, ProviderRecord } from '../domain/provider';
 import type { TenantSettings } from '../domain/settings';
-import { defaultTenantSettings } from '../domain/settings';
+import { defaultTenantSettings, normalizeUiLanguage } from '../domain/settings';
 import type { AgentsData, AgentBindingState, AgentId } from '../domain/agent';
 import { defaultAgentsData } from '../domain/agent';
 import type { RequestLogRecord } from '../domain/requestLog';
@@ -93,7 +93,12 @@ export function createStore(
     };
 
     const settings: SettingsRepo = {
-      read: () => ({ ...defaultTenantSettings(), ...settingsFile.read() }),
+      // 读路径统一把 language 收敛成合法值：settings.json 是手改得动的纯文本，
+      // 写入未知语言时不能原样透给前端（界面会显示键名或空白）。
+      read: () => {
+        const merged = { ...defaultTenantSettings(), ...settingsFile.read() };
+        return { ...merged, language: normalizeUiLanguage(merged.language) };
+      },
       write: (next) => settingsFile.write(next),
     };
 

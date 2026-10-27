@@ -1,50 +1,81 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
 import { api } from '../lib/api';
-import { roleLabel } from '../lib/labels';
+import { applyLanguage } from '../i18n';
+import type { UiLanguage } from '../i18n/language';
+import { roleLabel, type MessageKey } from '../lib/labels';
+import { LanguageSelect } from '../components/LanguageSelect';
 import { Icon, IconButton, Notice, type IconName } from '../components/ui';
 
+/**
+ * 导航项只存文案键、不存文案：语言切换要立刻生效，把中文写死在这里
+ * 就得在切换时重建数组，而键是稳定的、`t()` 每次渲染都会取当前语言。
+ */
 interface NavItem {
   to: string;
-  label: string;
+  labelKey: MessageKey;
   permission: string;
   icon: IconName;
 }
 
-const NAV_GROUPS: Array<{ label: string; items: NavItem[] }> = [
+const NAV_GROUPS: Array<{ labelKey: MessageKey; items: NavItem[] }> = [
   {
-    label: '控制台',
-    items: [{ to: '/', label: '概览', permission: 'logs:read', icon: 'overview' }],
+    labelKey: 'app.nav.groupConsole',
+    items: [{ to: '/', labelKey: 'app.nav.overview', permission: 'logs:read', icon: 'overview' }],
   },
   {
-    label: '配置',
+    labelKey: 'app.nav.groupConfig',
     items: [
-      { to: '/providers', label: '供应商', permission: 'providers:read', icon: 'providers' },
-      { to: '/models', label: '模型聚合', permission: 'providers:read', icon: 'models' },
-      { to: '/agents', label: 'Agent 配置', permission: 'agents:read', icon: 'agents' },
-      { to: '/settings', label: '设置', permission: 'settings:read', icon: 'settings' },
+      {
+        to: '/providers',
+        labelKey: 'app.nav.providers',
+        permission: 'providers:read',
+        icon: 'providers',
+      },
+      {
+        to: '/models',
+        labelKey: 'app.nav.models',
+        permission: 'providers:read',
+        icon: 'models',
+      },
+      {
+        to: '/agents',
+        labelKey: 'app.nav.agents',
+        permission: 'agents:read',
+        icon: 'agents',
+      },
+      {
+        to: '/settings',
+        labelKey: 'app.nav.settings',
+        permission: 'settings:read',
+        icon: 'settings',
+      },
     ],
   },
 ];
 
-const PAGE_META: Record<string, { group: string; label: string }> = {
-  '/': { group: '控制台', label: '概览' },
-  '/providers': { group: '配置', label: '供应商' },
-  '/models': { group: '配置', label: '模型聚合' },
-  '/agents': { group: '配置', label: 'Agent 配置' },
-  '/settings': { group: '配置', label: '设置' },
+/** 面包屑与侧边栏共用 `app.nav.*`：两处各写一份会出现"侧边栏改了、面包屑没改"。 */
+const PAGE_META: Record<string, { groupKey: MessageKey; labelKey: MessageKey }> = {
+  '/': { groupKey: 'app.nav.groupConsole', labelKey: 'app.nav.overview' },
+  '/providers': { groupKey: 'app.nav.groupConfig', labelKey: 'app.nav.providers' },
+  '/models': { groupKey: 'app.nav.groupConfig', labelKey: 'app.nav.models' },
+  '/agents': { groupKey: 'app.nav.groupConfig', labelKey: 'app.nav.agents' },
+  '/settings': { groupKey: 'app.nav.groupConfig', labelKey: 'app.nav.settings' },
 };
 
 function Brand(): JSX.Element {
+  const { t } = useTranslation();
   return (
     <div className="flex items-center gap-2.5">
       <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-accent to-accent-strong text-white shadow-sm">
         <Icon name="sparkles" className="size-[18px]" />
       </span>
       <div className="min-w-0">
-        <p className="truncate text-sm font-semibold tracking-tight text-ink">LLM API Manager</p>
-        <p className="text-[11px] text-muted">自托管网关控制台</p>
+        {/* `app.brand` 中英两份文本相同：产品名不随语言变化，但仍走字典以统一取文案的路径 */}
+        <p className="truncate text-sm font-semibold tracking-tight text-ink">{t('app.brand')}</p>
+        <p className="text-[11px] text-muted">{t('app.tagline')}</p>
       </div>
     </div>
   );
@@ -54,15 +85,28 @@ function SidebarContent({
   can,
   username,
   role,
+  language,
+  languageEditable,
+  languagePending,
+  languageFailed,
+  onLanguageChange,
   onNavigate,
   onLogout,
 }: {
   can: (permission: string) => boolean;
   username: string;
   role: string;
+  language: UiLanguage | null;
+  /** 有 settings:write 才允许改；否则只读展示 */
+  languageEditable: boolean;
+  languagePending: boolean;
+  /** 落盘失败的标记：失败时界面语言已回滚，这里只负责提示 */
+  languageFailed: boolean;
+  onLanguageChange: (language: UiLanguage | null) => void;
   onNavigate?: () => void;
   onLogout: () => void;
 }): JSX.Element {
+  const { t } = useTranslation();
   const initial = (username || 'U').slice(0, 1).toUpperCase();
 
   return (
@@ -76,9 +120,9 @@ function SidebarContent({
           const items = group.items.filter((item) => can(item.permission));
           if (items.length === 0) return null;
           return (
-            <div key={group.label} className="mb-5 last:mb-0">
+            <div key={group.labelKey} className="mb-5 last:mb-0">
               <p className="mb-1.5 px-3 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted/80">
-                {group.label}
+                {t(group.labelKey)}
               </p>
               <div className="space-y-0.5">
                 {items.map((item) => (
@@ -98,7 +142,7 @@ function SidebarContent({
                     {({ isActive }) => (
                       <>
                         <Icon name={item.icon} className="size-[18px] shrink-0" />
-                        <span className="truncate">{item.label}</span>
+                        <span className="truncate">{t(item.labelKey)}</span>
                         {isActive && <span className="ml-auto size-1.5 rounded-full bg-accent" />}
                       </>
                     )}
@@ -111,6 +155,26 @@ function SidebarContent({
       </nav>
 
       <div className="shrink-0 border-t border-line p-3">
+        {/* 语言选择器放在用户卡片上方：它跟"当前是谁"无关，但和账号一样是全局偏好 */}
+        <div className="mb-2.5 px-1">
+          <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-muted/80">
+            {t('app.language.label')}
+          </p>
+          {/* 无 settings:write 时只读：下拉框本身已有 aria-label，这里只用 title 说明原因 */}
+          <div title={languageEditable ? undefined : t('app.language.readOnly')}>
+            <LanguageSelect
+              value={language}
+              disabled={!languageEditable || languagePending}
+              onChange={onLanguageChange}
+              className="input"
+            />
+          </div>
+          {languageFailed && (
+            <p className="mt-1 text-[11px] text-danger" role="alert">
+              {t('app.language.saveFailed')}
+            </p>
+          )}
+        </div>
         <div className="flex items-center gap-2.5 rounded-xl bg-subtle/70 px-3 py-2.5">
           <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-semibold text-white">
             {initial}
@@ -119,7 +183,7 @@ function SidebarContent({
             <p className="truncate text-xs font-medium text-ink">{username}</p>
             <p className="text-[11px] text-muted">{role}</p>
           </div>
-          <IconButton icon="logout" label="退出登录" onClick={onLogout} />
+          <IconButton icon="logout" label={t('app.logout')} onClick={onLogout} />
         </div>
       </div>
     </>
@@ -127,11 +191,22 @@ function SidebarContent({
 }
 
 export default function Layout(): JSX.Element {
-  const { me, logout, can } = useAuth();
+  const { me, logout, can, refresh } = useAuth();
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   const [warnings, setWarnings] = useState<Array<{ code: string; message: string }>>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [languagePending, setLanguagePending] = useState(false);
+  const [languageFailed, setLanguageFailed] = useState(false);
+  /**
+   * 已选但还没落盘的语言（`undefined` = 以服务端为准）。
+   *
+   * 为什么不直接把 select 的 value 绑服务端值：下拉框是受控的，
+   * 保存请求回来之前 `me.language` 还是旧值，React 会用旧值把下拉框重置回去，
+   * 用户看到的就是"点了选项又跳回原来那个"。成功后 `refresh()` 更新 `me` 再清掉这里。
+   */
+  const [languageDraft, setLanguageDraft] = useState<UiLanguage | null | undefined>(undefined);
 
   useEffect(() => {
     api
@@ -158,9 +233,48 @@ export default function Layout(): JSX.Element {
     navigate('/login', { replace: true });
   };
 
-  const username = me?.user.username ?? '未登录';
-  const role = roleLabel(me?.user.role);
-  const meta = PAGE_META[location.pathname] ?? { group: '控制台', label: '' };
+  /**
+   * 切换界面语言并落盘。
+   *
+   * `LanguageSelect` 内部已经乐观地 `applyLanguage(next)`（点了就能看到效果），
+   * 这里只负责持久化。落盘失败必须回滚，否则会出现"看着切了、刷新又变回去"。
+   *
+   * 落盘成功后再 `refresh()` 重取 `/api/auth/me`：下拉框的 `value` 最终取自
+   * `me.language`（服务端是唯一真源），不刷新就会"界面英文、下拉框还显示中文"。
+   * 但**刷新失败不能回滚**——语言已经存进服务端了，把界面切回去反而与该真源不符。
+   */
+  const changeLanguage = async (next: UiLanguage | null): Promise<void> => {
+    const previous = me?.language ?? null;
+    if (next === previous) return;
+    setLanguageDraft(next);
+    setLanguagePending(true);
+    setLanguageFailed(false);
+    let persisted = false;
+    try {
+      await api.setLanguage(next);
+      persisted = true;
+      await refresh();
+    } catch {
+      if (!persisted) {
+        applyLanguage(previous);
+        setLanguageFailed(true);
+      }
+    } finally {
+      // 请求飞行期间由 draft 顶住受控值；这里交还给服务端值（refresh 已更新 me）
+      setLanguageDraft(undefined);
+      setLanguagePending(false);
+    }
+  };
+
+  const username = me?.user.username ?? t('app.notLoggedIn');
+  const role = roleLabel(t, me?.user.role);
+  const meta = PAGE_META[location.pathname];
+  // 未知路径（理论上会被路由重定向掉）仍给出分组、不给标题，避免闪出一串键名
+  const groupLabel = t(meta?.groupKey ?? 'app.nav.groupConsole');
+  const pageLabel = meta ? t(meta.labelKey) : '';
+  // 等待落盘期间用 local state 顶住受控值，避免被服务端旧值弹回去
+  const language = languageDraft !== undefined ? languageDraft : (me?.language ?? null);
+  const languageEditable = can('settings:write');
 
   return (
     <div className="flex min-h-screen bg-surface">
@@ -169,6 +283,11 @@ export default function Layout(): JSX.Element {
           can={can}
           username={username}
           role={role}
+          language={language}
+          languageEditable={languageEditable}
+          languagePending={languagePending}
+          languageFailed={languageFailed}
+          onLanguageChange={(next) => void changeLanguage(next)}
           onLogout={() => void doLogout()}
         />
       </aside>
@@ -177,17 +296,17 @@ export default function Layout(): JSX.Element {
         <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center gap-3 border-b border-line bg-elevated/85 px-4 backdrop-blur-md lg:px-8">
           <IconButton
             icon="menu"
-            label="打开菜单"
+            label={t('app.openMenu')}
             className="lg:hidden"
             onClick={() => setDrawerOpen(true)}
           />
           <div className="flex min-w-0 items-center gap-2">
-            <span className="hidden text-sm text-muted sm:inline">{meta.group}</span>
+            <span className="hidden text-sm text-muted sm:inline">{groupLabel}</span>
             <Icon
               name="chevron-right"
               className="hidden size-3.5 text-muted/50 sm:inline"
             />
-            <span className="truncate text-sm font-medium text-ink">{meta.label}</span>
+            <span className="truncate text-sm font-medium text-ink">{pageLabel}</span>
           </div>
           <div className="ml-auto flex items-center gap-2">
             <span
@@ -198,7 +317,9 @@ export default function Layout(): JSX.Element {
               }`}
             >
               <span className="size-1.5 rounded-full bg-current" />
-              {warnings.length > 0 ? `${warnings.length} 条启动告警` : '服务正常'}
+              {warnings.length > 0
+                ? t('app.startupWarnings', { count: warnings.length })
+                : t('app.serviceOk')}
             </span>
             <div className="hidden items-center gap-2 border-l border-line pl-3 lg:flex">
               <span className="flex size-7 items-center justify-center rounded-full bg-accent-soft text-[11px] font-semibold text-accent">
@@ -217,6 +338,7 @@ export default function Layout(): JSX.Element {
             {warnings.length > 0 && (
               <Notice tone="warn">
                 <div className="space-y-0.5">
+                  {/* 服务端返回的告警 message 仍是中文：这是已知边界，前端不翻译 */}
                   {warnings.map((item) => (
                     <p key={item.code}>{item.message}</p>
                   ))}
@@ -230,7 +352,7 @@ export default function Layout(): JSX.Element {
         </main>
 
         <footer className="px-4 pb-6 text-center text-[11px] text-muted lg:px-8">
-          LLM API Manager · 自托管 LLM API 控制台
+          {t('app.footer')}
         </footer>
       </div>
 
@@ -238,14 +360,14 @@ export default function Layout(): JSX.Element {
         <div className="fixed inset-0 z-50 lg:hidden">
           <button
             type="button"
-            aria-label="关闭菜单"
+            aria-label={t('app.closeMenu')}
             className="absolute inset-0 bg-black/40 backdrop-blur-sm"
             onClick={() => setDrawerOpen(false)}
           />
           <div className="absolute inset-y-0 left-0 flex w-72 max-w-[85vw] flex-col bg-elevated shadow-pop">
             <IconButton
               icon="x"
-              label="关闭菜单"
+              label={t('app.closeMenu')}
               className="absolute right-2 top-2 z-10"
               onClick={() => setDrawerOpen(false)}
             />
@@ -253,6 +375,11 @@ export default function Layout(): JSX.Element {
               can={can}
               username={username}
               role={role}
+              language={language}
+              languageEditable={languageEditable}
+              languagePending={languagePending}
+              languageFailed={languageFailed}
+              onLanguageChange={(next) => void changeLanguage(next)}
               onNavigate={() => setDrawerOpen(false)}
               onLogout={() => void doLogout()}
             />

@@ -13,6 +13,8 @@
 - **统一网关**：`/v1/models`、`/v1/chat/completions`、`/v1/messages`、`/v1/responses`；支持 SSE 流式透传；默认路径失败时按优先级回退一次。
 - **Agent 下发**：Codex CLI（`~/.codex/config.toml` + `auth.json` + `llmapi-model-catalog.json`，只接受 `responses` 供应商，`wire_api` 固定 `responses`）与 Claude Code（`~/.claude/settings.json`，需要 `anthropic`）；支持预览、应用、还原、结束 Codex 进程，写前备份，只改自己拥有的键。
 - **可观测**：请求日志与今日统计（请求数、成功率、平均耗时）。
+- **双语界面**：控制台支持简体中文 / English 切换，语言偏好保存在服务端（租户设置），
+  换浏览器或清缓存后仍然生效；未登录时按浏览器语言显示。
 
 ## 快速开始
 
@@ -159,6 +161,9 @@ data/                                  # 实际落点由 DATA_DIR 决定，npm �
   唯一例外是 `/v1/responses → openai`：开启「跨协议转发」（或协议不匹配时网关自动开启）后，
   由网关双向转换请求、响应与流式事件。托管工具（如 `web_search`）没有 Chat 等价物会被丢弃。
 - 不做计费、配额、多用户 UI、MCP/Skills/会话管理、桌面打包。
+- **界面文案已双语，但服务端返回的文案仍是中文**：`/api/*` 的 `error.message`、
+  启动告警、Agent 描述、诊断接口输出都只有中文，在英文界面下会原样显示。
+  要翻译它们需要在服务端引入消息键，属于另一项改动。
 - 存储是 JSON 文件 + 原子写，适合单机自托管；高并发或多实例需要换 SQLite/Postgres 与共享状态。
 - 上游能力以"OpenAI / Anthropic 兼容"为前提（OpenAI 体系含 Chat Completions 与 Responses
   两种 API 形态）；非兼容的私有协议需要新增适配层。
@@ -183,7 +188,8 @@ server/
 web/
   src/pages/              Login / Setup / Layout / Overview / Providers / Models / Agents / Settings
   src/components/         ui、ProviderForm、CopyButton
-  src/lib/                api、auth、useAsync、types
+  src/lib/                api、auth、useAsync、types、labels（枚举文案键）
+  src/i18n/               i18next 初始化、语言探测、日期格式化、locales/{zh,en}/ 字典
   test/                   页面装配测试（jsdom）
 ```
 

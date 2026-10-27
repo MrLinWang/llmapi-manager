@@ -90,7 +90,7 @@ data/                                # 默认即 server/data，见上表 DATA_DI
 ├── setup.json                        首次初始化状态（一次性令牌哈希，完成后清空）
 └── tenants/<tenantId>/
     ├── providers.json                供应商
-    ├── settings.json                 默认供应商/模型、网关令牌、Codex 行为开关
+    ├── settings.json                 默认供应商/模型、界面语言、网关令牌、Codex 行为开关
     ├── agents.json                   下发快照
     ├── api-tokens.json               程序化访问用的 API 令牌（只存 sha256）
     └── requests.jsonl                请求日志

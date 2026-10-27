@@ -73,7 +73,7 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 | `gateway:read` / `gateway:write` | 查看网关信息 / 生成与重置网关令牌 |
 | `agents:read` / `agents:apply` | 预览 / 应用与还原 Agent 配置；`agents:apply` 还能**结束本机 Codex 进程** |
 | `logs:read` | 查看请求日志与统计 |
-| `settings:read` / `settings:write` | 查看 / 修改默认供应商与模型、Codex 行为开关；**API 令牌的查看 / 创建 / 吊销**也归这里 |
+| `settings:read` / `settings:write` | 查看 / 修改默认供应商与模型、Codex 行为开关、**界面语言**；**API 令牌的查看 / 创建 / 吊销**也归这里 |
 | `users:manage` / `tenants:manage` | 预留给多用户与多租户管理（当前无对应接口，也不可授予 API 令牌） |
 
 角色映射：
@@ -186,6 +186,11 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 ### 为什么令牌不能改口令
 
 `authenticated` 级接口（`/api/auth/me`、`/api/auth/password`）假设操作者是真人会话。
+
+注意 `/api/auth/me` 还额外返回了 `language`：它**读**的是租户设置，却没有要求
+`settings:read`。这是有意的——`member` 角色没有 `settings:read`，但同样得看到
+正确语言的界面。语言偏好不是敏感数据（它不泄漏供应商、令牌或其它配置），
+写它仍然要 `settings:write`。
 令牌能被用来读 `me` 本身危害不大，但同一个级别里还有改口令，两者共用一条规则：
 **令牌访问 `authenticated` 级接口一律 403**。这样做的理由是改口令——凭据泄露后攻击者
 可以永久接管账号，吊销令牌也救不回来（口令已被改）。

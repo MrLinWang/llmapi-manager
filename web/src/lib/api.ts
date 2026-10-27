@@ -1,3 +1,5 @@
+import i18next from '../i18n';
+import type { UiLanguage } from '../i18n/language';
 import type {
   AgentPreview,
   AgentConnectionMode,
@@ -70,7 +72,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       error?: { code?: string; message?: string; details?: unknown };
     } | null;
     const code = body?.error?.code ?? 'unknown';
-    const message = body?.error?.message ?? `请求失败（HTTP ${response.status}）`;
+    // 兜底文案走 i18n：服务端 message 仍是中文（界面 i18n 不覆盖服务端消息），
+    // 但"连服务端都没返回 message"这种情况是前端自己造的句子，必须跟随界面语言。
+    const message =
+      body?.error?.message ?? i18next.t('common.requestFailed', { status: response.status });
     if (response.status === 401) onUnauthorized?.();
     throw new ApiError(response.status, code, message, body?.error?.details);
   }
@@ -147,6 +152,7 @@ export const api = {
     ),
   settings: () =>
     request<{
+      language: UiLanguage | null;
       disableCodexWebSearch: boolean;
       approvalReviewModel: string | null;
       protocolConversion: boolean;
@@ -154,6 +160,16 @@ export const api = {
       codexStreamIdleTimeoutMs: number | null;
       agentTargets: Record<string, AgentTargetPreference>;
     }>('/api/settings'),
+  /**
+   * 改界面语言。`null` = 跟随浏览器。
+   *
+   * 与其它设置的差别：它不影响网关与下发文件，所以响应里没有 requiresReapply。
+   */
+  setLanguage: (language: UiLanguage | null) =>
+    request<{ language: UiLanguage | null }>('/api/settings/language', {
+      method: 'PATCH',
+      body: JSON.stringify({ language }),
+    }),
   /**
    * 改 Codex 的行为开关与下发数值。
    *

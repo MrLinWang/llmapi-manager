@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from './lib/auth';
 import { api } from './lib/api';
 import Layout from './pages/Layout';
@@ -14,7 +15,8 @@ import { Spinner } from './components/ui';
 
 function Guarded({ children }: { children: JSX.Element }): JSX.Element {
   const { me, loading } = useAuth();
-  if (loading) return <Spinner label="正在校验登录状态…" />;
+  const { t } = useTranslation();
+  if (loading) return <Spinner label={t('app.checkingSession')} />;
   if (!me) return <Navigate to="/login" replace />;
   return children;
 }
@@ -49,8 +51,9 @@ function useSetupGate(): { checking: boolean; needsSetup: boolean } {
 export default function App(): JSX.Element {
   const { me, loading } = useAuth();
   const setup = useSetupGate();
+  const { t } = useTranslation();
 
-  if (setup.checking || loading) return <Spinner label="正在准备…" />;
+  if (setup.checking || loading) return <Spinner label={t('app.preparing')} />;
 
   // 未初始化：任何路径都先去设置页，避免用户面对一个还不存在的账号
   if (setup.needsSetup) {

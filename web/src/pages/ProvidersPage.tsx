@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { api, ApiError } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
 import type { Provider, TestResult } from '../lib/types';
@@ -16,6 +17,7 @@ import { ProviderForm, TestResultLine } from '../components/ProviderForm';
 import { apiTypeShort } from '../lib/labels';
 
 export default function ProvidersPage(): JSX.Element {
+  const { t } = useTranslation();
   const { data, loading, error, reload } = useAsync(() => api.providers());
   const [editing, setEditing] = useState<Provider | null>(null);
   const [creating, setCreating] = useState(false);
@@ -33,7 +35,7 @@ export default function ProvidersPage(): JSX.Element {
       setTestResults((prev) => ({ ...prev, [provider.id]: result }));
       reload();
     } catch (cause) {
-      setActionError(cause instanceof ApiError ? cause.message : '测试失败');
+      setActionError(cause instanceof ApiError ? cause.message : t('common.testFailed'));
     } finally {
       setTestingId(null);
     }
@@ -45,18 +47,18 @@ export default function ProvidersPage(): JSX.Element {
       await api.setProviderEnabled(provider.id, !provider.enabled);
       reload();
     } catch (cause) {
-      setActionError(cause instanceof ApiError ? cause.message : '操作失败');
+      setActionError(cause instanceof ApiError ? cause.message : t('common.actionFailed'));
     }
   };
 
   const remove = async (provider: Provider): Promise<void> => {
-    if (!window.confirm(`确定删除供应商「${provider.name}」？该操作不可撤销。`)) return;
+    if (!window.confirm(t('providers.removeConfirm', { name: provider.name }))) return;
     setActionError(null);
     try {
       await api.deleteProvider(provider.id);
       reload();
     } catch (cause) {
-      setActionError(cause instanceof ApiError ? cause.message : '删除失败');
+      setActionError(cause instanceof ApiError ? cause.message : t('common.deleteFailed'));
     }
   };
 
@@ -71,22 +73,22 @@ export default function ProvidersPage(): JSX.Element {
       await api.reorderProviders(ids);
       reload();
     } catch (cause) {
-      setActionError(cause instanceof ApiError ? cause.message : '排序失败');
+      setActionError(cause instanceof ApiError ? cause.message : t('common.sortFailed'));
     }
   };
 
   return (
     <div className="space-y-5">
       <PageHeader
-        eyebrow="配置中心"
-        title="供应商"
-        description="维护各家 LLM API。启用的供应商会参与聚合别名与网关选路，优先级越小越先被选中。"
+        eyebrow={t('providers.header.eyebrow')}
+        title={t('app.nav.providers')}
+        description={t('providers.header.description')}
         actions={
           !creating &&
           !editing && (
             <button type="button" className="btn-primary" onClick={() => setCreating(true)}>
               <Icon name="plus" className="size-4" />
-              新增供应商
+              {t('providers.actions.create')}
             </button>
           )
         }
@@ -110,10 +112,10 @@ export default function ProvidersPage(): JSX.Element {
       )}
 
       <Card
-        title="供应商列表"
-        desc="按优先级排序，数值越小越优先参与网关选路。"
+        title={t('providers.list.title')}
+        desc={t('providers.list.desc')}
         flush
-        actions={<Badge tone="neutral">{providers.length} 个</Badge>}
+        actions={<Badge tone="neutral">{t('providers.list.count', { count: providers.length })}</Badge>}
       >
         {loading && <Spinner />}
         {error && (
@@ -122,9 +124,7 @@ export default function ProvidersPage(): JSX.Element {
           </div>
         )}
         {!loading && !error && providers.length === 0 && (
-          <Empty icon="providers">
-            还没有供应商。先添加一个，再去「模型聚合」生成网关令牌。
-          </Empty>
+          <Empty icon="providers">{t('providers.list.empty')}</Empty>
         )}
         {providers.length > 0 && (
           <div className="overflow-x-auto">
@@ -132,14 +132,14 @@ export default function ProvidersPage(): JSX.Element {
               <thead>
                 <tr>
                   <th className="w-12">#</th>
-                  <th className="min-w-[13rem]">名称 / 别名前缀</th>
-                  <th className="w-20">协议</th>
-                  <th className="min-w-[10rem]">Base URL</th>
-                  <th className="min-w-[11rem]">模型</th>
-                  <th className="min-w-[8rem]">Key</th>
-                  <th className="min-w-[7rem]">最近测试</th>
+                  <th className="min-w-[13rem]">{t('providers.table.name')}</th>
+                  <th className="w-20">{t('providers.table.apiType')}</th>
+                  <th className="min-w-[10rem]">{t('providers.table.baseUrl')}</th>
+                  <th className="min-w-[11rem]">{t('providers.table.models')}</th>
+                  <th className="min-w-[8rem]">{t('providers.table.key')}</th>
+                  <th className="min-w-[7rem]">{t('providers.table.lastTest')}</th>
                   <th className="w-[1%] whitespace-nowrap text-right sm:sticky sm:right-0 sm:z-10 sm:border-l sm:border-line sm:bg-subtle">
-                    操作
+                    {t('providers.table.actions')}
                   </th>
                 </tr>
               </thead>
@@ -157,10 +157,10 @@ export default function ProvidersPage(): JSX.Element {
                             <span className="font-medium text-ink">{provider.name}</span>
                             {provider.enabled ? (
                               <Badge tone="ok" dot>
-                                启用
+                                {t('providers.status.enabled')}
                               </Badge>
                             ) : (
-                              <Badge dot>停用</Badge>
+                              <Badge dot>{t('providers.status.disabled')}</Badge>
                             )}
                           </div>
                           <code className="mt-0.5 block whitespace-nowrap font-mono text-[11px] text-muted">
@@ -170,7 +170,7 @@ export default function ProvidersPage(): JSX.Element {
                       </div>
                     </td>
                     <td>
-                      <Badge tone="accent">{apiTypeShort(provider.apiType)}</Badge>
+                      <Badge tone="accent">{apiTypeShort(t, provider.apiType)}</Badge>
                     </td>
                     <td
                       className="max-w-[16rem] truncate font-mono text-xs text-muted"
@@ -193,13 +193,15 @@ export default function ProvidersPage(): JSX.Element {
                       </div>
                     </td>
                     <td className="whitespace-nowrap font-mono text-xs text-muted">
-                      {provider.hasApiKey ? provider.apiKeyMasked : '未设置'}
+                      {provider.hasApiKey ? provider.apiKeyMasked : t('common.notSet')}
                     </td>
                     <td>
                       {testResults[provider.id] ? (
                         <span className="inline-flex items-center gap-1.5 text-[11px]">
                           <Badge tone={testResults[provider.id].ok ? 'ok' : 'danger'} dot>
-                            {testResults[provider.id].ok ? '连通' : '失败'}
+                            {testResults[provider.id].ok
+                              ? t('providers.test.ok')
+                              : t('providers.test.fail')}
                           </Badge>
                           <span className="text-muted">{testResults[provider.id].latencyMs}ms</span>
                         </span>
@@ -216,19 +218,19 @@ export default function ProvidersPage(): JSX.Element {
                       <div className="flex flex-nowrap items-center justify-end gap-0.5">
                         <IconButton
                           icon="play"
-                          label="测试"
+                          label={t('providers.actions.test')}
                           disabled={testingId === provider.id}
                           onClick={() => void test(provider)}
                         />
                         <IconButton
                           icon="arrow-up"
-                          label="提高优先级"
+                          label={t('providers.actions.moveUp')}
                           disabled={index === 0}
                           onClick={() => void move(provider, -1)}
                         />
                         <IconButton
                           icon="arrow-down"
-                          label="降低优先级"
+                          label={t('providers.actions.moveDown')}
                           disabled={index === providers.length - 1}
                           onClick={() => void move(provider, 1)}
                         />
@@ -237,11 +239,13 @@ export default function ProvidersPage(): JSX.Element {
                           className="btn-ghost btn-sm whitespace-nowrap"
                           onClick={() => void toggle(provider)}
                         >
-                          {provider.enabled ? '停用' : '启用'}
+                          {provider.enabled
+                            ? t('providers.actions.disable')
+                            : t('providers.actions.enable')}
                         </button>
                         <IconButton
                           icon="edit"
-                          label="编辑"
+                          label={t('common.edit')}
                           onClick={() => {
                             setCreating(false);
                             setEditing(provider);
@@ -249,7 +253,7 @@ export default function ProvidersPage(): JSX.Element {
                         />
                         <IconButton
                           icon="trash"
-                          label="删除"
+                          label={t('common.delete')}
                           tone="danger"
                           onClick={() => void remove(provider)}
                         />

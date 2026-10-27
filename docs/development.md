@@ -60,9 +60,11 @@ npm run dev -w web        # vite，热更新
 | `server/test/security.test.ts` | 权限矩阵、租户隔离、凭据编解码、路由登记 |
 | `server/test/storage.test.ts` | 原子写、损坏隔离、未来版本隔离 |
 | `server/test/logger.test.ts` | 运行日志落盘、级别阈值、打码、按大小滚动与保留个数 |
-| `server/test/smoke.test.ts` | 端到端：登录、供应商（含三种 `apiType` 与拉取模型列表）、网关令牌、API 令牌（生命周期 / 收窄 403 / 不能改口令与建令牌 / 吊销即失效）、转发（含流式/回退/501 双向/4xx 透传/自动开启转换）、诊断接口（默认 404、开启后路由预演与自检清单、只读令牌 403）、Agent（含模型目录与 `web_search` 开关、结束进程）、越权、持久化 |
-| `web/test/pages.test.tsx` | 页面装配：登录、首次设置、供应商（含获取模型与标签片段编辑）、模型（含三种协议选项与文案）、Agent、概览（jsdom + 假 fetch） |
-| `web/test/setup.ts` | 全局 `afterEach(cleanup)`。`globals: false` 会让 RTL 的自动清理失效，不加这个的话上一个用例的 DOM 会留到下一个用例，症状是"单独跑通过、整个文件跑失败" |
+| `server/test/smoke.test.ts` | 端到端：登录、供应商（含三种 `apiType` 与拉取模型列表）、网关令牌、API 令牌（生命周期 / 收窄 403 / 不能改口令与建令牌 / 吊销即失效）、转发（含流式/回退/501 双向/4xx 透传/自动开启转换）、诊断接口（默认 404、开启后路由预演与自检清单、只读令牌 403）、Agent（含模型目录与 `web_search` 开关、结束进程）、界面语言设置（默认 null / 落盘 / 非法值 400 / 读路径降级 / 只读令牌 403）、越权、持久化 |
+| `web/test/pages.test.tsx` | 页面装配：登录、首次设置、供应商（含获取模型与标签片段编辑）、模型（含三种协议选项与文案）、Agent、概览、设置页语言切换（落盘 PATCH + 刷新身份 + 无权限只读）（jsdom + 假 fetch） |
+| `web/test/i18n.test.tsx` | 字典契约：中英键集一致、复数后缀成对、无空文案、插值变量一致、关键键存在 |
+| `web/test/i18n-guard.test.tsx` | 界面文案硬编码扫描（除字典与白名单外 `web/src` 不得出现中文字面量）、语言切换与 `<html lang>` 同步 |
+| `web/test/setup.ts` | 全局 `afterEach(cleanup)` 与 `beforeEach(固定为中文)`。前者原因：`globals: false` 会让 RTL 的自动清理失效，不加的话上一个用例的 DOM 会留到下一个用例，症状是"单独跑通过、整个文件跑失败"；后者原因：jsdom 的 `navigator.language` 是 `en-US`，不固定的话断言中文文案的用例会整片变红 |
 
 `smoke.test.ts` 会起三个假上游（正常 200、永远 500、固定 4xx），用系统分配的随机端口（`port=0`），
 所以并行跑测试不会撞端口。正常那个假上游同时提供 Chat Completions / Responses / Messages 三种
@@ -71,7 +73,7 @@ Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真
 `processes.test.ts` 只测纯函数（命令行分类与 `etime` 解析），不会真的给任何进程发信号。
 日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**。
 
-当前基线：286 项（server 272 + web 14）。
+当前基线：305 项（server 278 + web 27）。
 
 ```bash
 npm test                                # 全部
@@ -132,9 +134,48 @@ defineRoute(
 5. 在 `gateway.test.ts` 补 `requiredApiType` 断言，在 `smoke.test.ts` 补一条真实转发用例
    和一条反向 501 用例。
 
+## 加/改一条界面文案
+
+界面是双语的（简体中文 / English），实现是 `i18next` + `react-i18next`，字典在
+`web/src/i18n/locales/{zh,en}/` 下按区域拆成多个文件（`app`、`common`、`labels`、
+`providers`、`agents`…），`index.ts` 再把它们聚合成单一的 `translation` 命名空间。
+
+1. 在**对应区域**的中文文件里加键（例如供应商页的文案放 `zh/providers.ts`），
+   键名形如 `providers.table.name`。不要都堆进 `common`：一个页面改文案不该让
+   所有页面的字典都变脏，review 也看不出影响范围。
+2. 在英文文件里加同样的键。英文对象声明成 `typeof zhXxx`，**漏译或多键会直接编译失败**，
+   不需要人工比对。
+3. 组件里用 `useTranslation()` 拿 `t`，不要 import 全局 i18n 实例：
+   前者会在语言切换时触发重渲染，后者要等下一次渲染才更新
+   （表现为"点了切换、页面要再点一下才变"）。
+4. 带变量的文案用 `{{name}}` 插值。**带计数的句子必须写复数三份键**：
+   `key_one` / `key_other`（中文两份文本相同），调用 `t(key, { count })`。
+   只写基名的话，英文在 `count=1` 时也会说 `1 items`。
+5. 句子里含 `<code>` / `<strong>` 时用 `<Trans i18nKey="..." components={{ code: <code className="font-mono" /> }} />`，
+   字典值里保留 `<code>…</code>`；如果嵌的是运行时变量（如某个路径），
+   改为把标签留在 JSX、只翻译前后半句。
+6. 时间一律用 `web/src/i18n/format.ts` 的 `formatDateTime` / `formatTime` /
+   `formatTimestamp`。**不要用 `toLocaleString()` 的默认行为**：它跟随浏览器语言，
+   会出现"界面英文、时间是中文格式"。
+
+边界（不要越界，也别试图绕开）：
+
+- **服务端返回的 `message`（`AppError`、启动告警、Agent 描述、诊断输出）仍是中文**，
+  前端原样显示。要翻译它们得在服务端引入消息键，那是另一项改动。
+- 语言偏好存服务端（`TenantSettings.language`，`null` = 跟随浏览器），
+  接口是 `PATCH /api/settings/language`，随 `GET /api/auth/me` 一并下发。
+  **不要用 localStorage**：换浏览器后设置会丢，也可能与另一台设备上的选择打架。
+- 不翻译：品牌名、模型名、`lam-` 别名、`/v1/...`、`Codex`、`Claude Code`、
+  `web_search` 这类标识符。
+
+改完跑：`npm run typecheck -w web`（键名与漏译）+
+`npm test -w web`（字典契约 + 硬编码扫描 + 页面装配）。
+
 ## 代码约定
 
-- **语言**：注释与用户可见文案用中文；标识符、类型名、日志 key 用英文。
+- **语言**：注释用中文；标识符、类型名、日志 key 用英文。
+  界面文案一律走 i18n 字典（见上面「加/改一条界面文案」），**不允许在组件里
+  硬编码中文**——`web/test/i18n-guard.test.tsx` 会扫出来。
 - **类型**：`strict` 已开，且开了 `noUnusedLocals` / `noUnusedParameters`，不要用 `any` 绕过。
 - **分层**：路由薄、服务厚、领域纯。领域层不得 import Fastify 或 fs。
 - **错误**：统一抛 `AppError` 子类，让 `app.ts` 的错误处理器产出标准结构；不要手写 `reply.code(500)`。
