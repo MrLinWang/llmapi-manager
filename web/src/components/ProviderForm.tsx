@@ -1,6 +1,6 @@
 import { useId, useRef, useState } from 'react';
 import { api, ApiError } from '../lib/api';
-import type { Provider } from '../lib/types';
+import type { ModelCapability, Provider } from '../lib/types';
 import { Badge, IconButton, Notice } from './ui';
 import { API_TYPE_META } from '../lib/labels';
 
@@ -52,6 +52,15 @@ export function ProviderForm({
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [fetchHint, setFetchHint] = useState<string | null>(null);
+  /**
+   * 按模型名记录的上游能力（上下文窗口等），保存时随供应商提交。
+   *
+   * 初始值来自已保存的供应商：编辑时若不再重新拉列表，不能把已有能力丢掉
+   * （丢了目录就会退回 128k）。只在拉到新数据时合并覆盖。
+   */
+  const [capabilities, setCapabilities] = useState<Record<string, ModelCapability>>(
+    () => ({ ...(provider?.modelCapabilities ?? {}) }),
+  );
   /** 模型框末尾那个空白片段里正在输入的文本 */
   const [draft, setDraft] = useState('');
   const draftInput = useRef<HTMLInputElement>(null);
@@ -126,7 +135,22 @@ export function ProviderForm({
         return;
       }
       setCandidates(result.models);
-      setFetchHint(`上游返回 ${result.models.length} 个模型（${result.latencyMs}ms），勾选后确认。`);
+      // 记下上游声明的上下文窗口：保存时一并提交，Codex 目录会用它，
+      // 否则只能回落 128k，1M 上下文的上游只用到约十分之一。
+      // 合并而不是覆盖：只更新这次拉到能力的模型，其余模型保留原值。
+      if (result.capabilities) {
+        const incoming = result.capabilities;
+        setCapabilities((prev) => ({ ...prev, ...incoming }));
+      }
+      const withCaps = result.capabilities
+        ? Object.keys(result.capabilities).length
+        : 0;
+      setFetchHint(
+        `上游返回 ${result.models.length} 个模型（${result.latencyMs}ms），勾选后确认。` +
+          (withCaps > 0
+            ? `其中 ${withCaps} 个带上下文窗口信息，会随供应商一起保存。`
+            : ''),
+      );
     } catch (cause) {
       setFetchError(cause instanceof ApiError ? cause.message : '获取模型列表失败');
       setCandidates(null);
@@ -148,11 +172,18 @@ export function ProviderForm({
       setBusy(false);
       return;
     }
+    // 只提交仍在模型列表里的能力；服务端还会再裁一次（两处都做是因为
+    // 用户可能先拉列表再删模型，前端这次提交就已经带着过期条目了）。
+    const keptCapabilities = Object.fromEntries(
+      Object.entries(capabilities).filter(([model]) => models.includes(model)),
+    );
     const body = {
       name: values.name.trim(),
       apiType: values.apiType,
       baseUrl: values.baseUrl.trim(),
       apiKey: values.apiKey.trim() === '' ? undefined : values.apiKey.trim(),
+      modelCapabilities:
+        Object.keys(keptCapabilities).length > 0 ? keptCapabilities : undefined,
       models,
       notes: values.notes.trim() || undefined,
       websiteUrl: values.websiteUrl.trim() || undefined,

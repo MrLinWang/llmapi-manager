@@ -1,4 +1,4 @@
-import type { ApiType, ProviderRecord } from './provider';
+import type { ApiType, ModelCapability, ProviderRecord } from './provider';
 
 /**
  * 别名前缀：`lam-<providerKey>/<model>` 是"明确指向某一家"的写法。
@@ -15,6 +15,15 @@ export interface ModelAlias {
   providerName: string;
   apiType: ApiType;
   upstreamModel: string;
+  /**
+   * 这家供应商声明的该模型能力（上下文窗口 / 输出上限），透传自 ProviderRecord。
+   *
+   * 为什么挂在别名上而不是按 `upstreamModel` 反查：同一个裸模型名可能被多家
+   * 供应商声明，而各家的上下文与输出上限并不相同（本地实测 `gpt-6-luna` 就同时
+   * 属于 openai 与 responses 两家）。按名字反查会拿到"某一家的值"，
+   * 与别名"明确指向某一家"的语义冲突。缺省表示未知，由目录回落保守默认值。
+   */
+  capability?: ModelCapability;
 }
 
 export function buildAlias(providerKey: string, model: string): string {
@@ -42,6 +51,7 @@ export function listAliases(providers: readonly ProviderRecord[]): ModelAlias[] 
         providerName: provider.name,
         apiType: provider.apiType,
         upstreamModel: model,
+        capability: provider.modelCapabilities?.[model],
       });
     }
   }

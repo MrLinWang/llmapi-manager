@@ -25,6 +25,8 @@
 | `AGENT_HOME_DIR` | OS 家目录 | Agent 配置根目录（其下为 `.codex`、`.claude`） |
 | `CODEX_HOME` | 无 | 仅用于定位 Codex 配置目录（结束 Codex 进程时设进子进程环境）。设了就优先于 `AGENT_HOME_DIR/.codex` |
 | `ENABLE_DIAGNOSTICS` | 无（关闭） | 设为 `1` 才开启 `/api/diagnostics/*`；未开启时这四个接口返回 404 |
+| `MODELS_DEV_URL` | `https://models.dev/models.json?type=all` | 模型公开规格库地址，供 `npm run registry:sync -w server` 校准上下文窗口与推理档位。内网部署可指向同构镜像；不可达时该命令报错退出，不影响服务运行 |
+| `MODELINFO_URL` | `https://modelinfo.dev/v1/models` | 另一个模型目录源，**推理档位优先取它**（直接给数组，不用按 provider 投票）。注意只有这一个路径可用，`api.json`/`models.json` 均 404 |
 
 `CODEX_HOME` 是 Codex 自己的约定变量，本服务只读不算：它决定 `codex app-server daemon stop`
 在哪个目录下执行。目录不存在时不会强行设置（codex 会对不存在的路径报错，而"本机还没配过 Codex"

@@ -98,12 +98,15 @@ Codex 的「切换模型」列表读的是模型目录，而不是把 `/v1/model
       "supported_in_api": true,
       "context_window": 128000,
       "max_output_tokens": 8192,
-      "default_reasoning_level": "medium",
+      "default_reasoning_level": "high",
       "supported_reasoning_levels": [
         { "effort": "low", "description": "快速响应，推理较轻" },
         { "effort": "medium", "description": "速度与推理深度均衡" },
-        { "effort": "high", "description": "更深的推理，适合复杂问题" }
+        { "effort": "high", "description": "更深的推理，适合复杂问题" },
+        { "effort": "xhigh", "description": "很高的推理投入，适合困难任务" },
+        { "effort": "max", "description": "最大推理投入，最慢但最深入" }
       ],
+      "input_modalities": ["text", "image"],
       "shell_type": "default",
       "truncation_policy": { "mode": "tokens", "limit": 10000 },
       "support_verbosity": false,
@@ -122,9 +125,114 @@ Codex 的「切换模型」列表读的是模型目录，而不是把 `/v1/model
 - `supported_reasoning_levels` 是**对象数组**（`{ effort, description }`），写字符串数组会被判类型错误。
 - 每个模型至少要给 `base_instructions` 或 `model_messages.instructions_template` 之一，否则 Codex 拒绝加载。
   这里写一段简短说明而不是复制官方 21KB 系统提示词 —— 那些提示词描述的是官方模型的行为约定，套到第三方上游并不成立。
-- `context_window` / `max_output_tokens` 无法确知上游真实上限，取保守值（128k / 8192）。
-  Codex 的 `ModelInfo` 会读 `context_window` 来算可用上下文与自动压缩阈值；
-  `max_output_tokens` 目前不在该结构里（会被忽略），保留它只是让目录文件自解释。
+- `context_window` **优先用上游声明的真实值**，取不到才回落保守值 128k。
+  Codex 的 `ModelInfo` 会读它来算可用上下文与自动压缩阈值（默认在 95% 处压缩），
+  写死 128k 会让 1M 上下文的上游只用到约十分之一。
+  真实值来源有两条：点「从上游获取模型」时解析 `/models` 响应里的 `metadata`
+  （`context_limit` / `context_window` / `context_length`）；上游不返回时由
+  `npm run registry:sync -w server` 从 modelinfo.dev / models.dev 补（见下）。
+  两种都存进供应商记录的 `modelCapabilities`，生成目录时按模型取用。
+  **取不到就不写**，由目录回落默认值 ——
+  不能凭空猜一个大数，猜大了 Codex 会把上下文塞爆，上游直接报超长，比用不满更难排查。
+  逐字段回落：只声明了上下文、没声明输出上限时，前者用真实值、后者用默认值。
+- `max_output_tokens` 目前不在 Codex 的 `ModelInfo` 里（会被忽略），保留它只是让目录文件自解释；
+  有上游声明的 `output_budget` 时一并写入，没有就写 8192。
+
+### 模型元数据的来源与优先级
+
+目录里的上下文窗口、推理档位等字段按**四级**取值，优先级从高到低：
+
+1. **上游 `/models` 的 `metadata`**（点「从上游获取模型」时解析并落盘）—— 最贴近这个中转的
+   真实额度，`context_limit` / `output_budget` 都以它为准。
+2. **modelinfo.dev** `/v1/models` —— **推理档位优先取它**：`reasoning.efforts` 直接给数组，
+   不需要按 provider 投票。实测它与 models.dev 的多数票逐项吻合（claude / gpt 系列完全一致）。
+   缺点是覆盖不全（我们 11 个模型里缺 2 个），且有 221 条是 "supported 但 efforts 为空"。
+3. **models.dev** `models.json` —— 覆盖更全，用来补 modelinfo 的空缺。
+   按模型名匹配前做归一化（抹平 `.` 与 `-`、忽略作者前缀与大小写），
+   因为上游叫 `claude-opus-5.5` 而 models.dev 叫 `anthropic/claude-opus-5-5`。
+4. **代码默认值**（128k / 8192 / 三档 reasoning / text+image）。
+
+几处刻意的取舍：
+
+- **`context_window` 取上游值**，不取两者较小值：上游的 1048000 与 models.dev 的 1000000
+  是实现细节差异，以上游为准更贴近实际。
+- **`max_output_tokens` 取两者较小值**：上游 `output_budget`（128k）往往比 models.dev 的模型
+  规格（384k）更保守，高估会让上游直接报超长，比"用不满"更难排查。
+- **逐字段合并**，不是整条覆盖：上游只给了上下文时，输出上限与 reasoning 仍由公开源补。
+- 归一化后**多候选时放弃**，不随便挑一条 —— 挑错等于给别家模型的窗口。
+- models.dev **不包含**我们这种聚合上游（它只收录 232 家公开供应商），所以我们只用
+  与供应商无关的 `models.json`，不用 `api.json` / `catalog.json`。
+- **`reasoningEfforts: []` 与 `undefined` 语义不同**：前者是"查过、没有可用档位"
+  （目录写空数组，Codex 隐藏推理菜单），后者是"未知"（目录回落三档默认）。
+  因此 modelinfo 返回空数组时**必须继续问 models.dev**，把它当成"无档位"会丢掉
+  glm-5.3-flash / kimi-k2.7-code 的真实档位。
+
+**同步是显式动作，不自动跑。** 它会改写用户数据，偷偷改等于"配置自己变了"，出问题无法回溯；
+而且让 `apply` 依赖外网可达性也不可接受。所以做成这几条命令：
+
+```bash
+npm run registry:sync -w server                          # 演练：只打印会改哪些模型
+npm run registry:sync -w server -- --write               # 真正落盘，之后需重新「应用配置」
+npm run registry:sync -w server -- --write --verify-efforts
+                                                         # 额外实打上游校验每个档位
+```
+
+网络不可达时该命令报错退出，**服务本身与已有配置完全不受影响**（目录仍按已有能力生成）。
+
+**为什么需要 `--verify-efforts`：** 数据源声明"支持某档位"不等于我们的上游接受它。
+实测 `claude-opus-5.5` 的 `none` 在上游是 **400**，而 `gpt-6-luna` 的 `none` 是 200 ——
+档位集合是模型特定的，不能跨模型推断。该开关会为每个模型声明的每个档位发一次极小请求
+（16 output tokens），只保留返回 2xx 的。**它默认关闭**，因为会真实消耗额度。
+
+### 推理档位（`supported_reasoning_levels`）
+
+档位**按模型实际能力生成**，不是所有模型共用一套。上一版写死 `low/medium/high`，
+而实测差异很大（claude 支持 `xhigh`/`max`，`kimi-k3` 只有 `low/high/max`）。
+
+**顺序必须按强度升序**（`none < minimal < low < medium < high < xhigh < max < ultra < persistent`）。
+这不是美观问题：Codex 遇到"当前档位不在列表里"时会静默取
+`supported_reasoning_levels[len-1/2]`（见 `core/src/session/turn_context.rs` 的 `with_model`），
+乱序会让那个"中间档"不再是 medium，用户配的 high 可能被悄悄降成 low。
+
+**`default_reasoning_level` 跟随用户在 `config.toml` 里配的 `model_reasoning_effort`。**
+不跟随会出现"配置写 high、`/model` 里显示 medium"的错位。但该值必须先确认在本次声明的
+档位列表里 —— 不在的话主动对齐到中间档，而不是写一个必然被 Codex 替换掉的值。
+
+**声明档位 ≠ 上游接受。** 已知陷阱：
+
+| 值 | gpt-6-luna | claude-opus-5.5 |
+| --- | --- | --- |
+| `none` | 200 ✅ | **400 ❌** |
+| `persistent` | — | **400 ❌** |
+
+`persistent` 在 Codex 里是合法档位，但我们的上游直接拒绝。这类值靠 `--verify-efforts`
+实测排除（见上）。
+
+另外注意 `xhigh` 的实际效果：实测同一难题下 `xhigh` 的 reasoning_tokens（251）反而低于
+`high`（368），说明上游可能把它归并了。这不构成错误（用户仍能选到 high），但**不要指望
+声明了它就有更强推理**。
+
+### `input_modalities` 只能写 text / image / audio
+
+这是整个目录里最容易静默失效的一处，务必当**安全边界**对待：
+
+Codex 的 `InputModality` 枚举只有 `text` / `image` / `audio`。而 models.dev 的模态里常有
+`pdf`、`video`。一旦把未经白名单过滤的值写进目录，Codex 会报：
+
+```
+Error: failed to parse model_catalog_json path ...: unknown variant `pdf`,
+expected one of `text`, `image`, `audio`
+```
+
+**然后静默回退到内置的官方模型列表** —— `/model` 里冒出 GPT-6.x，且终端里通常看不到任何提示
+（已做 A/B 对照实测：只差一个 `pdf`，目录就从"我们的 11 条"变成"官方内置列表"）。
+
+所以代码里 `filterInputModalities` 是唯一入口：只放行三者，`text` 恒定保留，其余丢弃而非透传。
+`models.dev` 的值在映射时过滤一次、落盘时再过滤一次、生成目录时第三次过滤。
+
+反过来，**没有模态信息时要写 `["text","image"]` 而不是只写 `["text"]`**：Codex 的
+`default_input_modalities()` 就是 `[text, image]`，而 `view_image` 工具靠
+`input_modalities.contains(Image)` 开门。未知时只写 `text` 会把所有未收录模型的看图能力静默关掉。
 
 目录文件由我们**整份覆盖生成**（不做按键合并），因此也遵守"写前备份 + 还原"规则：由我们创建的在还原时直接删除；
 应用前就已存在的，还原时重置为 `{}` 并作为冲突提示，避免误删用户内容。
@@ -346,6 +454,11 @@ Codex 只在**启动时**读一次配置与模型目录。改完配置（或换�
 2. **按 pid 文件兜底结束 daemon 与 updater** —— 官方命令失败时的保险，见下；
 3. 按进程表精确匹配后 `SIGTERM` 掉 `codex`（TUI）与 `codex exec` 进程，按
    800ms/1200ms/1600ms 三轮检查存活，仍活着的补 `SIGKILL`。
+
+这三步都成功也只代表「能探测到的进程都停了」。提示里因此固定附一句
+**「也可手动执行 `pkill -9 -f codex` 来清理相关进程」**：从非标准位置启动、
+或进程表读不到的 Codex 不会出现在匹配结果里，按钮返回成功而 Codex 仍能用时，
+用户至少知道下一步做什么，不必去翻日志或猜。
 
 **目录只列该 Agent 能用的协议。** Codex 的 `wire_api` 固定是 `responses`，所以目录里
 默认不能出现 `openai` 供应商的别名——用户选中后 `/v1/responses` 打到 `openai` 上游必然

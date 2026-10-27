@@ -8,6 +8,7 @@ import type {
   AgentSummary,
   Me,
   ModelsResponse,
+  ModelCapability,
   Provider,
   RequestLog,
   RequestStats,
@@ -230,6 +231,11 @@ export interface ProviderInput {
   baseUrl: string;
   apiKey?: string;
   models: string[];
+  /**
+   * 按模型名记录的上游能力（上下文窗口等）。
+   * 不传表示保持已存值不变；传了则整体替换（服务端按 models 裁剪）。
+   */
+  modelCapabilities?: Record<string, ModelCapability>;
   enabled?: boolean;
   priority?: number;
   notes?: string;

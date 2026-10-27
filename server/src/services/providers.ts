@@ -4,8 +4,11 @@ import type { SecretCodec } from '../crypto/secretCodec';
 import {
   API_TYPES,
   allocateProviderKey,
+  filterInputModalities,
+  filterReasoningEfforts,
   toProviderView,
   type ApiType,
+  type ModelCapability,
   type ProviderRecord,
   type ProviderView,
 } from '../domain/provider';
@@ -18,6 +21,14 @@ export interface ProviderInput {
   baseUrl: string;
   apiKey?: string;
   models?: string[];
+  /**
+   * 按模型名记录的上游能力（上下文窗口 / 输出上限）。
+   *
+   * 由「从上游获取模型」或显式提交带上来；不传表示"保持已存的值不变"，
+   * 传空对象表示"明确清空"。注意**不要**在没有新数据时退回默认值，
+   * 那会把之前拉到的真实能力覆盖成保守值。
+   */
+  modelCapabilities?: Record<string, ModelCapability>;
   enabled?: boolean;
   priority?: number;
   notes?: string;
@@ -50,6 +61,106 @@ function normalizeModels(models: string[] | undefined): string[] {
     out.push(model);
   }
   return out;
+}
+
+/**
+ * 规范化模型能力表。
+ *
+ * 三条规则都是有原因的：
+ * 1. 只保留仍在 `models` 里的条目 —— 模型删掉了，它的能力就是死数据，
+ *    留着会让"下一个人同名模型"读到上一个模型的窗口，属于静默错配。
+ * 2. 只接受正整数，非法值整条丢弃 —— 上下文写成 0/负数会被 Codex 当成
+ *    "窗口为 0"，比缺省更糟（缺省会回落保守默认值）。
+ * 3. 规范化后为空则返回 undefined 而不是 `{}` —— 让落盘里不出现空对象噪音，
+ *    也让"未知"与"明确无能力"在存储层可区分。
+ */
+function normalizeCapabilities(
+  capabilities: Record<string, ModelCapability> | undefined,
+  models: readonly string[],
+): Record<string, ModelCapability> | undefined {
+  if (!capabilities) return undefined;
+  const allowed = new Set(models);
+  const out: Record<string, ModelCapability> = {};
+  for (const [model, capability] of Object.entries(capabilities)) {
+    if (!allowed.has(model) || !capability || typeof capability !== 'object') continue;
+    const entry: ModelCapability = {};
+    for (const key of ['contextWindow', 'maxOutputTokens'] as const) {
+      const value = capability[key];
+      if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+        entry[key] = Math.floor(value);
+      }
+    }
+    if (typeof capability.supportsReasoning === 'boolean') {
+      entry.supportsReasoning = capability.supportsReasoning;
+    }
+    // 落盘前再过一次白名单：调用方可能是前端提交的任意字符串，
+    // 而这个字段最终会写进 Codex 目录（非法值会让整份目录失效）。
+    if (capability.inputModalities !== undefined) {
+      const filtered = filterInputModalities(capability.inputModalities);
+      if (filtered.length > 0) entry.inputModalities = filtered;
+    }
+    // 档位同样过白名单并排序。**空数组要保留**：它表达"查过、没有可用档位"，
+    // 落盘后目录会写成空数组（隐藏推理菜单），与 undefined（未知，回落三档）不同。
+    if (capability.reasoningEfforts !== undefined) {
+      entry.reasoningEfforts = filterReasoningEfforts(capability.reasoningEfforts);
+    }
+    if (Object.keys(entry).length > 0) out[model] = entry;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * 四源合并：上游声明 → modelinfo.dev → models.dev → 交给目录生成回落代码默认值。
+ *
+ * 优先级与取舍理由：
+ * - **上下文窗口取上游值**：上游 1048000 与公开规格 1000000 的差异是实现细节，
+ *   以上游为准更贴近这个中转的真实额度。上游没有才用公开数据。
+ * - **输出上限取所有来源的较小值**：上游 `output_budget`(128k) 往往比模型规格
+ *   (384k) 更保守也更真实。高估的后果是上游直接报超长，比"用不满"更难排查。
+ * - **档位优先 modelinfo**：它直接给出 `efforts` 数组，不需要按 provider 投票；
+ *   实测它与 models.dev 的多数票逐项吻合。它给的空数组表示"支持推理但档位未知"，
+ *   此时继续问 models.dev，而不是当成"没有档位"。
+ * - 逐个字段合并而不是整条覆盖：上游只给了 context 时，其余字段仍能从公开源补齐。
+ */
+export function mergeCapabilities(
+  upstream: ModelCapability | undefined,
+  registry: ModelCapability | undefined,
+  info?: ModelCapability | undefined,
+): ModelCapability | undefined {
+  if (!upstream && !registry && !info) return undefined;
+  const merged: ModelCapability = {};
+
+  const context = upstream?.contextWindow ?? info?.contextWindow ?? registry?.contextWindow;
+  if (context !== undefined) merged.contextWindow = context;
+
+  const candidates = [
+    upstream?.maxOutputTokens,
+    info?.maxOutputTokens,
+    registry?.maxOutputTokens,
+  ].filter((value): value is number => typeof value === 'number' && value > 0);
+  if (candidates.length > 0) merged.maxOutputTokens = Math.min(...candidates);
+
+  const reasoning =
+    upstream?.supportsReasoning ?? info?.supportsReasoning ?? registry?.supportsReasoning;
+  if (reasoning !== undefined) merged.supportsReasoning = reasoning;
+
+  // 档位：取第一个"非空"的来源。空数组要跳过（那是"支持但未知"，不是"无档位"）。
+  // 全部为空时才落到 undefined，让目录去用默认三档。
+  const effortsSource = [upstream, info, registry]
+    .map((source) => source?.reasoningEfforts)
+    .find((values) => Array.isArray(values) && values.length > 0);
+  if (effortsSource) {
+    const filtered = filterReasoningEfforts(effortsSource);
+    if (filtered.length > 0) merged.reasoningEfforts = filtered;
+  }
+
+  const modalities = upstream?.inputModalities ?? info?.inputModalities ?? registry?.inputModalities;
+  if (modalities !== undefined) {
+    const filtered = filterInputModalities(modalities);
+    if (filtered.length > 0) merged.inputModalities = filtered;
+  }
+
+  return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
 export class ProviderService {
@@ -91,6 +202,7 @@ export class ProviderService {
     const records = this.repos.providers.list();
     const taken = new Set(records.map((item) => item.providerKey));
     const now = new Date().toISOString();
+    const models = normalizeModels(input.models);
     const record: ProviderRecord = {
       id: `p_${randomUUID().slice(0, 8)}`,
       tenantId: this.repos.tenantId,
@@ -99,7 +211,8 @@ export class ProviderService {
       apiType: input.apiType,
       baseUrl: normalizeBaseUrl(input.baseUrl),
       apiKey: this.secrets.encode(input.apiKey ?? ''),
-      models: normalizeModels(input.models),
+      models,
+      modelCapabilities: normalizeCapabilities(input.modelCapabilities, models),
       enabled: input.enabled ?? true,
       priority: input.priority ?? this.nextPriority(records),
       notes: input.notes?.trim() || undefined,
@@ -124,6 +237,7 @@ export class ProviderService {
         ? current.apiKey
         : this.secrets.encode(input.apiKey.trim());
 
+    const models = normalizeModels(input.models);
     const updated: ProviderRecord = {
       ...current,
       name: input.name.trim(),
@@ -134,7 +248,13 @@ export class ProviderService {
       apiType: input.apiType,
       baseUrl: normalizeBaseUrl(input.baseUrl),
       apiKey: nextApiKey,
-      models: normalizeModels(input.models),
+      models,
+      // 没传就沿用已存的能力（前端编辑态不一定重新拉列表）；传了就整体替换，
+      // 但仍然只保留仍在新 models 里的条目，避免删模型后留下死数据。
+      modelCapabilities:
+        input.modelCapabilities === undefined
+          ? normalizeCapabilities(current.modelCapabilities, models)
+          : normalizeCapabilities(input.modelCapabilities, models),
       enabled: input.enabled ?? current.enabled,
       priority: input.priority ?? current.priority,
       notes: input.notes?.trim() || undefined,

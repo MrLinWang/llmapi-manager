@@ -1,4 +1,4 @@
-import type { ApiType, ProviderRecord } from '../domain/provider';
+import type { ApiType, ModelCapability, ProviderRecord } from '../domain/provider';
 
 const TIMEOUT_MS = 10_000;
 const MAX_ERROR_SNIPPET = 200;
@@ -8,6 +8,13 @@ export interface ConnectivityResult {
   latencyMs: number;
   status?: number;
   models?: string[];
+  /**
+   * 模型名 → 上游声明的能力（上下文窗口 / 输出上限）。
+   *
+   * 只在响应里确实带了这些字段的模型上出现；取不到的模型**不出现在这里**，
+   * 由调用方回落到保守默认值。这个 map 只做"有就带回去"，不做推测。
+   */
+  capabilities?: Record<string, ModelCapability>;
   error?: string;
 }
 
@@ -50,7 +57,59 @@ function authHeaders(target: ModelListTarget, apiKey: string): Record<string, st
   return { authorization: `Bearer ${apiKey}` };
 }
 
-function extractModels(payload: unknown): string[] | undefined {
+/**
+ * 从上游 `/models` 的条目里读"上下文窗口 / 输出上限"。
+ *
+ * 为什么要读它：Codex 目录里的 `context_window` 是客户端**真正使用**的字段，
+ * 写死保守值会让 1M 上下文的上游只用到十分之一（客户端在 ~121k token 就压缩）。
+ *
+ * 字段名各家不一，这里按常见几组依次尝试，全部取不到就返回空对象——
+ * 宁可让调用方回落保守默认值，也不要猜一个大数：猜大了 Codex 会把上下文塞到爆，
+ * 上游直接回"超长"错误，那比用不满更难排查。
+ */
+function readCapability(entry: Record<string, unknown>): ModelCapability | undefined {
+  // 常见落点：metadata.context_limit（本机聚合上游）、顶层 context_window，
+  // 以及 OpenAI 官方 /models 里没有、但第三方常加的 max_output_tokens。
+  const metadata =
+    entry.metadata && typeof entry.metadata === 'object'
+      ? (entry.metadata as Record<string, unknown>)
+      : {};
+
+  const pick = (...candidates: unknown[]): number | undefined => {
+    for (const raw of candidates) {
+      const value = typeof raw === 'string' ? Number(raw) : raw;
+      // 只接受正整数：0 / 负数 / NaN 都视为"没声明"，不能当成"窗口为 0"。
+      if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+        return Math.floor(value);
+      }
+    }
+    return undefined;
+  };
+
+  const contextWindow = pick(
+    metadata.context_limit,
+    metadata.context_window,
+    entry.context_window,
+    entry.context_length,
+  );
+  const maxOutputTokens = pick(
+    metadata.output_budget,
+    metadata.max_output_tokens,
+    entry.max_output_tokens,
+  );
+
+  if (contextWindow === undefined && maxOutputTokens === undefined) return undefined;
+  const capability: ModelCapability = {};
+  if (contextWindow !== undefined) capability.contextWindow = contextWindow;
+  if (maxOutputTokens !== undefined) capability.maxOutputTokens = maxOutputTokens;
+  return capability;
+}
+
+/** 一次遍历同时取出模型名与能力，避免为了多拿一个字段再解析一遍 JSON。 */
+function extractModels(payload: unknown): {
+  models: string[];
+  capabilities: Record<string, ModelCapability>;
+} | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
   const record = payload as Record<string, unknown>;
   const list = Array.isArray(record.data)
@@ -59,16 +118,22 @@ function extractModels(payload: unknown): string[] | undefined {
       ? record.models
       : undefined;
   if (!list) return undefined;
-  const ids: string[] = [];
+  const models: string[] = [];
+  const capabilities: Record<string, ModelCapability> = {};
   for (const item of list) {
-    if (typeof item === 'string') ids.push(item);
-    else if (item && typeof item === 'object') {
-      const entry = item as Record<string, unknown>;
-      const id = entry.id ?? entry.name ?? entry.model;
-      if (typeof id === 'string') ids.push(id);
+    if (typeof item === 'string') {
+      models.push(item);
+      continue;
     }
+    if (!item || typeof item !== 'object') continue;
+    const entry = item as Record<string, unknown>;
+    const id = entry.id ?? entry.name ?? entry.model;
+    if (typeof id !== 'string') continue;
+    models.push(id);
+    const capability = readCapability(entry);
+    if (capability) capabilities[id] = capability;
   }
-  return ids;
+  return { models, capabilities };
 }
 
 /**
@@ -106,9 +171,11 @@ export async function fetchProviderModels(
       };
     }
 
-    let models: string[] | undefined;
+    let extracted:
+      | { models: string[]; capabilities: Record<string, ModelCapability> }
+      | undefined;
     try {
-      models = extractModels(JSON.parse(text));
+      extracted = extractModels(JSON.parse(text));
     } catch {
       return {
         ok: false,
@@ -117,7 +184,7 @@ export async function fetchProviderModels(
         error: `响应不是合法 JSON：${trimSnippet(text)}`,
       };
     }
-    if (!models) {
+    if (!extracted) {
       return {
         ok: false,
         latencyMs,
@@ -127,7 +194,17 @@ export async function fetchProviderModels(
         error: `连上了但响应里没有可识别的模型列表（期望 data[] 或 models[]）：${trimSnippet(text)}`,
       };
     }
-    return { ok: true, latencyMs, status: response.status, models };
+    return {
+      ok: true,
+      latencyMs,
+      status: response.status,
+      models: extracted.models,
+      // 一个能力都没解析出来时不给这个字段，免得调用方把空对象当成"上游明确声明无限制"
+      capabilities:
+        Object.keys(extracted.capabilities).length > 0
+          ? extracted.capabilities
+          : undefined,
+    };
   } catch (error) {
     const latencyMs = Date.now() - startedAt;
     const message =

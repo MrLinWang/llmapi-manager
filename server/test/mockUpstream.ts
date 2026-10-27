@@ -4,7 +4,17 @@
  */
 import http from 'node:http';
 
-const OPENAI_MODELS = { data: [{ id: 'gpt-x' }, { id: 'gpt-x-mini' }] };
+const OPENAI_MODELS = {
+  data: [
+    // 带 metadata：用于验证"上游声明的上下文窗口会被解析并落进模型目录"。
+    // 只给 gpt-x 带元数据，gpt-x-mini 不带，好断言"没有声明时不瞎猜"。
+    {
+      id: 'gpt-x',
+      metadata: { context_limit: 400_000, output_budget: 64_000 },
+    },
+    { id: 'gpt-x-mini' },
+  ],
+};
 const ANTHROPIC_MODELS = { data: [{ id: 'claude-x' }] };
 
 function readBody(req: http.IncomingMessage): Promise<string> {

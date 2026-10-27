@@ -148,6 +148,47 @@ describe('冒烟：供应商与聚合', () => {
     expect(JSON.stringify(provider)).not.toContain('sk-mock-openai-secret');
   });
 
+  it('能力表只保留仍在模型列表里的模型', async () => {
+    // 删掉模型后留下它的能力就是死数据：同名模型下次被加上时会读到上一个模型
+    // 的上下文窗口，属于静默错配。保存时按 models 裁剪。
+    //
+    // 注意这里**必须删掉新增的供应商**：本文件所有用例共享同一个服务实例，
+    // 多留一家会发布额外的别名，让后面断言"别名列表等于某几项"的用例级联失败
+    // （第一版就踩了这个坑）。
+    const created = await call(
+      'POST',
+      '/api/providers',
+      {
+        name: '带能力的供应商',
+        apiType: 'responses',
+        baseUrl: 'http://127.0.0.1:65529',
+        apiKey: 'sk-cap',
+        models: ['keep-me'],
+        modelCapabilities: {
+          'keep-me': { contextWindow: 262_000, maxOutputTokens: 32_000 },
+          'removed-model': { contextWindow: 999_999 },
+          // 非法值整条丢弃：0 / 负数会被当成"窗口为 0"，比缺省更糟
+          'keep-me-bad': { contextWindow: 0 },
+        },
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const provider = created.json().provider as {
+      id: string;
+      modelCapabilities: unknown;
+    };
+    expect(provider.modelCapabilities).toEqual({
+      'keep-me': { contextWindow: 262_000, maxOutputTokens: 32_000 },
+    });
+
+    // 收尾：不留任何痕迹给后续用例
+    const removed = await call('DELETE', `/api/providers/${provider.id}`, undefined, {
+      cookie,
+    });
+    expect(removed.statusCode).toBe(200);
+  });
+
   it('同名供应商被拒绝', async () => {
     const response = await call(
       'POST',
@@ -192,6 +233,11 @@ describe('冒烟：供应商与聚合', () => {
     expect(body.ok).toBe(true);
     expect(body.models).toContain('gpt-x');
     expect(body.models).toContain('gpt-x-mini');
+    // 上游声明了上下文窗口时一并带回，供前端保存进供应商记录。
+    // 没有声明的模型（gpt-x-mini）不出现在 capabilities 里——不能猜。
+    expect(body.capabilities).toEqual({
+      'gpt-x': { contextWindow: 400_000, maxOutputTokens: 64_000 },
+    });
   });
 
   it('anthropic 协议用 x-api-key 拉取，拿到的是它自己的模型', async () => {

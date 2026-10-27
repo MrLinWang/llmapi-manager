@@ -28,12 +28,21 @@ function asProviderInput(body: unknown): ProviderInput {
   if (raw.models && raw.models.some((item) => typeof item !== 'string')) {
     throw badRequest('models 只能包含字符串');
   }
+  // 能力表只做形状校验，取值合法性（正整数、模型仍在列表里）交给
+  // ProviderService.normalizeCapabilities —— 一条规则一处实现，避免两套标准。
+  if (
+    raw.modelCapabilities !== undefined &&
+    (typeof raw.modelCapabilities !== 'object' || raw.modelCapabilities === null)
+  ) {
+    throw badRequest('modelCapabilities 必须是对象');
+  }
   return {
     name: raw.name,
     apiType: raw.apiType as ApiType,
     baseUrl: raw.baseUrl,
     apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : undefined,
     models: raw.models as string[] | undefined,
+    modelCapabilities: raw.modelCapabilities as ProviderInput['modelCapabilities'],
     enabled: typeof raw.enabled === 'boolean' ? raw.enabled : undefined,
     priority: typeof raw.priority === 'number' ? raw.priority : undefined,
     notes: typeof raw.notes === 'string' ? raw.notes : undefined,

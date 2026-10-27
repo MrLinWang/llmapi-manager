@@ -1,5 +1,27 @@
 export type ApiType = 'openai' | 'anthropic' | 'responses';
 
+/**
+ * 模型能力，用于生成 Codex 目录。
+ *
+ * 来源有四级（上游 metadata > modelinfo.dev > models.dev > 默认值），前端只负责透传，
+ * 不做任何推断——合并规则在服务端 `mergeCapabilities` 里只有一份实现。
+ */
+export interface ModelCapability {
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  /** 是否支持推理档位；false 时目录里不写 reasoning 档位 */
+  supportsReasoning?: boolean;
+  /**
+   * 该模型可用的推理档位（服务端已过滤并按强度排序）。
+   *
+   * `undefined` 与 `[]` 语义不同：前者"未知"（目录回落三档默认），
+   * 后者"查过、没有可用档位"（目录隐藏推理菜单）。
+   */
+  reasoningEfforts?: string[];
+  /** 输入模态，服务端保证只会是 text / image / audio */
+  inputModalities?: string[];
+}
+
 export interface Provider {
   id: string;
   name: string;
@@ -7,6 +29,8 @@ export interface Provider {
   apiType: ApiType;
   baseUrl: string;
   models: string[];
+  /** 按模型名记录的上游能力；缺省表示未知，目录回落保守默认值 */
+  modelCapabilities?: Record<string, ModelCapability>;
   enabled: boolean;
   priority: number;
   notes?: string;
@@ -32,6 +56,8 @@ export interface TestResult {
   latencyMs: number;
   status?: number;
   models?: string[];
+  /** 上游声明的模型能力，仅在响应里确实带了这些字段时出现 */
+  capabilities?: Record<string, ModelCapability>;
   error?: string;
 }
 
@@ -42,6 +68,8 @@ export interface ModelAlias {
   providerName: string;
   apiType: ApiType;
   upstreamModel: string;
+  /** 上游声明的能力；缺省表示未知，Codex 目录会回落保守默认值 */
+  capability?: ModelCapability;
 }
 
 export interface TokenView {

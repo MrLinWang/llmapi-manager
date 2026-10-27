@@ -76,6 +76,28 @@ describe('别名生成', () => {
   it('别名格式固定', () => {
     expect(buildAlias('alpha', 'gpt-x')).toBe('lam-alpha/gpt-x');
   });
+
+  it('能力跟着别名走，同名模型不串值', () => {
+    // 同一个裸模型名被两家声明、上下文窗口不同：能力必须按"哪一家"取，
+    // 而不是按模型名反查——否则 lam-alpha/gpt-x 会拿到 beta 的窗口。
+    const aliases = listAliases([
+      provider({ modelCapabilities: { 'gpt-x': { contextWindow: 400_000 } } }),
+      provider({
+        id: 'p_2',
+        providerKey: 'beta',
+        name: 'Beta',
+        modelCapabilities: { 'gpt-x': { contextWindow: 1_000_000 } },
+      }),
+    ]);
+    const byAlias = new Map(aliases.map((item) => [item.alias, item.capability]));
+    expect(byAlias.get('lam-alpha/gpt-x')).toEqual({ contextWindow: 400_000 });
+    expect(byAlias.get('lam-beta/gpt-x')).toEqual({ contextWindow: 1_000_000 });
+  });
+
+  it('没有能力数据时别名不带该字段', () => {
+    const aliases = listAliases([provider()]);
+    expect(aliases[0].capability).toBeUndefined();
+  });
 });
 
 describe('别名解析', () => {

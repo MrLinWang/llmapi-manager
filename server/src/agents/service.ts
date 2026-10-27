@@ -25,6 +25,7 @@ import {
   type DesiredWrites,
 } from './patch';
 import { apiTypeLabel, type ProviderRecord } from '../domain/provider';
+import { readTomlScalar } from './toml';
 import { badRequest, notFound } from '../http/errors';
 import { revealGatewayToken } from '../gateway/token';
 import type { AgentConnectionMode, TenantSettings } from '../domain/settings';
@@ -360,11 +361,18 @@ export class AgentService {
     // 直连时不按协议过滤：裸模型名直接打给那一家上游，中间没有网关的协议匹配，
     // 所以没有"列出来也用不了"的问题。
     const catalogPath = paths.catalog;
+    // 用户在 Codex 里配的档位，用来决定目录条目的 default_reasoning_level。
+    // 不读它就会出现"config.toml 写 high、/model 里显示 medium"的错位。
+    // 读不到就返回 undefined，由目录回落中间档 —— 不能因为读配置失败就中断生成。
+    const configuredEffort = readConfiguredEffort(paths.config);
     const catalogContent =
       agentId === 'codex' && catalogPath
         ? direct
           ? buildDirectModelCatalog(provider.models, provider.name, {
               preferredClientModel: upstreamModel,
+              // 直连时 slug 就是上游裸名，能力表键与之一致。
+              capabilities: provider.modelCapabilities,
+              configuredEffort,
             })
           : buildModelCatalog(
               // 只列该 Agent 实际能用的协议。Codex 的 wire_api 固定是 responses，
@@ -380,6 +388,7 @@ export class AgentService {
               ),
               {
                 preferredClientModel: clientModel,
+                configuredEffort,
                 // 仅网关模式：审批请求要经过网关才能被改写，直连时没有拦截点。
                 // 不把这个占位名放进目录，Codex 会找不到它并**静默回退到父模型**，
                 // 于是"配了审批模型却不生效"，且日志里看不到任何审批请求。
@@ -583,4 +592,22 @@ function pickProvider(
       ? '。Codex CLI 只支持 Responses 协议：请把某个供应商的协议类型改为「OpenAI 兼容（Responses）」，或新增一个 responses 供应商'
       : '';
   throw badRequest(`没有可用的 ${labels} 供应商，请先添加并启用${hint}`);
+}
+
+/**
+ * 读用户 Codex 配置里的推理档位（`model_reasoning_effort`）。
+ *
+ * 用途仅限目录条目的 `default_reasoning_level`：让 `/model` 里显示的初始档位与用户
+ * 实际配置一致。读不到（没有配置文件、文件损坏、没配这个键）时返回 undefined，
+ * 由目录回落中间档 —— 读配置失败绝不能中断配置生成。
+ *
+ * 用 `readTomlScalar` 而不是正则抠文本：它按表分段解析，不会把
+ * `[tui]` 段里同名的键误当成顶层键。
+ */
+function readConfiguredEffort(configPath: string | undefined): string | undefined {
+  if (!configPath) return undefined;
+  const content = readFileSafe(configPath);
+  if (content === null) return undefined;
+  const value = readTomlScalar(content, 'model_reasoning_effort');
+  return value === null || value.trim() === '' ? undefined : value.trim().toLowerCase();
 }

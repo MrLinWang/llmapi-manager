@@ -131,6 +131,9 @@
   "baseUrl": "https://api.example.com",
   "apiKey": "sk-...",
   "models": ["gpt-x", "gpt-x-mini"],
+  "modelCapabilities": {
+    "gpt-x": { "contextWindow": 400000, "maxOutputTokens": 64000 }
+  },
   "enabled": true,
   "priority": 0,
   "notes": "可选",
@@ -141,6 +144,11 @@
 约束：`name` 非空；`apiType` ∈ `openai | anthropic | responses`（非法值返回
 400 `apiType 只能是 openai / anthropic / responses`）；`baseUrl` 必须是 http/https；
 `models` 去重后保持输入顺序；`priority` 越小越靠前。
+
+`modelCapabilities` 可省略，省略表示**保持已存值不变**（编辑态不必为了保留能力而重填）。
+服务端在落盘前会裁剪：只保留仍出现在 `models` 里的模型，非正整数的值整条丢弃
+（0 / 负数会被当成"窗口为 0"，比缺省更糟）。它的唯一用途是生成 Codex 目录里的
+`context_window` / `max_output_tokens`，见 `docs/agents.md`。
 
 `apiType` 不是展示字段，它决定这条上游只接哪条网关路径：
 
@@ -187,8 +195,36 @@
 
 ```json
 { "ok": true, "latencyMs": 42, "status": 200, "models": ["gpt-5", "gpt-5-mini", "o3"] }
+{
+  "ok": true,
+  "latencyMs": 42,
+  "status": 200,
+  "models": ["gpt-5", "gpt-5-mini"],
+  "capabilities": { "gpt-5": { "contextWindow": 400000, "maxOutputTokens": 64000 } }
+}
 { "ok": false, "latencyMs": 10003, "error": "请求超时（10s）" }
 ```
+
+`capabilities` 是可选字段：解析上游 `/models` 条目里的 `metadata`
+（`context_limit` / `context_window` / `context_length` 与 `output_budget` / `max_output_tokens`）
+得到，**只包含确实声明了这些字段的模型**。一个都解析不出来时整个字段不出现，
+而不是给一个空对象 —— 空对象会被误读成"上游明确声明无限制"。
+前端拿到后随供应商一起提交到 `modelCapabilities`，生成 Codex 目录时用作
+`context_window`（详见 `docs/agents.md`）。
+
+每个 `capabilities` 条目可能包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `contextWindow` | 上下文窗口（token）。目录里作为 `context_window`，Codex 据此算自动压缩阈值 |
+| `maxOutputTokens` | 单次输出上限。目录里只作自解释，Codex 的 `ModelInfo` 并不读它 |
+| `supportsReasoning` | 是否支持推理档位；`false` 时目录里 `supported_reasoning_levels` 写空数组 |
+| `reasoningEfforts` | 该模型可用的推理档位（已按强度升序）。`[]` 表示查过但无可用档位，与缺省（未知）不同 |
+| `inputModalities` | 输入模态，**只会是 `text` / `image` / `audio` 的子集** |
+
+`inputModalities` 一定经过白名单过滤：Codex 的模态枚举不认 `pdf` / `video` / `document`，
+写进去会让整份目录解析失败并静默回退到内置官方列表（详见 `docs/agents.md`）。
+上游没声明时可由 `npm run registry:sync -w server` 从 modelinfo.dev / models.dev 补齐。
 
 连上了但响应里没有可识别的 `data[]` / `models[]` 时返回 `ok: false` 并说明原因，
 而不是给一个空列表——否则界面看起来像是"上游真的没有模型"。
