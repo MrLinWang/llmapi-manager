@@ -231,6 +231,105 @@ describe('前端页面装配', () => {
     expect(screen.getByRole('button', { name: '应用配置' })).toBeTruthy();
   });
 
+  it('结束 Codex 进程后的提示包含手动清理命令', async () => {
+    // 自动结束是尽力而为：`codex app-server daemon stop` 在配置目录只读时会失败，
+    // 非标准位置启动的进程也可能匹配不到。提示里必须给出 `pkill -9 -f codex`，
+    // 否则用户看到"已结束"或一句失败原因后不知道下一步该做什么。
+    setOverrides({
+      '/api/agents/codex/stop-processes': {
+        actions: ['已结束 1 个 Codex 客户端进程'],
+        killed: 1,
+        warnings: [],
+        supported: true,
+      },
+    });
+    const { render, screen, waitFor, fireEvent } = await import('@testing-library/react');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const AgentsPage = (await import('../src/pages/AgentsPage')).default;
+
+    render(
+      <AuthProvider>
+        <AgentsPage />
+      </AuthProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: '退出 Codex 进程' }));
+
+    // 逐字断言整句，不做"包含 pkill 就算过"的宽松检查：
+    // 用户要的就是这句话，措辞与换行都不能漂。
+    await waitFor(() =>
+      expect(document.body.textContent ?? '').toContain(
+        '也可手动执行 pkill -9 -f codex 来清理相关进程',
+      ),
+    );
+    // 提示里也要保留"重开 Codex 才生效"这一层，不能只剩命令
+    expect(document.body.textContent ?? '').toContain('重新打开 Codex 即可加载最新配置');
+    setOverrides({});
+  });
+
+  it('守护进程 stop 失败、只剩警告时也给出手动清理命令', async () => {
+    // 这条响应是从真实后端抓下来的（真机 codex 装好、但 ~/.codex 所在 fs 只读）：
+    //   actions: ["本机没有正在运行的 Codex 进程"]
+    //   warnings: ["停止守护进程失败：... Read-only file system (os error 30)"]
+    // 同时非空时走的是 setMessage 分支，警告内容要能看见，手动命令也不能丢。
+    setOverrides({
+      '/api/agents/codex/stop-processes': {
+        actions: ['本机没有正在运行的 Codex 进程'],
+        killed: 0,
+        warnings: [
+          '停止守护进程失败：WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)',
+        ],
+        supported: true,
+      },
+    });
+    const { render, screen, waitFor, fireEvent } = await import('@testing-library/react');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const AgentsPage = (await import('../src/pages/AgentsPage')).default;
+
+    render(
+      <AuthProvider>
+        <AgentsPage />
+      </AuthProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: '退出 Codex 进程' }));
+
+    await waitFor(() =>
+      expect(document.body.textContent ?? '').toContain(
+        '停止守护进程失败：WARNING: proceeding',
+      ),
+    );
+    const text = document.body.textContent ?? '';
+    expect(text).toContain('也可手动执行 pkill -9 -f codex 来清理相关进程');
+    setOverrides({});
+  });
+
+  it('结束进程的请求失败时也提示手动清理命令', async () => {
+    // 请求本身失败（后端 500 / 路由 404 / 网络断）时用户最需要这条命令：
+    // 自动结束根本没跑起来，只剩手动清理这一条路。
+    setOverrides({
+      '/api/agents/codex/stop-processes': undefined,
+    });
+    const { render, screen, waitFor, fireEvent } = await import('@testing-library/react');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const AgentsPage = (await import('../src/pages/AgentsPage')).default;
+
+    render(
+      <AuthProvider>
+        <AgentsPage />
+      </AuthProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: '退出 Codex 进程' }));
+
+    await waitFor(() =>
+      expect(document.body.textContent ?? '').toContain(
+        '也可手动执行 pkill -9 -f codex 来清理相关进程',
+      ),
+    );
+    setOverrides({});
+  });
+
   it('概览页展示统计与请求日志', async () => {
     const { render, screen, waitFor } = await import('@testing-library/react');
     const { AuthProvider } = await import('../src/lib/auth');

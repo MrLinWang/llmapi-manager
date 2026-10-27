@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { api, ApiError } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
 import type { AgentConnectionMode, AgentTargetPreference, AgentPreview, Provider } from '../lib/types';
@@ -54,23 +54,51 @@ function agentIcon(id: string): IconName {
   return id === 'codex' ? 'terminal' : 'agents';
 }
 
+/**
+ * 「退出 Codex 进程」提示里的手动兜底命令。
+ *
+ * 结束进程是尽力而为：`codex app-server daemon stop` 在配置目录只读时会直接失败，
+ * 自定义安装位置的进程也可能匹配不到。此时只报"已结束/没有进程"会让用户以为按钮
+ * 无效，而不知道下一步该做什么，所以每次都把这条命令一起给出。
+ *
+ * 用 <code> 而不是纯文本，是为了让命令在中文提示里能一眼看清（与页面其他内联命令一致）。
+ */
+const MANUAL_CODEX_KILL_HINT: ReactNode = (
+  <>
+    也可手动执行 <code className="font-mono">pkill -9 -f codex</code> 来清理相关进程。
+  </>
+);
+
 export default function AgentsPage(): JSX.Element {
   const agents = useAsync(() => api.agents());
   const settings = useAsync(() => api.settings());
   const providers = useAsync(() => api.providers());
   const [preview, setPreview] = useState<AgentPreview | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  // 提示里可能带内联命令（<code>），所以存 ReactNode 而不是 string。
+  const [error, setError] = useState<ReactNode>(null);
+  const [message, setMessage] = useState<ReactNode>(null);
 
-  const run = async (label: string, action: () => Promise<void>): Promise<void> => {
+  /**
+   * 统一的操作包装：置忙、清提示、收错误。
+   *
+   * `failureHint` 是给失败路径补的一句兜底说明。之前只有成功分支才带手动命令，
+   * 请求一报错（后端 500、进程探测异常、路由 404）就只剩一句错误文本，
+   * 用户反而最需要这一步的时候拿不到"下一步做什么"。
+   */
+  const run = async (
+    label: string,
+    action: () => Promise<void>,
+    failureHint?: ReactNode,
+  ): Promise<void> => {
     setBusy(label);
     setError(null);
     setMessage(null);
     try {
       await action();
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : '操作失败');
+      const text = cause instanceof ApiError ? cause.message : '操作失败';
+      setError(failureHint ? <>{text}。{failureHint}</> : text);
     } finally {
       setBusy(null);
     }
@@ -96,20 +124,41 @@ export default function AgentsPage(): JSX.Element {
       if (preview?.agentId === id) setPreview(await api.previewAgent(id));
     });
 
+  /**
+   * 结束本机 Codex 进程后的提示。
+   *
+   * 自动结束是尽力而为：`codex app-server daemon stop` 在配置目录只读时会直接失败，
+   * 从非标准位置启动的进程也可能匹配不到。所以无论成功还是只剩警告，都把手动兜底
+   * 命令一起给出 —— 否则用户只看到"已结束"或一句失败原因，不知道下一步该做什么。
+   */
   const doStopProcesses = (id: string): Promise<void> =>
-    run(`stop:${id}`, async () => {
-      const result = await api.stopAgentProcesses(id);
-      // actions 由后端补齐（包含"本机没有正在运行的 Codex 进程"这种情况），
-      // 前端不再自己推断，避免两处逻辑各说一套。
-      const parts: string[] = [...result.actions];
-      if (result.warnings.length > 0) parts.push(...result.warnings);
-      const text = parts.join('；');
-      if (result.warnings.length > 0 && result.actions.length === 0) {
-        setError(text);
-      } else {
-        setMessage(`${text}。重新打开 Codex 即可加载最新配置。`);
-      }
-    });
+    run(
+      `stop:${id}`,
+      async () => {
+        const result = await api.stopAgentProcesses(id);
+        // actions 由后端补齐（包含"本机没有正在运行的 Codex 进程"这种情况），
+        // 前端不再自己推断，避免两处逻辑各说一套。
+        const parts: string[] = [...result.actions];
+        if (result.warnings.length > 0) parts.push(...result.warnings);
+        const text = parts.join('；');
+        if (result.warnings.length > 0 && result.actions.length === 0) {
+          setError(
+            <>
+              {text}。{MANUAL_CODEX_KILL_HINT}
+            </>,
+          );
+        } else {
+          setMessage(
+            <>
+              {text}。重新打开 Codex 即可加载最新配置。{MANUAL_CODEX_KILL_HINT}
+            </>,
+          );
+        }
+      },
+      // 请求本身失败（后端 500 / 路由 404 / 网络断）时同样要给出兜底命令：
+      // 这恰恰是用户最需要手动清理的时候。
+      MANUAL_CODEX_KILL_HINT,
+    );
 
   /**
    * 切换 Codex 的 web_search 开关。

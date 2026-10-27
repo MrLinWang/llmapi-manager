@@ -134,7 +134,7 @@ data/                                  # 实际落点由 DATA_DIR 决定，npm �
 ```
 
 - **会写你的家目录**：只有点击"应用配置"时才改写 `~/.codex/config.toml`、`~/.codex/auth.json`、`~/.codex/llmapi-model-catalog.json`（模型目录，整份生成）、`~/.claude/settings.json`；写入前在同目录生成 `*.bak-<时间戳>` 备份（如 `~/.codex/config.toml.bak-2026-10-23T14-00-00-000Z`），改坏了可直接找回，不依赖本服务是否还在运行。
-- **会结束你的进程**：Codex 只在启动时读配置与模型目录，所以「退出 Codex 进程」按钮会执行 `codex app-server daemon stop` 并对 `codex` / `codex exec` 进程发信号（先 `SIGTERM`、必要时 `SIGKILL`）。匹配规则保守，不碰 `mycodex`、编辑器插件或 `codex --version` 这类一次性命令。
+- **会结束你的进程**：Codex 只在启动时读配置与模型目录，所以「退出 Codex 进程」按钮会执行 `codex app-server daemon stop` 并对 `codex` / `codex exec` 进程发信号（先 `SIGTERM`、必要时 `SIGKILL`）。匹配规则保守，不碰 `mycodex`、编辑器插件或 `codex --version` 这类一次性命令。操作结果提示里固定附上兜底命令 `pkill -9 -f codex`，自动结束没覆盖到时可以手动清理。
 - **只拥有最小字段集**：Codex 只改 `model_provider`、`model`、`model_catalog_json`、`web_search` 与 `[model_providers.llmapi]` 段；Claude Code 只改 `env` 下三个键。其余内容（MCP、钩子、权限、其他 provider）原样保留。
 - **还原是保守的**：只移除"当前值仍等于我们写入值"的键；被你手改过的键保留并作为冲突提示。由我们创建、且还原后为空壳的文件会直接删除。
 - **凭据**：口令用 scrypt；网关令牌只存哈希（下发 Agent 时另有密文副本，任何接口都不返回）；供应商 Key 列表接口只返回首 3 位 + 尾 4 位。

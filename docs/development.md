@@ -26,6 +26,12 @@ npm run dev -w server     # tsx watch，改文件自动重启
 npm run dev -w web        # vite，热更新
 ```
 
+> **单进程模式下改前端必须重新构建。** `npm start` 托管的静态资源是**已构建**的
+> `web/dist`，改 `web/src` 不会自动生效 —— 页面继续跑旧 bundle，看起来像"改了没用"。
+> 要么用 `npm run dev`（Vite 热更新），要么改完执行 `npm run build -w web`。
+> 排查这类"文案没变"的问题，先比对 `web/src` 与 `web/dist/assets/*.js` 的修改时间，
+> 再判断是不是代码的问题。
+
 ## 命令
 
 | 命令 | 作用 |
