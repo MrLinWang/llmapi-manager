@@ -1,4 +1,6 @@
 import type { ApiType, ModelCapability, ProviderRecord } from '../domain/provider';
+import type { UiLanguage } from '../domain/settings';
+import { translate } from '../i18n';
 
 const TIMEOUT_MS = 10_000;
 const MAX_ERROR_SNIPPET = 200;
@@ -23,6 +25,14 @@ export interface ModelListTarget {
   apiType: ApiType;
   baseUrl: string;
   apiKey: string;
+  /**
+   * 失败说明渲染成哪种语言。
+   *
+   * `error` 会原样进接口响应、显示在界面上，所以必须在**边界**定语言：
+   * 这个服务是纯函数式的 HTTP 采集，拿不到 Request，由路由层解析好传进来。
+   * 缺省中文——与 `SERVER_LOG_LANGUAGE` 一致，也让不带语言的内部调用方行为不变。
+   */
+  language?: UiLanguage;
 }
 
 function trimSnippet(text: string): string {
@@ -146,6 +156,8 @@ function extractModels(payload: unknown): {
 export async function fetchProviderModels(
   target: ModelListTarget,
 ): Promise<ConnectivityResult> {
+  // 失败说明会进接口响应并显示在界面上，按调用方给的语言渲染；未指定时用中文兜底。
+  const language = target.language ?? 'zh';
   const startedAt = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -167,7 +179,11 @@ export async function fetchProviderModels(
         ok: false,
         latencyMs,
         status: response.status,
-        error: `HTTP ${response.status}: ${trimSnippet(text) || response.statusText}`,
+        // 上游的响应体与状态文本原样带上：那是上游的话，不是我们的文案。
+        error: translate(language, 'providers.test.httpError', {
+          status: response.status,
+          detail: trimSnippet(text) || response.statusText,
+        }),
       };
     }
 
@@ -181,7 +197,9 @@ export async function fetchProviderModels(
         ok: false,
         latencyMs,
         status: response.status,
-        error: `响应不是合法 JSON：${trimSnippet(text)}`,
+        error: translate(language, 'providers.test.invalidJson', {
+          detail: trimSnippet(text),
+        }),
       };
     }
     if (!extracted) {
@@ -191,7 +209,9 @@ export async function fetchProviderModels(
         status: response.status,
         // 上游可能把模型列表放在别的字段里；明确告诉用户"连上了但没认出结构"，
         // 而不是让界面显示一个空列表让人以为上游真没有模型。
-        error: `连上了但响应里没有可识别的模型列表（期望 data[] 或 models[]）：${trimSnippet(text)}`,
+        error: translate(language, 'providers.test.noModelList', {
+          detail: trimSnippet(text),
+        }),
       };
     }
     return {
@@ -207,10 +227,12 @@ export async function fetchProviderModels(
     };
   } catch (error) {
     const latencyMs = Date.now() - startedAt;
+    // 超时是我们自己的判定，走字典；其余异常消息来自运行时（如 `fetch failed`），
+    // 原样保留——翻译它只会让排查时对不上 Node 的错误。
     const message =
       error instanceof Error
         ? error.name === 'AbortError'
-          ? `请求超时（${TIMEOUT_MS / 1000}s）`
+          ? translate(language, 'providers.test.timeout', { seconds: TIMEOUT_MS / 1000 })
           : error.message
         : String(error);
     return { ok: false, latencyMs, error: trimSnippet(message) };
@@ -223,10 +245,12 @@ export async function fetchProviderModels(
 export async function testProviderConnectivity(
   provider: ProviderRecord,
   apiKey: string,
+  language?: UiLanguage,
 ): Promise<ConnectivityResult> {
   return fetchProviderModels({
     apiType: provider.apiType,
     baseUrl: provider.baseUrl,
     apiKey,
+    language,
   });
 }

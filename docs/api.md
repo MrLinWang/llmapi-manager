@@ -1,11 +1,43 @@
 # 接口参考
 
 - 管理面：`/api/*`，用会话 Cookie 鉴权。所有错误响应统一为
-  `{ "error": { "code": "...", "message": "...", "details"?: ... } }`。
+  `{ "error": { "code": "...", "message": "...", "messageKey": "...", "details"?: ... } }`。
 - 数据面：`/v1/*`，用网关令牌鉴权，错误也复用同一结构（上游原始错误则原样透传）。
 
 `code` 取值：`bad_request`(400) / `unauthorized`(401) / `forbidden`(403) / `not_found`(404) /
 `conflict`(409) / `not_implemented`(501) / `upstream_error`(502) / `internal_error`(500)。
+
+### `message` 跟随语言，`messageKey` 不随语言变化
+
+`message` 是给人读的句子，按下面的优先级渲染成中文或英文：
+
+1. 已登录租户的设置 `language`（用户在控制台里显式选的那项）；
+2. `Accept-Language` 请求头；
+3. 中文兜底（`Accept-Language: *` 视为没表态，同样兜底中文）。
+
+租户设置优先于请求头：用户已经在控制台选过语言，报错还跟着浏览器语言走会出现
+"界面英文、报错中文"。未登录时（401、登录、首次初始化）读不到租户设置，
+此时请求头是唯一线索——控制台前端会带上它。
+
+**调用方不该匹配 `message`**，它随时可能因为语言或措辞变化而不同。要判断错误类型用
+`code`，要区分具体原因用 `messageKey`：
+
+```json
+{
+  "error": {
+    "code": "bad_request",
+    "message": "name 必须是字符串",
+    "messageKey": "providers.validation.nameType"
+  }
+}
+```
+
+`messageKey` 的取值是稳定的内部标识（如 `gateway.auth.invalidToken`、
+`providers.notFound`、`diagnostics.disabled`），不承诺与文档逐条同步，
+但当你需要"精确识别某个错误"时它是唯一可靠依据。
+
+例外：Fastify 自身的请求格式错误（schema 不匹配、JSON 解析失败）文案来自框架、
+无法本地化，此时 `messageKey` 为 `errors.framework`，`message` 原样透传。
 
 ## 鉴权
 

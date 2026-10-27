@@ -1,5 +1,7 @@
 import type { ModelAlias } from './aliases';
 import { filterInputModalities, type ModelCapability } from './provider';
+import type { UiLanguage } from './settings';
+import { translate } from '../i18n';
 
 /**
  * Codex CLI 的模型目录格式（ConfigToml 的 `model_catalog_json` 与
@@ -94,35 +96,56 @@ const AGGREGATE_INSTRUCTIONS =
   'Follow the user instructions and use the available tools when they help.';
 
 /**
- * 每个档位的中文说明。Codex 的模型选择弹窗会把这些作为条目的次要文字展示。
+ * 每个档位的说明文案键。Codex 的模型选择弹窗会把这些作为条目的次要文字展示。
+ *
+ * 存键而不是成品字符串：目录内容要按请求语言生成（调用方传 `language`），
+ * 而这里是模块级常量表，渲染发生在 `buildCatalogEntries` 里。
  *
  * 覆盖 `CODEX_REASONING_EFFORTS` 的全部取值；表中没有的（理论上不会有，
- * 因为白名单已经过滤过）用 effort 原文兜底，保证不会渲染出 undefined。
+ * 因为白名单已经过滤过）用 effort 原文兜底，保证不会渲染出 undefined 或键名。
  */
-const EFFORT_DESCRIPTIONS: Record<string, string> = {
-  none: '不使用推理，直接作答',
-  minimal: '最小推理投入，最快响应',
-  low: '快速响应，推理较轻',
-  medium: '速度与推理深度均衡',
-  high: '更深的推理，适合复杂问题',
-  xhigh: '很高的推理投入，适合困难任务',
-  max: '最大推理投入，最慢但最深入',
-  ultra: '极高推理投入（含并发子代理）',
-  persistent: '持续推理，直到得出结论',
+const EFFORT_DESCRIPTION_KEYS: Record<string, string> = {
+  none: 'agents.reasoning.none',
+  minimal: 'agents.reasoning.minimal',
+  low: 'agents.reasoning.low',
+  medium: 'agents.reasoning.medium',
+  high: 'agents.reasoning.high',
+  xhigh: 'agents.reasoning.xhigh',
+  max: 'agents.reasoning.max',
+  ultra: 'agents.reasoning.ultra',
+  persistent: 'agents.reasoning.persistent',
 };
 
+/**
+ * 渲染一个档位的说明；字典里没登记的档位用 effort 原文兜底（不渲染出键名）。
+ *
+ * 为什么宁可显示英文档位名也不显示键名：`translate` 缺键时返回的是键名本身，
+ * 而这段文字会被**写进用户的模型目录文件**。目录里出现 `agents.reasoning.xhigh`
+ * 是一条明显的程序 bug 落进了用户配置；而显示 `xhigh` 只是"少翻了一档"，
+ * 用户仍能看懂、功能也不受影响。两种错的代价不对称，所以这里选择兜底。
+ */
+function effortDescription(language: UiLanguage, effort: string): string {
+  const key = EFFORT_DESCRIPTION_KEYS[effort];
+  return key === undefined ? effort : translate(language, key);
+}
+
 /** 未知档位永远不写：三档保守默认，避免把猜出来的值写进用户的客户端。 */
-const REASONING_LEVELS: CodexReasoningLevel[] = [
-  { effort: 'low', description: EFFORT_DESCRIPTIONS.low },
-  { effort: 'medium', description: EFFORT_DESCRIPTIONS.medium },
-  { effort: 'high', description: EFFORT_DESCRIPTIONS.high },
-];
+function defaultReasoningLevels(language: UiLanguage): CodexReasoningLevel[] {
+  return [
+    { effort: 'low', description: effortDescription(language, 'low') },
+    { effort: 'medium', description: effortDescription(language, 'medium') },
+    { effort: 'high', description: effortDescription(language, 'high') },
+  ];
+}
 
 /** 把档位字符串数组转成 Codex 要的对象数组，并补上描述。 */
-function toReasoningLevels(efforts: readonly string[]): CodexReasoningLevel[] {
+function toReasoningLevels(
+  efforts: readonly string[],
+  language: UiLanguage,
+): CodexReasoningLevel[] {
   return efforts.map((effort) => ({
     effort,
-    description: EFFORT_DESCRIPTIONS[effort] ?? effort,
+    description: effortDescription(language, effort),
   }));
 }
 
@@ -164,6 +187,13 @@ export interface BuildCatalogOptions {
    */
   capabilities?: Record<string, ModelCapability>;
   /**
+   * 目录里人读文字的渲染语言（档位说明、来源说明、审批占位名说明）。
+   *
+   * 缺省 `zh`：目录是写进用户客户端文件的静态内容，调用方拿不到请求语言时
+   * 不应因此报错。服务端所有主动生成目录的路径（agents/service.ts）都会传它。
+   */
+  language?: UiLanguage;
+  /**
    * 「Approve for me」的占位模型名，需要出现在目录里。
    *
    * 为什么必须放进来：Codex 在 API Key 认证下把审批模型硬编码成 `gpt-5.6-luna`，
@@ -188,15 +218,20 @@ export function buildModelCatalog(
   aliases: readonly ModelAlias[],
   options: BuildCatalogOptions,
 ): string {
+  const language = options.language ?? 'zh';
   return buildCatalogEntries(
     aliases.map((alias) => ({
       model: alias.alias,
-      description: `${alias.providerName} 提供的 ${alias.upstreamModel}`,
+      description: translate(language, 'agents.catalog.providedBy', {
+        provider: alias.providerName,
+        model: alias.upstreamModel,
+      }),
       // 网关模式下能力挂在别名上（同一裸名可能被多家声明，各家上限不同）。
       // 别名自带的值优先；没有再按裸名到 capabilities 里找，兼容旧调用方。
       capability: alias.capability ?? options.capabilities?.[alias.upstreamModel],
     })),
     options,
+    language,
   );
 }
 
@@ -212,14 +247,19 @@ export function buildDirectModelCatalog(
   providerName: string,
   options: BuildCatalogOptions,
 ): string {
+  const language = options.language ?? 'zh';
   return buildCatalogEntries(
     models.map((model) => ({
       model,
-      description: `${providerName} 提供的 ${model}`,
+      description: translate(language, 'agents.catalog.providedBy', {
+        provider: providerName,
+        model,
+      }),
       // 直连时 slug 就是上游裸名，与能力表的键一致。
       capability: options.capabilities?.[model],
     })),
     options,
+    language,
   );
 }
 
@@ -234,6 +274,7 @@ interface CatalogEntryInput {
 function buildCatalogEntries(
   inputs: readonly CatalogEntryInput[],
   options: BuildCatalogOptions,
+  language: UiLanguage,
 ): string {
   const entries: CodexCatalogEntry[] = [];
   const seen = new Set<string>();
@@ -248,10 +289,10 @@ function buildCatalogEntries(
       input.capability?.supportsReasoning === false
         ? [] // 明确不支持推理：Codex 会隐藏推理菜单
         : efforts !== undefined && efforts.length > 0
-          ? toReasoningLevels(efforts) // 查到的真实档位
+          ? toReasoningLevels(efforts, language) // 查到的真实档位
           : efforts !== undefined
             ? [] // 查过但没有可用档位（空数组是"明确无"的语义）
-            : REASONING_LEVELS; // 未知：保守三档
+            : defaultReasoningLevels(language); // 未知：保守三档
     const defaultEffort =
       reasoningLevels.length === 0
         ? 'medium'
@@ -316,7 +357,7 @@ function buildCatalogEntries(
   if (options.approvalPlaceholder) {
     push({
       model: options.approvalPlaceholder,
-      description: 'Approve for me：由网关映射到你在控制台选定的审批模型',
+      description: translate(language, 'agents.catalog.approvalPlaceholder'),
     });
   }
 

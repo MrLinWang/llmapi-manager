@@ -139,7 +139,12 @@ let overrides: RouteMap = {};
  * 语言切换这类"点了之后还要落盘"的交互，只断言界面变了是不够的：
  * 请求根本没发出去、或者发到了错的路径/方法，界面也会因为乐观更新而变化。
  */
-let requests: Array<{ method: string; path: string; body: string | null }> = [];
+let requests: Array<{
+  method: string;
+  path: string;
+  body: string | null;
+  headers: Record<string, string>;
+}> = [];
 
 /**
  * 服务端当前的界面语言（模拟 settings.json 里那一个字段）。
@@ -160,7 +165,7 @@ function installFetch(): void {
     const path = url.split('?')[0];
     const method = init?.method ?? 'GET';
     const body = typeof init?.body === 'string' ? init.body : null;
-    requests.push({ method, path, body });
+    requests.push({ method, path, body, headers: (init?.headers ?? {}) as Record<string, string> });
 
     // 语言设置按真实行为模拟：写入后 `/api/auth/me` 也要跟着返回新值，
     // 否则测不出"刷新之后语言又跳回旧值"这种真实故障。
@@ -181,9 +186,13 @@ function installFetch(): void {
     }
 
     const payload = path in overrides ? overrides[path] : routes[path];
+    // 约定：带 `error` 字段的 payload 视为错误响应，按其中的 statusCode 返回
+    const err = (payload as { error?: unknown; statusCode?: number } | undefined)?.error
+      ? (payload as { statusCode?: number })
+      : undefined;
     return {
-      ok: payload !== undefined,
-      status: payload === undefined ? 404 : 200,
+      ok: payload !== undefined && err === undefined,
+      status: err ? (err.statusCode ?? 400) : payload === undefined ? 404 : 200,
       text: async () => JSON.stringify(payload ?? { error: { code: 'not_found' } }),
     } as Response;
   }) as typeof fetch;
@@ -656,6 +665,47 @@ describe('前端页面装配', () => {
 
     setOverrides({});
     serverLanguage = 'zh';
+  });
+
+  it('请求带上界面语言，且错误里能拿到 messageKey', async () => {
+    // 两件事一起钉：
+    // 1) 前端必须把当前界面语言放进 Accept-Language，否则登录失败这类
+    //    "还没读到租户设置"的报错会永远是中文，而界面已经是英文了；
+    // 2) 错误对象要带 messageKey —— 服务端 message 已经按语言渲染好可以直接显示，
+    //    但需要精确区分错误类型的代码不该去匹配会变的译文。
+    requests = [];
+    const { api, ApiError } = await import('../src/lib/api');
+    const i18n = (await import('../src/i18n')).default;
+    await i18n.changeLanguage('en');
+
+    // 让 /api/providers 返回一个带 messageKey 的错误
+    setOverrides({
+      '/api/providers': {
+        statusCode: 400,
+        error: {
+          code: 'bad_request',
+          message: 'name must be a string',
+          messageKey: 'providers.validation.nameType',
+        },
+      },
+    });
+    // 上面的 mock 只按路径返回，不区分 GET/POST；这里直接调一个会走该路径的写操作
+    let caught: unknown = null;
+    try {
+      await api.createProvider({ name: '', apiType: 'openai', baseUrl: '', models: [] } as never);
+    } catch (cause) {
+      caught = cause;
+    }
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as InstanceType<typeof ApiError>).messageKey).toBe(
+      'providers.validation.nameType',
+    );
+
+    const sent = requests.find((item) => item.path === '/api/providers');
+    expect(sent?.headers['accept-language']).toBe('en');
+
+    setOverrides({});
+    await i18n.changeLanguage('zh');
   });
 
   it('无 settings:write 时语言下拉只读', async () => {

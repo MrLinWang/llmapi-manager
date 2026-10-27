@@ -1,4 +1,6 @@
 import type { ApiType, ModelCapability, ProviderRecord } from './provider';
+import type { MessageKey, MessageParams } from '../i18n';
+import { renderZh } from '../i18n/render';
 
 /**
  * 别名前缀：`lam-<providerKey>/<model>` 是"明确指向某一家"的写法。
@@ -58,10 +60,35 @@ export function listAliases(providers: readonly ProviderRecord[]): ModelAlias[] 
   return out;
 }
 
+/**
+ * 解析失败的原因。
+ *
+ * 存"键 + 参数"而不是成品字符串：同一处失败要能按请求语言渲染。
+ * `reason` 仍是中文渲染结果——网关响应、诊断接口与测试都在直接读它，
+ * 删掉它会让这些调用方改成两段式取值，收益低于成本。
+ * 需要英文时用 `reasonKey` + `reasonParams` 自行 `translate()`。
+ */
+export type AliasInvalidReason = {
+  reason: string;
+  reasonKey: MessageKey;
+  reasonParams?: MessageParams;
+};
+
 export type AliasResolution =
   | { kind: 'alias'; alias: ModelAlias }
   | { kind: 'default'; upstreamModel: string }
-  | { kind: 'invalid'; reason: string };
+  | ({ kind: 'invalid' } & AliasInvalidReason);
+
+/**
+ * 构造一条解析失败原因：同时给出键与中文渲染结果。
+ *
+ * 这里**不调用 `translate()`** 而是从字典直接取值：`domain/` 是纯领域层，
+ * 不该依赖"字典是否已被 `createContext` 装载"这种运行时状态——否则单测里
+ * 直接调 `resolveModel` 会拿到键名而不是文案。
+ */
+function invalid(key: MessageKey, params?: MessageParams): AliasInvalidReason {
+  return { reason: renderZh(key, params), reasonKey: key, reasonParams: params };
+}
 
 /**
  * 解析请求里的 model。
@@ -78,25 +105,31 @@ export function resolveModel(
 
   const separatorIndex = requested.indexOf(ALIAS_SEPARATOR, ALIAS_PREFIX.length);
   if (separatorIndex < 0) {
-    return { kind: 'invalid', reason: `别名 ${requested} 缺少 "/" 分隔符` };
+    return { kind: 'invalid', ...invalid('gateway.alias.missingSeparator', { alias: requested }) };
   }
   const providerKey = requested.slice(ALIAS_PREFIX.length, separatorIndex);
   const upstreamModel = requested.slice(separatorIndex + ALIAS_SEPARATOR.length);
   if (!providerKey || !upstreamModel) {
-    return { kind: 'invalid', reason: `别名 ${requested} 格式不完整` };
+    return { kind: 'invalid', ...invalid('gateway.alias.incomplete', { alias: requested }) };
   }
 
   const provider = providers.find((item) => item.providerKey === providerKey);
   if (!provider) {
-    return { kind: 'invalid', reason: `未知供应商 key: ${providerKey}` };
+    return { kind: 'invalid', ...invalid('gateway.alias.unknownProvider', { key: providerKey }) };
   }
   if (!provider.enabled) {
-    return { kind: 'invalid', reason: `供应商 ${provider.name} 已禁用` };
+    return {
+      kind: 'invalid',
+      ...invalid('gateway.alias.providerDisabled', { name: provider.name }),
+    };
   }
   if (!provider.models.includes(upstreamModel)) {
     return {
       kind: 'invalid',
-      reason: `供应商 ${provider.name} 未声明模型 ${upstreamModel}`,
+      ...invalid('gateway.alias.modelNotDeclared', {
+        name: provider.name,
+        model: upstreamModel,
+      }),
     };
   }
 

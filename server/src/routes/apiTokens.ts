@@ -12,37 +12,40 @@ import { can } from '../auth/policy';
 const UNGRANTABLE: readonly Permission[] = ['users:manage', 'tenants:manage'];
 
 function parseScopes(raw: unknown, principal: ReturnType<typeof getPrincipal>): Permission[] {
-  if (!Array.isArray(raw)) throw badRequest('scopes 必须是权限名数组');
+  if (!Array.isArray(raw)) throw badRequest('tokens.scopes.mustBeArray');
 
   const scopes: Permission[] = [];
   for (const item of raw) {
     if (typeof item !== 'string' || !PERMISSIONS.includes(item as Permission)) {
-      throw badRequest(
-        `未知权限 ${String(item)}；可选值：${PERMISSIONS.join(', ')}`,
-      );
+      throw badRequest('tokens.scopes.unknown', {
+        scope: String(item),
+        available: PERMISSIONS.join(', '),
+      });
     }
     const permission = item as Permission;
 
     if (UNGRANTABLE.includes(permission)) {
-      throw badRequest(`权限 ${permission} 不能授予 API 令牌`);
+      throw badRequest('tokens.scopes.ungrantable', { permission });
     }
     // 只收窄、不提权：否则一个只有只读权限的人可以通过创建令牌绕过自己的限制
     if (!can(principal, permission)) {
-      throw forbidden(`你不能授予自己没有的权限 ${permission}`);
+      throw forbidden('tokens.scopes.cannotGrantSelf', { permission });
     }
     if (!scopes.includes(permission)) scopes.push(permission);
   }
 
-  if (scopes.length === 0) throw badRequest('scopes 不能为空，否则令牌无法调用任何接口');
+  if (scopes.length === 0) throw badRequest('tokens.scopes.empty');
   return scopes;
 }
 
 function parseExpiresAt(raw: unknown): string | null {
   if (raw === undefined || raw === null || raw === '') return null;
-  if (typeof raw !== 'string') throw badRequest('expiresAt 必须是 ISO 时间字符串或 null');
+  if (typeof raw !== 'string') throw badRequest('tokens.expiresAt.mustBeString');
   const parsed = Date.parse(raw);
-  if (Number.isNaN(parsed)) throw badRequest(`expiresAt 不是合法时间：${raw}`);
-  if (parsed <= Date.now()) throw badRequest('expiresAt 必须晚于当前时间');
+  if (Number.isNaN(parsed)) {
+    throw badRequest('tokens.expiresAt.invalid', { value: raw });
+  }
+  if (parsed <= Date.now()) throw badRequest('tokens.expiresAt.mustBeFuture');
   return new Date(parsed).toISOString();
 }
 
@@ -74,7 +77,7 @@ export function registerApiTokenRoutes(
       // 令牌不能再创建令牌：否则一个即将被吊销的令牌可以先给自己留一个后门。
       // 创建必须由真人会话完成。
       if (principal.via === 'api-token') {
-        throw forbidden('API 令牌不能创建新令牌，请用登录会话操作');
+        throw forbidden('tokens.sessionRequired.create');
       }
 
       const body = (request.body ?? {}) as {
@@ -84,8 +87,8 @@ export function registerApiTokenRoutes(
       };
 
       const name = typeof body.name === 'string' ? body.name.trim() : '';
-      if (name === '') throw badRequest('name 不能为空，它用于在列表里区分多个令牌');
-      if (name.length > 64) throw badRequest('name 不能超过 64 个字符');
+      if (name === '') throw badRequest('tokens.name.required');
+      if (name.length > 64) throw badRequest('tokens.name.tooLong', { max: 64 });
 
       const scopes = parseScopes(body.scopes, principal);
       const expiresAt = parseExpiresAt(body.expiresAt);
@@ -111,12 +114,12 @@ export function registerApiTokenRoutes(
     async (request) => {
       const principal = getPrincipal(request);
       if (principal.via === 'api-token') {
-        throw forbidden('API 令牌不能吊销令牌，请用登录会话操作');
+        throw forbidden('tokens.sessionRequired.revoke');
       }
 
       const { id } = request.params as { id: string };
       const record = repos.apiTokens.get(id);
-      if (!record) throw notFound(`未知令牌：${id}`);
+      if (!record) throw notFound('tokens.notFound', { id });
       if (record.revokedAt !== null) {
         // 幂等：重复吊销返回当前状态而不是报错
         return { tokenView: toApiTokenView(record) };

@@ -1,4 +1,5 @@
 import type { AppConfig } from './config';
+import { installCatalogs } from './i18n/install';
 import type { Logger } from './logger';
 import { StorePaths } from './store/paths';
 import { createIdentityRepo, type IdentityRepo } from './store/identityRepo';
@@ -18,6 +19,9 @@ export interface AppContext {
 }
 
 export function createContext(config: AppConfig, logger: Logger): AppContext {
+  // 装载服务端文案字典（幂等）。放在这里而不是模块顶层：错误处理器、
+  // 启动流程与测试都要保证"能翻译之前字典已在"，而 AppContext 是它们的共同入口。
+  installCatalogs();
   const paths = new StorePaths(config.dataDir);
   const identity = createIdentityRepo(paths, logger);
   const setup = createSetupRepo(paths, logger);

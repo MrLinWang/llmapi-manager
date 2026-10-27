@@ -1,4 +1,4 @@
-import i18next from '../i18n';
+import i18next, { currentLanguage } from '../i18n';
 import type { UiLanguage } from '../i18n/language';
 import type {
   AgentPreview,
@@ -25,11 +25,19 @@ export class ApiError extends Error {
     readonly code: string,
     message: string,
     /**
-     * 服务端附带的机读信息。与 message 分开：message 是给人读的中文句子，
+     * 服务端附带的机读信息。与 message 分开：message 是给人读的句子（会随语言变），
      * details 是给代码判断用的，不要靠匹配 message 里的字面量来分支。
      * 目前唯一的使用方是 501 时的 `{ canEnableConversion: true }`。
      */
     readonly details?: unknown,
+    /**
+     * 稳定的错误标识（如 `providers.validation.nameType`）。
+     *
+     * 比 `code` 细、比 `message` 稳：`code` 只区分 HTTP 语义（bad_request），
+     * 而同一类错误下有很多具体原因。需要精确区分时用它。
+     * 注意 `message` 已经由服务端按当前语言渲染好了，显示直接用 `message` 即可。
+     */
+    readonly messageKey?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -50,6 +58,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body !== undefined && headers['content-type'] === undefined) {
     headers['content-type'] = 'application/json';
   }
+  // 带上界面语言：服务端据此渲染 error.message。
+  //
+  // 已登录时服务端会优先用租户设置，这个头只在两处真正起作用：未登录（登录页、
+  // 首次初始化）和租户还没选过语言。但不带它的后果很具体——英文界面上登录失败
+  // 会弹出一句中文，用户会以为是两个不同的系统。
+  if (headers['accept-language'] === undefined) {
+    headers['accept-language'] = currentLanguage();
+  }
 
   const response = await fetch(path, {
     credentials: 'same-origin',
@@ -69,15 +85,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const body = payload as {
-      error?: { code?: string; message?: string; details?: unknown };
+      error?: { code?: string; message?: string; messageKey?: string; details?: unknown };
     } | null;
     const code = body?.error?.code ?? 'unknown';
-    // 兜底文案走 i18n：服务端 message 仍是中文（界面 i18n 不覆盖服务端消息），
-    // 但"连服务端都没返回 message"这种情况是前端自己造的句子，必须跟随界面语言。
+    // 服务端 message 已经按请求语言渲染（见上面 accept-language 与
+    // server/src/i18n/language.ts 的优先级），可以直接显示。
+    // 这里只兜"连 message 都没有"的情况——那是前端自己造的句子，走字典。
     const message =
       body?.error?.message ?? i18next.t('common.requestFailed', { status: response.status });
     if (response.status === 401) onUnauthorized?.();
-    throw new ApiError(response.status, code, message, body?.error?.details);
+    throw new ApiError(
+      response.status,
+      code,
+      message,
+      body?.error?.details,
+      body?.error?.messageKey,
+    );
   }
 
   return payload as T;

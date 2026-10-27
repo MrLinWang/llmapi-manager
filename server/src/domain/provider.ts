@@ -11,6 +11,9 @@
  * 那会把 Responses 请求发给只支持 Chat 的上游，客户端只会收到上游的参数错误，
  * 完全看不出是选错了供应商——这条被真实问题踩过。
  */
+import { translate } from '../i18n';
+import type { UiLanguage } from './settings';
+
 export type ApiType = 'openai' | 'anthropic' | 'responses';
 
 /**
@@ -24,10 +27,10 @@ export const API_TYPES: readonly ApiType[] = ['openai', 'anthropic', 'responses'
  * API 形态，只说"OpenAI 兼容"会让用户以为这家一定能走 /v1/chat/completions。
  * 与前端 web/src/lib/labels.ts 的 API_TYPE_META 口径一致，避免同一协议两处叫法不同。
  */
-export function apiTypeLabel(apiType: ApiType): string {
-  if (apiType === 'openai') return 'OpenAI 兼容（Chat Completions）';
-  if (apiType === 'anthropic') return 'Anthropic 兼容（Messages）';
-  return 'OpenAI 兼容（Responses）';
+export function apiTypeLabel(apiType: ApiType, language: UiLanguage = 'zh'): string {
+  if (apiType === 'openai') return translate(language, 'gateway.apiType.openai');
+  if (apiType === 'anthropic') return translate(language, 'gateway.apiType.anthropic');
+  return translate(language, 'gateway.apiType.responses');
 }
 
 /**

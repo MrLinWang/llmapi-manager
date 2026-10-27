@@ -6,6 +6,8 @@ import type { AppContext } from './context';
 import { RouteRegistry } from './http/routeRegistry';
 import { registerApiGuard, defineRoute } from './http/guard';
 import { AppError } from './http/errors';
+import { resolveRequestLanguage, resolveAnonymousLanguage } from './i18n/language';
+import { translate } from './i18n';
 import { getWarnings } from './resilience';
 import { ProviderService } from './services/providers';
 import { registerAuthRoutes } from './routes/auth';
@@ -58,6 +60,11 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   );
 
   app.setErrorHandler((error, request, reply) => {
+    // 语言按"租户设置 → Accept-Language → 中文"解析（见 i18n/language.ts）。
+    // 日志仍固定中文：日志是给部署者排查看的，不该随请求语言变化，
+    // 否则同一故障在不同客户端下会长得不一样、难以 grep。
+    const language = resolveRequestLanguage(request, ctx);
+
     if (error instanceof AppError) {
       if (error.statusCode >= 500) {
         ctx.logger.error(`接口错误 ${request.method} ${request.url}`, {
@@ -65,31 +72,45 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
           message: error.message,
         });
       }
-      reply.code(error.statusCode).send(error.toBody());
+      reply.code(error.statusCode).send(error.toBody(language));
       return;
     }
+    // Fastify 自己的校验错误（schema 不匹配、JSON 解析失败）：
+    // 文案由框架产生、无法本地化，原样透传比硬翻译更诚实。
     if ((error as { validation?: unknown }).validation) {
       reply.code(400).send({
-        error: { code: 'bad_request', message: error.message },
+        error: { code: 'bad_request', message: error.message, messageKey: 'errors.framework' },
       });
       return;
     }
     if ((error as { statusCode?: number }).statusCode === 400) {
       reply.code(400).send({
-        error: { code: 'bad_request', message: error.message },
+        error: { code: 'bad_request', message: error.message, messageKey: 'errors.framework' },
       });
       return;
     }
     ctx.logger.error(`未处理异常 ${request.method} ${request.url}`, error);
+    const key = 'errors.internal';
     reply.code(500).send({
-      error: { code: 'internal_error', message: '服务端内部错误' },
+      error: {
+        code: 'internal_error',
+        message: translate(language, key),
+        messageKey: key,
+      },
     });
   });
 
   app.setNotFoundHandler((request, reply) => {
     if (request.url.startsWith('/api/') || request.url.startsWith('/v1/')) {
+      const key = 'errors.apiRouteMissing';
+      const params = { method: request.method, url: request.url };
       reply.code(404).send({
-        error: { code: 'not_found', message: `接口不存在：${request.method} ${request.url}` },
+        error: {
+          code: 'not_found',
+          message: translate(resolveAnonymousLanguage(request), key, params),
+          messageKey: key,
+          details: params,
+        },
       });
       return;
     }

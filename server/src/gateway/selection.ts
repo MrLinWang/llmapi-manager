@@ -2,6 +2,7 @@ import { resolveModel } from '../domain/aliases';
 import { requiredApiType, type GatewayPath } from './forward';
 import { APPROVAL_REVIEW_MODEL_NAME, type TenantSettings } from '../domain/settings';
 import type { ProviderRecord } from '../domain/provider';
+import { translate, type MessageKey, type MessageParams } from '../i18n';
 
 /**
  * 候选供应商选择。
@@ -44,7 +45,13 @@ export type Selection =
     }
   | {
       mode: 'invalid';
+      /**
+       * 中文渲染结果。诊断与请求日志读它（日志固定中文），
+       * 而回给客户端的 400 用下面的 `reasonKey` + `reasonParams` 按请求语言渲染。
+       */
       reason: string;
+      reasonKey: MessageKey;
+      reasonParams?: MessageParams;
       excluded?: ExcludedProvider[];
       /**
        * 仅审批映射失败时出现：目标供应商是 openai，而本次路径要 responses。
@@ -86,11 +93,24 @@ export function selectCandidates(
   approvalReview: boolean,
 ): Selection {
   const resolution = resolveModel(requested, providers);
-  if (resolution.kind === 'invalid') return { mode: 'invalid', reason: resolution.reason };
+  if (resolution.kind === 'invalid') {
+    return {
+      mode: 'invalid',
+      reason: resolution.reason,
+      reasonKey: resolution.reasonKey,
+      reasonParams: resolution.reasonParams,
+    };
+  }
 
   if (resolution.kind === 'alias') {
     const provider = providers.find((item) => item.id === resolution.alias.providerId);
-    if (!provider) return { mode: 'invalid', reason: '别名指向的供应商已不存在' };
+    if (!provider) {
+      return {
+        mode: 'invalid',
+        reason: translate('zh', 'gateway.selection.providerGone'),
+        reasonKey: 'gateway.selection.providerGone',
+      };
+    }
     return {
       mode: 'alias',
       primary: {
@@ -148,18 +168,32 @@ export function selectCandidates(
         const first = owners[0];
         return {
           mode: 'invalid',
-          reason:
-            `审批模型 ${approvalModel} 属于 ${first.apiType} 供应商 ${first.name}，` +
-            `但本次请求走 ${path}（需要 ${requiredForApproval}），当前未开启跨协议转发`,
+          reason: translate('zh', 'gateway.selection.approvalNeedsConversionOff', {
+            model: approvalModel,
+            apiType: first.apiType,
+            name: first.name,
+            path,
+            required: requiredForApproval,
+          }),
+          reasonKey: 'gateway.selection.approvalNeedsConversionOff',
+          reasonParams: {
+            model: approvalModel,
+            apiType: first.apiType,
+            name: first.name,
+            path,
+            required: requiredForApproval,
+          },
           approvalNeedsConversion:
             first.apiType === 'openai' && requiredForApproval === 'responses',
         };
       }
       return {
         mode: 'invalid',
-        reason:
-          `已设置的审批模型 ${approvalModel} 不在任何已启用供应商的模型列表里，` +
-          '请检查供应商配置或重新选择审批模型',
+        reason: translate('zh', 'gateway.selection.approvalModelMissing', {
+          model: approvalModel,
+        }),
+        reasonKey: 'gateway.selection.approvalModelMissing',
+        reasonParams: { model: approvalModel },
       };
     }
     // 走到这里 owner 一定存在（两个分支都已 return）
@@ -213,18 +247,28 @@ export function selectCandidates(
       providerId: item.id,
       providerName: item.name,
       reason: !item.enabled
-        ? '已停用'
+        ? translate('zh', 'gateway.selection.providerDisabled')
         : convertible
-          ? `协议不匹配：需要 ${required}，它是 ${item.apiType}`
-          : `协议不匹配：需要 ${required}，它是 ${item.apiType}（转换只支持 responses→chat，当前开关未开或方向不适用）`,
+          ? translate('zh', 'gateway.selection.protocolMismatch', {
+              required,
+              apiType: item.apiType,
+            })
+          : translate('zh', 'gateway.selection.protocolMismatchNoConversion', {
+              required,
+              apiType: item.apiType,
+            }),
     }));
 
   if (usable.length === 0) {
     return {
       mode: 'invalid',
       reason: required
-        ? `没有启用的 ${required} 供应商，请先在控制台添加并启用`
-        : '没有启用的供应商，请先在控制台添加并启用',
+        ? translate('zh', 'gateway.selection.noEnabledProviderOfType', { required })
+        : translate('zh', 'gateway.selection.noEnabledProvider'),
+      reasonKey: required
+        ? 'gateway.selection.noEnabledProviderOfType'
+        : 'gateway.selection.noEnabledProvider',
+      reasonParams: required ? { required } : undefined,
       excluded,
     };
   }

@@ -1,5 +1,6 @@
 import type { ProviderRecord } from './provider';
 import type { AgentConnectionMode } from './settings';
+import type { MessageKey } from '../i18n';
 
 export const AGENT_IDS = ['codex', 'claude-code'] as const;
 export type AgentId = (typeof AGENT_IDS)[number];
@@ -30,7 +31,14 @@ export interface AgentFileSpec {
 export interface AgentDefinition {
   id: AgentId;
   name: string;
-  description: string;
+  /**
+   * Agent 描述的**文案键**，不是成品字符串。
+   *
+   * registry 是模块级静态数据，构造时拿不到请求语言；描述又要按用户语言显示，
+   * 所以这里只存键，由边界（路由层）按请求语言渲染成 `description` 字段返回。
+   * 领域层只引用类型，不产生运行时依赖。
+   */
+  descriptionKey: MessageKey;
   /** 由 AgentPathResolver 使用的根目录名，如 .codex */
   homeDirName: string;
   files: AgentFileSpec[];

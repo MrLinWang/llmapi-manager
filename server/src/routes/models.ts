@@ -18,6 +18,8 @@ import {
 } from '../domain/settings';
 import { getAgentDefinition } from '../agents/registry';
 import { notFound } from '../http/errors';
+import { translate } from '../i18n';
+import { resolveRequestLanguage } from '../i18n/language';
 
 /**
  * 解析「可空整数 + 范围」类型的设置项。
@@ -35,18 +37,22 @@ function parseBoundedInteger(
   raw: unknown,
   field: string,
   range: { min: number; max: number },
-  suffix: string,
+  /** 越界文案里是否附加"Codex 会静默截断"的说明（两项的语义不同） */
+  truncationNote = false,
 ): number | null {
   if (raw === null) return null;
   if (typeof raw !== 'number' || !Number.isFinite(raw)) {
-    throw badRequest(`${field} 必须是数字或 null`);
+    throw badRequest('settings.validation.numberOrNull', { field });
   }
   if (!Number.isInteger(raw)) {
-    throw badRequest(`${field} 必须是整数`);
+    throw badRequest('settings.validation.integer', { field });
   }
   if (raw < range.min || raw > range.max) {
     throw badRequest(
-      `${field} 必须是 ${range.min}–${range.max} 的整数${suffix}`,
+      truncationNote
+        ? 'settings.validation.integerRangeCodexTruncate'
+        : 'settings.validation.integerRange',
+      { field, min: range.min, max: range.max },
     );
   }
   return raw;
@@ -122,13 +128,13 @@ export function registerModelRoutes(
     async (request) => {
       const body = (request.body ?? {}) as { language?: unknown };
       if (!('language' in body)) {
-        throw badRequest('language 字段必须提供（可为 null 表示跟随浏览器）');
+        throw badRequest('settings.language.fieldRequired');
       }
       // 显式写 null 是"回到跟随浏览器"，与"字段缺失"是两回事：前者是用户的选择，
       // 后者多半是调用方写错了字段名，静默接受会让界面语言看起来没生效。
       const language = body.language === null ? null : body.language;
       if (language !== null && !isUiLanguage(language)) {
-        throw badRequest(`language 必须是 ${UI_LANGUAGES.join(' 或 ')}，或 null`);
+        throw badRequest('settings.language.invalid', { supported: UI_LANGUAGES.join(' / ') });
       }
 
       const settings = repos.settings.read();
@@ -164,7 +170,9 @@ export function registerModelRoutes(
         token,
         masked: `${meta.prefix}${'*'.repeat(12)}${meta.tail}`,
         createdAt: meta.createdAt,
-        note: '这是唯一一次显示完整令牌，请立即复制并更新已下发的 Agent 配置。',
+        // 提示语面向调用方，在边界按请求语言渲染；令牌明文只放在 `token` 字段里，
+        // 绝不拼进这段话
+        note: translate(resolveRequestLanguage(request, ctx), 'tokens.gateway.resetNotice'),
       };
     },
   );
@@ -191,7 +199,10 @@ export function registerModelRoutes(
 
       const record = providers.get(providerId);
       if (model && record.models.length > 0 && !record.models.includes(model)) {
-        throw badRequest(`模型 ${model} 不在供应商 ${record.name} 的模型列表中`);
+        throw badRequest('settings.default.modelNotInProvider', {
+          model,
+          name: record.name,
+        });
       }
       const next: TenantSettings = {
         ...settings,
@@ -230,19 +241,19 @@ export function registerModelRoutes(
       const next: TenantSettings = { ...settings };
       if (body.disableCodexWebSearch !== undefined) {
         if (typeof body.disableCodexWebSearch !== 'boolean') {
-          throw badRequest('disableCodexWebSearch 必须是布尔值');
+          throw badRequest('settings.validation.boolean', { field: 'disableCodexWebSearch' });
         }
         next.disableCodexWebSearch = body.disableCodexWebSearch;
       }
       if (body.protocolConversion !== undefined) {
         if (typeof body.protocolConversion !== 'boolean') {
-          throw badRequest('protocolConversion 必须是布尔值');
+          throw badRequest('settings.validation.boolean', { field: 'protocolConversion' });
         }
         next.protocolConversion = body.protocolConversion;
       }
       if (body.approvalReviewModel !== undefined) {
         if (body.approvalReviewModel !== null && typeof body.approvalReviewModel !== 'string') {
-          throw badRequest('approvalReviewModel 必须是字符串或 null');
+          throw badRequest('settings.validation.stringOrNull', { field: 'approvalReviewModel' });
         }
         const model = body.approvalReviewModel as string | null;
         next.approvalReviewModel = model === '' ? null : model;
@@ -255,7 +266,7 @@ export function registerModelRoutes(
           body.codexStreamMaxRetries,
           'codexStreamMaxRetries',
           CODEX_STREAM_MAX_RETRIES_RANGE,
-          '（Codex 对超过上限的值会静默截断，所以在这里直接拒绝）',
+          true,
         );
       }
       if (body.codexStreamIdleTimeoutMs !== undefined) {
@@ -263,7 +274,6 @@ export function registerModelRoutes(
           body.codexStreamIdleTimeoutMs,
           'codexStreamIdleTimeoutMs',
           CODEX_STREAM_IDLE_TIMEOUT_RANGE,
-          '',
         );
       }
       next.updatedAt = new Date().toISOString();
@@ -290,7 +300,7 @@ export function registerModelRoutes(
     async (request) => {
       const { id } = request.params as { id: string };
       const definition = getAgentDefinition(id);
-      if (!definition) throw notFound(`未知 Agent: ${id}`);
+      if (!definition) throw notFound('settings.agentTarget.unknown', { id });
       const agentId = definition.id;
 
       const body = (request.body ?? {}) as {
@@ -312,14 +322,16 @@ export function registerModelRoutes(
           typeof body.mode !== 'string' ||
           !AGENT_CONNECTION_MODES.includes(body.mode as AgentConnectionMode)
         ) {
-          throw badRequest(`mode 只能是 ${AGENT_CONNECTION_MODES.join(' 或 ')}`);
+          throw badRequest('settings.agentTarget.modeInvalid', {
+            modes: AGENT_CONNECTION_MODES.join(' / '),
+          });
         }
         nextPreference.mode = body.mode as AgentConnectionMode;
       }
 
       if (body.directProviderId !== undefined) {
         if (body.directProviderId !== null && typeof body.directProviderId !== 'string') {
-          throw badRequest('directProviderId 必须是字符串或 null');
+          throw badRequest('settings.validation.stringOrNull', { field: 'directProviderId' });
         }
         const providerId = body.directProviderId as string | null;
         if (providerId === '') {
@@ -333,12 +345,16 @@ export function registerModelRoutes(
           // 走 Anthropic env 段。协议不对的话，配置写出来完全正常却永远打不通。
           const needed = agentId === 'claude-code' ? 'anthropic' : 'responses';
           if (!provider.enabled) {
-            throw badRequest(`供应商「${provider.name}」已被停用，不能用于直连`);
+            throw badRequest('settings.agentTarget.providerDisabled', {
+              name: provider.name,
+            });
           }
           if (provider.apiType !== needed) {
-            throw badRequest(
-              `供应商「${provider.name}」的协议类型不适用于 ${definition.name}，需要 ${needed}`,
-            );
+            throw badRequest('settings.agentTarget.apiTypeMismatch', {
+              name: provider.name,
+              agent: definition.name,
+              needed,
+            });
           }
           nextPreference.directProviderId = providerId;
           // 换了供应商，之前指定的模型多半不再存在，一并清掉由后端回落
@@ -348,7 +364,7 @@ export function registerModelRoutes(
 
       if (body.directModel !== undefined) {
         if (body.directModel !== null && typeof body.directModel !== 'string') {
-          throw badRequest('directModel 必须是字符串或 null');
+          throw badRequest('settings.validation.stringOrNull', { field: 'directModel' });
         }
         const model = body.directModel as string | null;
         nextPreference.directModel = model === '' ? null : model;

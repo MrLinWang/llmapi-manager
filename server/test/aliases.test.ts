@@ -129,7 +129,11 @@ describe('别名解析', () => {
   it('已禁用供应商不回落', () => {
     const result = resolveModel('lam-beta/gpt-x', providers);
     expect(result.kind).toBe('invalid');
-    if (result.kind === 'invalid') expect(result.reason).toContain('禁用');
+    // reason 仍是可读中文（诊断与网关响应都在读它），同时带上可机读的键
+    if (result.kind === 'invalid') {
+      expect(result.reasonKey).toBe('gateway.alias.providerDisabled');
+      expect(result.reason).toContain('禁用');
+    }
   });
 
   it('未声明的模型不回落', () => {

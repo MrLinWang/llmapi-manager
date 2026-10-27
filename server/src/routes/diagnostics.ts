@@ -4,6 +4,8 @@ import type { TenantRepos } from '../store/tenantScope';
 import { defineRoute } from '../http/guard';
 import type { RouteRegistry } from '../http/routeRegistry';
 import { badRequest, notFound } from '../http/errors';
+import { translate } from '../i18n';
+import { resolveRequestLanguage } from '../i18n/language';
 import { ProviderService } from '../services/providers';
 import { listAliases } from '../domain/aliases';
 import {
@@ -69,15 +71,15 @@ function readCatalogSlugs(filePath: string): string[] | null {
  */
 function assertEnabled(ctx: AppContext): void {
   if (!ctx.config.enableDiagnostics) {
-    throw notFound('诊断接口未启用，请设置 ENABLE_DIAGNOSTICS=1 后重启');
+    throw notFound('diagnostics.disabled');
   }
 }
 
 function parsePath(raw: unknown): GatewayPath {
-  if (typeof raw !== 'string') throw badRequest('path 必须是字符串');
+  if (typeof raw !== 'string') throw badRequest('diagnostics.pathNotString');
   const normalized = raw.startsWith('/v1') ? raw.slice(3) : raw;
   if (!(GATEWAY_PATHS as readonly string[]).includes(normalized)) {
-    throw badRequest(`path 必须是 ${GATEWAY_PATHS.join(' / ')} 之一`);
+    throw badRequest('diagnostics.pathNotSupported', { paths: GATEWAY_PATHS.join(' / ') });
   }
   return normalized as GatewayPath;
 }
@@ -100,10 +102,12 @@ export function registerDiagnosticsRoutes(
     { method: 'POST', url: '/api/diagnostics/route', access: 'settings:write' },
     async (request) => {
       assertEnabled(ctx);
+      // 诊断输出是给人读的解释，必须跟随请求语言（租户设置 → Accept-Language）
+      const language = resolveRequestLanguage(request, ctx);
       const body = (request.body ?? {}) as { model?: unknown; path?: unknown };
       const path = parsePath(body.path ?? '/responses');
       if (typeof body.model !== 'string' || body.model.trim() === '') {
-        throw badRequest('model 不能为空');
+        throw badRequest('diagnostics.modelEmpty');
       }
 
       const providerService = new ProviderService(repos, ctx.secrets);
@@ -169,9 +173,10 @@ export function registerDiagnosticsRoutes(
           // 被排除的供应商：这是"明明有几家供应商却说没有"的唯一解释来源
           excluded: selection.excluded ?? [],
           // 明确告诉调用方"改哪个设置可能解决"，避免只报错不给出路
-          hint: required === 'responses' && !settings.protocolConversion
-            ? '若你只有 openai（Chat）供应商，开启 protocolConversion 可让网关把 Responses 转成 Chat'
-            : null,
+          hint:
+            required === 'responses' && !settings.protocolConversion
+              ? translate(language, 'diagnostics.route.conversionHint')
+              : null,
         };
       }
 
@@ -192,7 +197,10 @@ export function registerDiagnosticsRoutes(
         wouldAutoEnableConversion: wouldAutoEnable,
         wouldBeRejected:
           !primaryMatches && !allowedByConversion
-            ? `真实网关会返回 501：路径需要 ${required}，主供应商是 ${selection.primary.provider.apiType}`
+            ? translate(language, 'diagnostics.route.wouldReject', {
+                required,
+                apiType: selection.primary.provider.apiType,
+              })
             : null,
         mode: selection.mode,
         primary: describe(selection.primary),
@@ -215,6 +223,7 @@ export function registerDiagnosticsRoutes(
     { method: 'POST', url: '/api/diagnostics/forward', access: 'settings:write' },
     async (request) => {
       assertEnabled(ctx);
+      const language = resolveRequestLanguage(request, ctx);
       const body = (request.body ?? {}) as {
         model?: unknown;
         path?: unknown;
@@ -222,13 +231,13 @@ export function registerDiagnosticsRoutes(
       };
       const path = parsePath(body.path ?? '/responses');
       if (typeof body.model !== 'string' || body.model.trim() === '') {
-        throw badRequest('model 不能为空');
+        throw badRequest('diagnostics.modelEmpty');
       }
       // 校验 body 必须是对象：数组或字符串会让下面的展开静默丢掉所有字段，
       // 接口照样 200 并继续打上游——用户以为自己传了 prompt，其实传的是空请求。
       const rawBody = body.body ?? { model: body.model };
       if (typeof rawBody !== 'object' || rawBody === null || Array.isArray(rawBody)) {
-        throw badRequest('body 必须是 JSON 对象');
+        throw badRequest('diagnostics.bodyNotObject');
       }
       const requestBody = rawBody as Record<string, unknown>;
 
@@ -249,7 +258,7 @@ export function registerDiagnosticsRoutes(
         approvalReview,
       );
       if (selection.mode === 'invalid') {
-        throw badRequest(`选路失败：${selection.reason}`);
+        throw badRequest('diagnostics.selectionFailed', { reason: selection.reason });
       }
 
       const candidate = selection.primary;
@@ -309,15 +318,15 @@ export function registerDiagnosticsRoutes(
             ok: false,
             error:
               cause instanceof ConversionError
-                ? cause.message
-                : '转换失败（内部错误）',
+                ? translate(language, cause.key, cause.params)
+                : translate(language, 'diagnostics.chain.convertFailed'),
           });
           return {
             ok: false,
             path,
             upstreamPath: upstreamUrl(provider, path),
             steps,
-            summary: '请求转换失败，真实请求会返回 400',
+            summary: translate(language, 'diagnostics.chain.convertFailedSummary'),
           };
         }
       } else {
@@ -326,8 +335,11 @@ export function registerDiagnosticsRoutes(
           ok: true,
           skipped: true,
           reason: candidate.convertResponsesToChat
-            ? '未触发'
-            : `不需要转换（路径需要 ${requiredApiType(path)}，供应商是 ${provider.apiType}）`,
+            ? translate(language, 'diagnostics.chain.convertNotTriggered')
+            : translate(language, 'diagnostics.chain.convertSkipped', {
+                required: requiredApiType(path),
+                apiType: provider.apiType,
+              }),
           body: upstreamBody,
         });
       }
@@ -369,19 +381,25 @@ export function registerDiagnosticsRoutes(
           step: 'upstream',
           ok: false,
           url,
-          error: cause instanceof Error ? cause.message : '上游请求失败',
+          error:
+            cause instanceof Error ? cause.message : translate(language, 'diagnostics.chain.upstreamFailed'),
           latencyMs: Date.now() - startedAt,
         });
         return {
           ok: false,
           path,
           steps,
-          summary: '上游不可达，真实请求会返回 502',
+          summary: translate(language, 'diagnostics.chain.upstreamFailedSummary'),
         };
       }
 
       if (!upstreamText) {
-        return { ok: false, path, steps, summary: '上游返回空响应' };
+        return {
+          ok: false,
+          path,
+          steps,
+          summary: translate(language, 'diagnostics.chain.upstreamEmptySummary'),
+        };
       }
 
       // ── 第 4 层：响应转换
@@ -396,9 +414,7 @@ export function registerDiagnosticsRoutes(
           step: 'convert-response',
           ok: true,
           skipped: true,
-          reason:
-            '请求是流式（stream:true），上游返回 SSE。本接口不解析流式，' +
-            '否则会把"功能正常"误报成 JSON 解析失败。要验证转换映射请传 stream:false 的 body。',
+          reason: translate(language, 'diagnostics.chain.streamSkipped'),
           // 仍给出 SSE 原文，肉眼可确认事件序列是否合理
           ssePreview: upstreamText.slice(0, 2000),
         });
@@ -422,9 +438,12 @@ export function registerDiagnosticsRoutes(
           steps.push({
             step: 'convert-response',
             ok: false,
-            error: cause instanceof Error ? cause.message : '响应转换失败',
+            error:
+              cause instanceof Error
+                ? cause.message
+                : translate(language, 'diagnostics.chain.responseConvertFailed'),
             // 最常见原因：上游没按 Chat 格式返回（例如它其实是 Responses 协议）
-            hint: '上游可能并不兼容 Chat Completions，检查供应商的 apiType 是否选错',
+            hint: translate(language, 'diagnostics.chain.responseConvertHint'),
           });
         }
       } else {
@@ -438,8 +457,8 @@ export function registerDiagnosticsRoutes(
         protocolConversion: settings.protocolConversion,
         steps,
         summary: allOk
-          ? '全链路正常：真实请求会按上述路径转发'
-          : '链路中有步骤失败，见 steps 里的 error',
+          ? translate(language, 'diagnostics.chain.allOkSummary')
+          : translate(language, 'diagnostics.chain.partialFailSummary'),
       };
     },
   );
@@ -454,8 +473,9 @@ export function registerDiagnosticsRoutes(
     app,
     registry,
     { method: 'GET', url: '/api/diagnostics/check', access: 'settings:write' },
-    async () => {
+    async (request) => {
       assertEnabled(ctx);
+      const language = resolveRequestLanguage(request, ctx);
       const providerService = new ProviderService(repos, ctx.secrets);
       const records = providerService.listRecords();
       const settings = repos.settings.read();
@@ -473,12 +493,19 @@ export function registerDiagnosticsRoutes(
       const codexUsable = enabledResponses.length > 0 ||
         (settings.protocolConversion && enabledOpenai.length > 0);
       checks.push({
-        name: 'Codex 有可用的上游协议',
+        name: translate(language, 'diagnostics.check.codexProtocolName'),
         ok: codexUsable,
         detail: codexUsable
-          ? `responses ${enabledResponses.length} 家${settings.protocolConversion ? `，openai ${enabledOpenai.length} 家（走转换）` : ''}`
-          : '既没有启用的 responses 供应商，也没开跨协议转发',
-        fix: codexUsable ? undefined : '添加 responses 供应商，或开启 protocolConversion',
+          ? settings.protocolConversion
+            ? translate(language, 'diagnostics.check.codexProtocolOkWithConversion', {
+                responses: enabledResponses.length,
+                openai: enabledOpenai.length,
+              })
+            : translate(language, 'diagnostics.check.codexProtocolOk', {
+                responses: enabledResponses.length,
+              })
+          : translate(language, 'diagnostics.check.codexProtocolFail'),
+        fix: codexUsable ? undefined : translate(language, 'diagnostics.check.codexProtocolFix'),
       });
 
       // 2. 磁盘上真实的 Codex 目录里，不能有当前用不了的协议
@@ -509,17 +536,20 @@ export function registerDiagnosticsRoutes(
             );
           });
       checks.push({
-        name: 'Codex 目录里没有用不了的协议',
+        name: translate(language, 'diagnostics.check.catalogName'),
         ok: unusable.length === 0,
         detail:
           onDisk === null
-            ? '还没 apply 过，目录文件不存在（Codex 会回退到内置官方模型列表）'
+            ? translate(language, 'diagnostics.check.catalogMissing')
             : unusable.length === 0
-              ? `目录 ${onDisk.length} 个条目，协议均可用`
-              : `目录里有 ${unusable.length} 个当前用不了的条目：${unusable.slice(0, 3).join('、')}`,
+              ? translate(language, 'diagnostics.check.catalogAllUsable', { count: onDisk.length })
+              : translate(language, 'diagnostics.check.catalogUnusable', {
+                  count: unusable.length,
+                  names: unusable.slice(0, 3).join(' / '),
+                }),
         fix:
           unusable.length > 0
-            ? '重新 apply 一次 Codex 配置；若目录里有 openai 别名又想用，需开启 protocolConversion'
+            ? translate(language, 'diagnostics.check.catalogFix')
             : undefined,
       });
 
@@ -528,18 +558,20 @@ export function registerDiagnosticsRoutes(
       const approvalConfigured = settings.approvalReviewModel !== null;
       if (approvalConfigured && codexTarget?.mode === 'direct') {
         checks.push({
-          name: '审批模型映射在直连模式下不会生效',
+          name: translate(language, 'diagnostics.check.approvalDirectName'),
           ok: false,
-          detail: 'Codex 处于直连模式，请求不经过网关，approvalReviewModel 无从生效',
-          fix: '切回网关模式，或清空 approvalReviewModel',
+          detail: translate(language, 'diagnostics.check.approvalDirectDetail'),
+          fix: translate(language, 'diagnostics.check.approvalDirectFix'),
         });
       } else {
         checks.push({
-          name: '审批模型映射的生效条件',
+          name: translate(language, 'diagnostics.check.approvalOkName'),
           ok: true,
           detail: approvalConfigured
-            ? `已配置 ${settings.approvalReviewModel}，网关模式下生效`
-            : '未配置（Codex 会用硬编码的占位名）',
+            ? translate(language, 'diagnostics.check.approvalConfigured', {
+                model: settings.approvalReviewModel,
+              })
+            : translate(language, 'diagnostics.check.approvalNotConfigured'),
         });
       }
 
@@ -548,11 +580,12 @@ export function registerDiagnosticsRoutes(
         (alias) => !records.some((i) => i.id === alias.providerId),
       );
       checks.push({
-        name: '别名都指向现存供应商',
+        name: translate(language, 'diagnostics.check.aliasName'),
         ok: staleAliases.length === 0,
-        detail: staleAliases.length === 0
-          ? `${aliases.length} 个别名均有效`
-          : `${staleAliases.length} 个别名指向已删除的供应商`,
+        detail:
+          staleAliases.length === 0
+            ? translate(language, 'diagnostics.check.aliasOk', { count: aliases.length })
+            : translate(language, 'diagnostics.check.aliasStale', { count: staleAliases.length }),
       });
 
       return {
@@ -587,8 +620,9 @@ export function registerDiagnosticsRoutes(
     app,
     registry,
     { method: 'GET', url: '/api/diagnostics/converter', access: 'settings:write' },
-    async () => {
+    async (request) => {
       assertEnabled(ctx);
+      const language = resolveRequestLanguage(request, ctx);
       const cases: Array<{ name: string; ok: boolean; detail: string }> = [];
 
       // 文本
@@ -599,12 +633,12 @@ export function registerDiagnosticsRoutes(
         );
         const messages = (result.body as { messages?: unknown[] }).messages ?? [];
         cases.push({
-          name: '文本：input 字符串 → messages',
+          name: translate(language, 'diagnostics.converter.textName'),
           ok: messages.length === 1,
           detail: JSON.stringify(messages),
         });
       } catch (cause) {
-        cases.push({ name: '文本', ok: false, detail: String(cause) });
+        cases.push({ name: translate(language, 'diagnostics.converter.textFailName'), ok: false, detail: String(cause) });
       }
 
       // 工具调用
@@ -619,12 +653,12 @@ export function registerDiagnosticsRoutes(
         );
         const tools = (result.body as { tools?: unknown[] }).tools ?? [];
         cases.push({
-          name: '工具定义：扁平 → 嵌套',
+          name: translate(language, 'diagnostics.converter.toolsName'),
           ok: tools.length === 1,
           detail: JSON.stringify(tools),
         });
       } catch (cause) {
-        cases.push({ name: '工具定义', ok: false, detail: String(cause) });
+        cases.push({ name: translate(language, 'diagnostics.converter.toolsFailName'), ok: false, detail: String(cause) });
       }
 
       // custom 工具
@@ -641,12 +675,12 @@ export function registerDiagnosticsRoutes(
           .tools ?? [];
         const params = JSON.stringify(tools[0]?.function?.parameters ?? {});
         cases.push({
-          name: 'custom 工具 → 单参 function',
+          name: translate(language, 'diagnostics.converter.customName'),
           ok: params.includes('input'),
           detail: params,
         });
       } catch (cause) {
-        cases.push({ name: 'custom 工具', ok: false, detail: String(cause) });
+        cases.push({ name: translate(language, 'diagnostics.converter.customFailName'), ok: false, detail: String(cause) });
       }
 
       // 无法转换的特性必须明确报错，而不是静默生成错误请求
@@ -656,13 +690,13 @@ export function registerDiagnosticsRoutes(
           'm',
         );
         cases.push({
-          name: '有状态特性应拒绝（previous_response_id）',
+          name: translate(language, 'diagnostics.converter.statefulName'),
           ok: false,
-          detail: '没有报错——转换有损却静默继续，会让 Codex 拿到错误上下文',
+          detail: translate(language, 'diagnostics.converter.statefulNotRejected'),
         });
       } catch (cause) {
         cases.push({
-          name: '有状态特性应拒绝（previous_response_id）',
+          name: translate(language, 'diagnostics.converter.statefulName'),
           ok: cause instanceof ConversionError,
           detail: cause instanceof Error ? cause.message : String(cause),
         });
@@ -682,18 +716,18 @@ export function registerDiagnosticsRoutes(
           createdAt: 0,
         });
         cases.push({
-          name: '响应：choices → output[]',
+          name: translate(language, 'diagnostics.converter.responseName'),
           ok: Array.isArray(back.output),
           detail: JSON.stringify(back.output).slice(0, 200),
         });
       } catch (cause) {
-        cases.push({ name: '响应转换', ok: false, detail: String(cause) });
+        cases.push({ name: translate(language, 'diagnostics.converter.responseFailName'), ok: false, detail: String(cause) });
       }
 
       return {
         ok: cases.every((item) => item.ok),
         cases,
-        note: '这些是纯函数层面的映射检查，不涉及网络与设置',
+        note: translate(language, 'diagnostics.converter.note'),
       };
     },
   );

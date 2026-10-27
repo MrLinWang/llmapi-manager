@@ -5,6 +5,8 @@ import { defineRoute, getPrincipal } from '../http/guard';
 import type { RouteRegistry } from '../http/routeRegistry';
 import { ProviderService } from '../services/providers';
 import { AgentService } from '../agents/service';
+import { translate } from '../i18n';
+import { resolveRequestLanguage } from '../i18n/language';
 
 export function registerAgentRoutes(
   app: FastifyInstance,
@@ -19,7 +21,24 @@ export function registerAgentRoutes(
     app,
     registry,
     { method: 'GET', url: '/api/agents', access: 'agents:read' },
-    async () => ({ agents: agentService.list() }),
+    async (request) => {
+      // 描述是静态数据里的**文案键**（registry 构造时没有请求语言），
+      // 在这里按请求语言渲染。响应字段名保持 `description`：前端一直在用它，
+      // 改名的收益只是"服务端更自洽"，代价是让所有调用方跟着改。
+      const language = resolveRequestLanguage(request, ctx);
+      return {
+        // 逐字段列出而不是展开后覆盖：保持字段顺序与改造前一致
+        // （id / name / description / applied…），接口 diff 里就只剩内容变化。
+        agents: agentService.list().map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          description: translate(language, agent.descriptionKey),
+          applied: agent.applied,
+          appliedAt: agent.appliedAt,
+          appliedBy: agent.appliedBy,
+        })),
+      };
+    },
   );
 
   defineRoute(
@@ -29,7 +48,7 @@ export function registerAgentRoutes(
     async (request) => {
       const principal = getPrincipal(request);
       const { id } = request.params as { id: string };
-      return agentService.preview(principal, id);
+      return agentService.preview(principal, id, resolveRequestLanguage(request, ctx));
     },
   );
 
@@ -40,7 +59,9 @@ export function registerAgentRoutes(
     async (request) => {
       const principal = getPrincipal(request);
       const { id } = request.params as { id: string };
-      return { binding: agentService.apply(principal, id) };
+      return {
+        binding: agentService.apply(principal, id, resolveRequestLanguage(request, ctx)),
+      };
     },
   );
 
@@ -50,7 +71,7 @@ export function registerAgentRoutes(
     { method: 'POST', url: '/api/agents/:id/revert', access: 'agents:apply' },
     async (request) => {
       const { id } = request.params as { id: string };
-      return agentService.revert(id);
+      return agentService.revert(id, resolveRequestLanguage(request, ctx));
     },
   );
 
@@ -63,7 +84,7 @@ export function registerAgentRoutes(
     async (request) => {
       const principal = getPrincipal(request);
       const { id } = request.params as { id: string };
-      return agentService.stopProcesses(principal, id);
+      return agentService.stopProcesses(principal, id, resolveRequestLanguage(request, ctx));
     },
   );
 }

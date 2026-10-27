@@ -37,15 +37,15 @@ export interface ProviderInput {
 
 export function normalizeBaseUrl(input: string): string {
   const trimmed = input.trim().replace(/\/+$/, '');
-  if (!trimmed) throw badRequest('Base URL 不能为空');
+  if (!trimmed) throw badRequest('providers.validation.baseUrlEmpty');
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
   } catch {
-    throw badRequest(`Base URL 不是合法地址：${input}`);
+    throw badRequest('providers.validation.baseUrlInvalid', { url: input });
   }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw badRequest('Base URL 只支持 http/https');
+    throw badRequest('providers.validation.baseUrlProtocol');
   }
   return trimmed;
 }
@@ -193,7 +193,7 @@ export class ProviderService {
 
   get(id: string): ProviderRecord {
     const record = this.repos.providers.get(id);
-    if (!record) throw notFound(`供应商 ${id} 不存在`);
+    if (!record) throw notFound('providers.notFound', { id });
     return record;
   }
 
@@ -229,7 +229,7 @@ export class ProviderService {
     this.validateInput(input);
     const records = this.repos.providers.list();
     const index = records.findIndex((item) => item.id === id);
-    if (index < 0) throw notFound(`供应商 ${id} 不存在`);
+    if (index < 0) throw notFound('providers.notFound', { id });
     const current = records[index];
 
     const nextApiKey =
@@ -269,7 +269,7 @@ export class ProviderService {
   remove(id: string): { newDefaultProviderId: string | null } {
     const records = this.repos.providers.list();
     const target = records.find((item) => item.id === id);
-    if (!target) throw notFound(`供应商 ${id} 不存在`);
+    if (!target) throw notFound('providers.notFound', { id });
 
     const remaining = records.filter((item) => item.id !== id);
     this.repos.providers.saveAll(remaining);
@@ -295,7 +295,10 @@ export class ProviderService {
     const record = this.get(providerId);
     const chosenModel = model?.trim() || record.models[0] || null;
     if (chosenModel && record.models.length > 0 && !record.models.includes(chosenModel)) {
-      throw badRequest(`模型 ${chosenModel} 不在供应商 ${record.name} 的模型列表中`);
+      throw badRequest('providers.defaultModel.notInProvider', {
+        model: chosenModel,
+        provider: record.name,
+      });
     }
     const settings = this.repos.settings.read();
     const next: TenantSettings = {
@@ -311,7 +314,7 @@ export class ProviderService {
   setEnabled(id: string, enabled: boolean): ProviderView {
     const records = this.repos.providers.list();
     const index = records.findIndex((item) => item.id === id);
-    if (index < 0) throw notFound(`供应商 ${id} 不存在`);
+    if (index < 0) throw notFound('providers.notFound', { id });
     records[index] = { ...records[index], enabled, updatedAt: new Date().toISOString() };
     this.repos.providers.saveAll(records);
     return this.toView(records[index]);
@@ -321,7 +324,7 @@ export class ProviderService {
     const records = this.repos.providers.list();
     const byId = new Map(records.map((item) => [item.id, item]));
     for (const id of orderedIds) {
-      if (!byId.has(id)) throw badRequest(`未知供应商 ${id}`);
+      if (!byId.has(id)) throw badRequest('providers.unknownProvider', { id });
     }
     const now = new Date().toISOString();
     orderedIds.forEach((id, index) => {
@@ -371,14 +374,14 @@ export class ProviderService {
   }
 
   private validateInput(input: ProviderInput): void {
-    if (!input.name || !input.name.trim()) throw badRequest('供应商名称不能为空');
+    if (!input.name || !input.name.trim()) throw badRequest('providers.validation.nameRequired');
     // 不信任调用方已校验过：值一旦落盘，接错协议的请求会被网关卡在 501，
     // 而现场只留下一家"看起来正常"的供应商，很难回溯是写入了非法 apiType。
     if (!API_TYPES.includes(input.apiType)) {
-      throw badRequest(`不支持的协议类型：${input.apiType}`);
+      throw badRequest('providers.validation.apiTypeUnsupported', { apiType: input.apiType });
     }
     if (input.priority !== undefined && !Number.isFinite(input.priority)) {
-      throw badRequest('优先级必须是数字');
+      throw badRequest('providers.validation.priorityType');
     }
   }
 
@@ -397,5 +400,5 @@ export function assertNameAvailable(
   const clash = records.find(
     (item) => item.id !== exceptId && item.name.trim().toLowerCase() === normalized,
   );
-  if (clash) throw conflict(`已存在同名供应商：${clash.name}`);
+  if (clash) throw conflict('providers.nameTaken', { name: clash.name });
 }

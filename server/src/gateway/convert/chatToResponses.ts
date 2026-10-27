@@ -164,7 +164,7 @@ export interface ChatToResponsesOptions {
 export function chatToResponsesResponse(options: ChatToResponsesOptions): JsonObject {
   const { chat, model } = options;
   if (!isObject(chat)) {
-    throw new ConversionError('上游响应不是 JSON 对象');
+    throw new ConversionError('gateway.convert.responseNotObject');
   }
 
   const choices = chat.choices;
@@ -172,11 +172,11 @@ export function chatToResponsesResponse(options: ChatToResponsesOptions): JsonOb
     // 上游返回了没有 choices 的响应（常见于纯错误体但 200 的情况）。
     // 必须报错而不是造一个空 output：Codex 会把空结果当成"模型什么都没说"，
     // 真正的错误信息就彻底消失了。
-    throw new ConversionError('上游响应缺少 choices');
+    throw new ConversionError('gateway.convert.responseNoChoices');
   }
   // Chat 的 n>1 在这里没有意义：Codex 一次只要一条回复，多余候选无法表达。
   const choice = choices[0];
-  if (!isObject(choice)) throw new ConversionError('上游响应的 choices[0] 不是对象');
+  if (!isObject(choice)) throw new ConversionError('gateway.convert.responseChoiceInvalid');
 
   const message = isObject(choice.message) ? choice.message : {};
   const responseId = options.responseId ?? asString(chat.id) ?? 'resp';

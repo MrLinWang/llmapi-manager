@@ -11,22 +11,23 @@ import {
 import { normalizeBaseUrl } from '../services/providers';
 import { fetchProviderModels, testProviderConnectivity } from '../services/connectivity';
 import { badRequest } from '../http/errors';
+import { resolveRequestLanguage } from '../i18n/language';
 import { API_TYPES, type ApiType } from '../domain/provider';
 
 function asProviderInput(body: unknown): ProviderInput {
   const raw = (body ?? {}) as Partial<ProviderInput>;
-  if (typeof raw.name !== 'string') throw badRequest('name 必须是字符串');
+  if (typeof raw.name !== 'string') throw badRequest('providers.validation.nameType');
   // 用 API_TYPES 而不是逐个字面量比较：加 responses 时这里曾漏改，
   // 表现为前端能选新协议、提交却被自己的路由校验挡回。
   if (!API_TYPES.includes(raw.apiType as ApiType)) {
-    throw badRequest(`apiType 只能是 ${API_TYPES.join(' / ')}`);
+    throw badRequest('providers.validation.apiTypeInvalid', { types: API_TYPES.join(' / ') });
   }
-  if (typeof raw.baseUrl !== 'string') throw badRequest('baseUrl 必须是字符串');
+  if (typeof raw.baseUrl !== 'string') throw badRequest('providers.validation.baseUrlType');
   if (raw.models !== undefined && !Array.isArray(raw.models)) {
-    throw badRequest('models 必须是字符串数组');
+    throw badRequest('providers.validation.modelsType');
   }
   if (raw.models && raw.models.some((item) => typeof item !== 'string')) {
-    throw badRequest('models 只能包含字符串');
+    throw badRequest('providers.validation.modelsItems');
   }
   // 能力表只做形状校验，取值合法性（正整数、模型仍在列表里）交给
   // ProviderService.normalizeCapabilities —— 一条规则一处实现，避免两套标准。
@@ -34,7 +35,7 @@ function asProviderInput(body: unknown): ProviderInput {
     raw.modelCapabilities !== undefined &&
     (typeof raw.modelCapabilities !== 'object' || raw.modelCapabilities === null)
   ) {
-    throw badRequest('modelCapabilities 必须是对象');
+    throw badRequest('providers.validation.modelCapabilitiesType');
   }
   return {
     name: raw.name,
@@ -86,7 +87,7 @@ export function registerProviderRoutes(
     async (request) => {
       const body = (request.body ?? {}) as { ids?: unknown };
       if (!Array.isArray(body.ids) || body.ids.some((item) => typeof item !== 'string')) {
-        throw badRequest('ids 必须是字符串数组');
+        throw badRequest('providers.validation.idsType');
       }
       return { providers: service.reorder(body.ids as string[]) };
     },
@@ -111,7 +112,7 @@ export function registerProviderRoutes(
     async (request) => {
       const { id } = request.params as { id: string };
       const body = (request.body ?? {}) as { enabled?: unknown };
-      if (typeof body.enabled !== 'boolean') throw badRequest('enabled 必须是布尔值');
+      if (typeof body.enabled !== 'boolean') throw badRequest('providers.validation.enabledType');
       return { provider: service.setEnabled(id, body.enabled) };
     },
   );
@@ -134,7 +135,11 @@ export function registerProviderRoutes(
       const { id } = request.params as { id: string };
       const record = service.get(id);
       const apiKey = service.plainApiKey(record);
-      const result = await testProviderConnectivity(record, apiKey);
+      const result = await testProviderConnectivity(
+        record,
+        apiKey,
+        resolveRequestLanguage(request, ctx),
+      );
       service.recordTest(id, {
         at: new Date().toISOString(),
         ok: result.ok,
@@ -166,10 +171,10 @@ export function registerProviderRoutes(
         providerId?: unknown;
       };
       if (!API_TYPES.includes(body.apiType as ApiType)) {
-        throw badRequest(`apiType 只能是 ${API_TYPES.join(' / ')}`);
+        throw badRequest('providers.validation.apiTypeInvalid', { types: API_TYPES.join(' / ') });
       }
       if (typeof body.baseUrl !== 'string' || body.baseUrl.trim() === '') {
-        throw badRequest('baseUrl 不能为空');
+        throw badRequest('providers.validation.baseUrlBlank');
       }
 
       let apiKey =
@@ -181,7 +186,7 @@ export function registerProviderRoutes(
           apiKey = service.plainApiKey(record);
         }
         if (apiKey === '') {
-          throw badRequest('尚未填写 API Key，且没有可沿用的已保存 Key');
+          throw badRequest('providers.models.apiKeyRequired');
         }
       }
 
@@ -193,6 +198,8 @@ export function registerProviderRoutes(
         apiType: body.apiType as ApiType,
         baseUrl: normalizeBaseUrl(body.baseUrl),
         apiKey,
+        // 失败说明会原样显示在界面上，按请求语言渲染
+        language: resolveRequestLanguage(request, ctx),
       });
     },
   );

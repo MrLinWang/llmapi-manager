@@ -9,6 +9,8 @@ import {
   issueSession,
 } from '../auth/session';
 import { badRequest, unauthorized } from '../http/errors';
+import { translate } from '../i18n';
+import { resolveRequestLanguage } from '../i18n/language';
 import { PERMISSIONS } from '../domain/permissions';
 import { ROLE_PERMISSIONS } from '../domain/permissions';
 import { SetupService } from '../services/setup';
@@ -31,7 +33,7 @@ export function registerAuthRoutes(
       const body = (request.body ?? {}) as LoginBody;
       const username = body.username?.trim();
       const password = body.password ?? '';
-      if (!username || !password) throw badRequest('用户名与口令不能为空');
+      if (!username || !password) throw badRequest('auth.login.missingCredentials');
 
       const identity = ctx.identity.read();
       const user = identity.users.find(
@@ -40,15 +42,15 @@ export function registerAuthRoutes(
       // 统一的失败信息，不区分"用户不存在"与"口令错误"
       if (!user || user.status !== 'active') {
         await new Promise((resolve) => setTimeout(resolve, 120));
-        throw unauthorized('用户名或口令不正确');
+        throw unauthorized('auth.login.invalidCredentials');
       }
       const ok = await verifyPassword(password, user.passwordHash);
       if (!ok) {
         await new Promise((resolve) => setTimeout(resolve, 120));
-        throw unauthorized('用户名或口令不正确');
+        throw unauthorized('auth.login.invalidCredentials');
       }
       const tenant = identity.tenants.find((item) => item.id === user.tenantId);
-      if (!tenant || tenant.status !== 'active') throw unauthorized('租户已被停用');
+      if (!tenant || tenant.status !== 'active') throw unauthorized('auth.login.tenantDisabled');
 
       const { token } = issueSession(ctx.config.sessionSecret, {
         userId: user.id,
@@ -118,21 +120,27 @@ export function registerAuthRoutes(
       const principal = getPrincipal(request);
       const body = (request.body ?? {}) as { oldPassword?: string; newPassword?: string };
       if (!body.oldPassword || !body.newPassword) {
-        throw badRequest('旧口令与新口令都必须填写');
+        throw badRequest('auth.password.oldAndNewRequired');
       }
-      if (body.newPassword.length < 8) throw badRequest('新口令至少 8 位');
+      if (body.newPassword.length < 8) {
+        throw badRequest('auth.password.newTooShort', { min: 8 });
+      }
 
       const identity = ctx.identity.read();
       const user = identity.users.find((item) => item.id === principal.userId);
       if (!user) throw unauthorized();
       const ok = await verifyPassword(body.oldPassword, user.passwordHash);
-      if (!ok) throw badRequest('旧口令不正确');
+      if (!ok) throw badRequest('auth.password.oldIncorrect');
 
       user.passwordHash = await hashPassword(body.newPassword);
       // authVersion 递增让所有既有会话立即失效（含当前这条）
       user.authVersion += 1;
       ctx.identity.write(identity);
-      return { ok: true, message: '口令已更新，请重新登录' };
+      // 成功提示会在设置页上显示，所以按请求语言渲染（发生在边界，不在领域层）
+      return {
+        ok: true,
+        message: translate(resolveRequestLanguage(request, ctx), 'auth.password.updated'),
+      };
     },
   );
 
@@ -166,10 +174,10 @@ export function registerAuthRoutes(
         password?: unknown;
       };
       if (typeof body.token !== 'string' || body.token.trim() === '') {
-        throw badRequest('初始化令牌不能为空');
+        throw badRequest('auth.setup.tokenRequired');
       }
-      if (typeof body.username !== 'string') throw badRequest('用户名必须是字符串');
-      if (typeof body.password !== 'string') throw badRequest('口令必须是字符串');
+      if (typeof body.username !== 'string') throw badRequest('auth.setup.usernameMustBeString');
+      if (typeof body.password !== 'string') throw badRequest('auth.setup.passwordMustBeString');
 
       const { user } = await setupService.complete({
         token: body.token.trim(),

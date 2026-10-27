@@ -2,6 +2,8 @@ import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { UiLanguage } from '../domain/settings';
+import { translate } from '../i18n';
 
 /**
  * 结束本机正在运行的 Agent 客户端进程。
@@ -174,7 +176,10 @@ export function isCodexClientCommand(command: string): boolean {
  * 所以这里读 `app-server-daemon/*.pid` 里记录的 pid 作为兜底：
  * 那些文件是 daemon 自己写的，比按命令行猜更准（daemon 的参数形态会随版本变）。
  */
-function stopManagedDaemonProcesses(codexHome: string): { killed: number; warnings: string[] } {
+function stopManagedDaemonProcesses(
+  codexHome: string,
+  language: UiLanguage,
+): { killed: number; warnings: string[] } {
   const warnings: string[] = [];
   let killed = 0;
   const pidFiles = ['daemon.pid', 'daemon-updater.pid'];
@@ -196,7 +201,11 @@ function stopManagedDaemonProcesses(codexHome: string): { killed: number; warnin
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : String(cause);
       // ESRCH = 已经退出了，说明结果已经达到
-      if (!/ESRCH/.test(detail)) warnings.push(`结束 ${name} 记录的进程 ${pid} 失败：${detail}`);
+      if (!/ESRCH/.test(detail)) {
+        warnings.push(
+          translate(language, 'agents.process.pidKillFailed', { file: name, pid, detail }),
+        );
+      }
     }
   }
   return { killed, warnings };
@@ -267,6 +276,10 @@ function runCommand(
  */
 export async function stopCodexProcesses(
   agentHomeDir: string | undefined,
+  // 语言由边界传入（routes/agents.ts 按请求语言解析）：这里的 actions/warnings
+  // 会原样出现在接口响应里、由前端直接展示，属于"翻译发生在边界"的边界一侧。
+  // 缺省中文：未传语言的调用方（脚本、测试）拿到的是稳定文案。
+  language: UiLanguage = 'zh',
 ): Promise<StopProcessesResult> {
   const actions: string[] = [];
   const warnings: string[] = [];
@@ -282,25 +295,33 @@ export async function stopCodexProcesses(
     // 5 秒足够：正常情况它立刻返回；目录只读时也立刻失败。
     // 原来的 20 秒会让整个"退出进程"操作卡住 20 秒，用户以为按钮没反应。
     await runCommand('codex', ['app-server', 'daemon', 'stop'], env, 5_000);
-    actions.push('已停止 Codex 守护进程（codex app-server daemon stop）');
+    actions.push(translate(language, 'agents.process.daemonStopped'));
   } catch (cause) {
     // 没有 daemon、或 codex 不在 PATH 都算常见情况，不当作错误
     const detail = cause instanceof Error ? cause.message : String(cause);
     if (/no such file|not found|ENOENT/i.test(detail)) {
-      warnings.push('未找到 codex 命令，跳过守护进程停止（仅结束本机进程）');
+      warnings.push(translate(language, 'agents.process.daemonCommandMissing'));
     } else if (/not running|not started|no daemon|does not exist/i.test(detail)) {
-      actions.push('Codex 守护进程本来就没有运行');
+      actions.push(translate(language, 'agents.process.daemonNotRunning'));
     } else {
-      warnings.push(`停止守护进程失败：${detail.split('\n')[0] ?? detail}`);
+      warnings.push(
+        translate(language, 'agents.process.daemonStopFailed', {
+          detail: detail.split('\n')[0] ?? detail,
+        }),
+      );
     }
   }
 
   // 2) 托管 daemon 的兜底：`daemon stop` 在只读目录等情况下会失败，
   //    失败后 daemon 仍活着，表现为"点了退出进程但 Codex 还能用"。
   //    这里按它自己写的 pid 文件精确结束，不依赖命令行形态。
-  const daemonFallback = stopManagedDaemonProcesses(codexHome);
+  const daemonFallback = stopManagedDaemonProcesses(codexHome, language);
   if (daemonFallback.killed > 0) {
-    actions.push(`已按 pid 文件结束 ${daemonFallback.killed} 个 Codex 守护进程`);
+    actions.push(
+      translate(language, 'agents.process.daemonKilledByPid', {
+        count: daemonFallback.killed,
+      }),
+    );
   }
   warnings.push(...daemonFallback.warnings);
 
@@ -313,11 +334,17 @@ export async function stopCodexProcesses(
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : String(cause);
       // ESRCH = 进程已自行退出，视为成功
-      if (!/ESRCH/.test(detail)) warnings.push(`结束进程 ${item.pid} 失败：${detail}`);
+      if (!/ESRCH/.test(detail)) {
+        warnings.push(
+          translate(language, 'agents.process.killFailed', { pid: item.pid, detail }),
+        );
+      }
     }
   }
   if (killed.length > 0) {
-    actions.push(`已结束 ${killed.length} 个 Codex 客户端进程`);
+    actions.push(
+      translate(language, 'agents.process.clientsKilled', { count: killed.length }),
+    );
     // 先给 SIGTERM 一点时间，再对仍然活着的补 SIGKILL。
     // 300ms 太短：Codex 的 TUI 关闭时可能还在收尾（写 rollout、断连接），
     // 实测常常来不及退出，用户看到的是"点了退出但进程还在"。
@@ -354,12 +381,13 @@ export async function stopCodexProcesses(
     });
     if (stillAlive.length > 0) {
       warnings.push(
-        `${stillAlive.length} 个进程在 SIGKILL 后仍未退出（pid ${stillAlive
-          .map((item) => item.pid)
-          .join(', ')}），可能需要手动处理`,
+        translate(language, 'agents.process.stillAlive', {
+          count: stillAlive.length,
+          pids: stillAlive.map((item) => item.pid).join(', '),
+        }),
       );
     } else {
-      actions.push('已确认相关进程全部退出');
+      actions.push(translate(language, 'agents.process.allExited'));
     }
   }
 

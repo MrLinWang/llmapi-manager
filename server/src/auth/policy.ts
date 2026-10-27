@@ -18,10 +18,12 @@ export function can(principal: Principal, permission: Permission): boolean {
 export function assertCan(principal: Principal, permission: Permission): void {
   if (!can(principal, permission)) {
     // 令牌场景下不要回显角色：它没有角色语义，说"角色 member 缺少权限"会误导排查方向
-    throw forbidden(
-      principal.scopes
-        ? `该 API 令牌缺少权限 ${permission}`
-        : `角色 ${principal.role} 缺少权限 ${permission}`,
-    );
+    if (principal.scopes) {
+      throw forbidden('auth.permission.tokenMissing', { permission });
+    }
+    throw forbidden('auth.permission.roleMissing', {
+      role: principal.role,
+      permission,
+    });
   }
 }

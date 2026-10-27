@@ -331,7 +331,7 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
   （工具调不动、思考区转圈、列表少一家），读日志定位不了。
 - 改这些接口时，确认四条都在：路由预演、全链路、自检清单、转换器纯函数自检。
 
-### 16. 界面文案必须走 i18n，服务端文案仍是中文
+### 16. 界面与服务端文案都必须走 i18n
 
 控制台是双语的（`zh` / `en`），实现是 `i18next` + `react-i18next`。界面文案的
 **唯一来源**是 `web/src/i18n/locales/{zh,en}/` 下的字典；组件里硬编码中文会被
@@ -345,10 +345,20 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
   后者要等下一次渲染才更新（症状是"点了切换、页面不刷新"）。
 - **时间用 `web/src/i18n/format.ts`**，不要用 `toLocaleString()`：后者跟随浏览器语言，
   会出现"界面英文、时间中文格式"。
-- **服务端 `message` 保持中文**：`AppError` 文案、启动告警、Agent 描述、诊断输出
-  都不翻译，前端原样显示。这是刻意的边界（翻译它们要在服务端引入消息键，
-  且会牵动所有测试断言）。**不要为了"看起来更全"在前端字典里复刻一遍**，
-  那会得到两份迟早不一致的文案。
+- **服务端有独立的同构字典**（`server/src/i18n/locales/{zh,en}/`，区域为
+  `errors` / `gateway` / `diagnostics` / `providers` / `agents` / `auth` / `tokens` / `settings`）。
+  **不要复用前端字典**：两边受众不同（前端是"看界面的人"，服务端是"调 API 的脚本
+  + 看报错的人"），合并会让前端改界面文案时顺带改掉 API 报错文本。
+- **语言只在边界解析**：`domain/` 与 `services/` 只产出"键 + 参数"（`LocalizedText`），
+  由错误处理器或路由响应调 `resolveRequestLanguage()` 后 `translate()`。
+  需要语言时用 `language: UiLanguage = 'zh'` 的末位可选参数，**不要在服务层读 Request**。
+  优先级：租户设置 > `Accept-Language` > 中文（`server/src/i18n/language.ts`）。
+- **错误响应同时带 `messageKey`**：调用方与测试都用键做判断，不要匹配会随语言变化的
+  译文。给 `badRequest(key, params)` 时**第二参是插值参数、第三参才是 details**。
+- **日志与 CLI 固定中文**：`ctx.logger.*`、`console.log`、启动横幅不迁移。
+  同一故障在不同客户端下长得不一样，会让 grep 与排查变难。
+- 新增语义时同步两边字典：界面文案进 `web/src/i18n/locales/`，接口文案进
+  `server/src/i18n/locales/`。`server/test/i18n.test.ts` 会校验键集一致、插值一致、无空文案。
 - **语言偏好存服务端**（`TenantSettings.language`，`null` = 跟随浏览器），
   接口 `PATCH /api/settings/language`，随 `GET /api/auth/me` 下发。
   **不要改用 localStorage**：换设备会丢设置，也可能与另一台机器打架。
@@ -360,7 +370,7 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
 
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 278 + web 27 = 305 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 296 + web 28 = 324 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
@@ -384,7 +394,10 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
 - 改界面文案 → 中文与英文两份字典一起改，跑 `npm test -w web`（字典契约 +
   硬编码扫描）；计数文案确认 `_one`/`_other` 成对。
 - 改语言设置接口/存储 → 补 `server/test/smoke.test.ts` 的「界面语言设置」用例组
-  （默认 null、落盘、非法值 400、读路径降级、只读令牌 403、不影响其它设置）。
+  （默认 null、落盘、非法值 400、读路径降级、只读令牌 403、不影响其它设置、
+  报错文案跟随租户语言与 Accept-Language、每条错误都带 `messageKey`）。
+- 改服务端文案 → 键进 `server/src/i18n/locales/{zh,en}/`，跑 `npm test -w server`
+  （含 `server/test/i18n.test.ts` 的字典契约）。**测试断言用 `messageKey`，不要断言译文。**
 - 改了品牌名 / 对外文案 → 同步 `README.md`、`web/index.html`、登录页与侧边栏。
 
 ## 明确不做的事

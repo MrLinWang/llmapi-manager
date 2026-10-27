@@ -409,7 +409,10 @@ describe('冒烟：网关', () => {
       { authorization: `Bearer ${gatewayToken}` },
     );
     expect(response.statusCode).toBe(400);
-    expect(response.json().error.message).toContain('未知供应商');
+    // 断言 messageKey 而不是中文文案：文案会随语言变，键不会。
+    // 中文渲染仍由 server/test/i18n.test.ts 的字典契约覆盖。
+    expect(response.json().error.messageKey).toBe('gateway.alias.unknownProvider');
+    expect(response.json().error.message).toContain('nobody');
   });
 
   it('/v1/messages 命中 openai 供应商时返回 501', async () => {
@@ -2036,6 +2039,56 @@ describe('冒烟：界面语言设置', () => {
 
     // 收尾：恢复成默认，避免影响后续用例（本文件共享同一个服务实例）
     await call('PATCH', '/api/settings/language', { language: null }, { cookie: langCookie });
+  });
+
+  it('报错文案跟随租户语言与 Accept-Language', async () => {
+    // 语言来源按优先级：租户设置 > Accept-Language > 中文。
+    // 用"已存在的路由 + 非法入参"来测，而不是不存在的路径——后者走
+    // setNotFoundHandler，那里拿不到 principal（守卫对未注册路由直接放行），
+    // 只看请求头。两者的语言来源本来就是不同的，混在一起测会得出错误结论。
+    const badBody = { apiType: 'bogus' };
+    await call('PATCH', '/api/settings/language', { language: null }, { cookie: langCookie });
+
+    // 1) 无设置、无语言头：中文兜底
+    const plain = await call('POST', '/api/providers', badBody, { cookie: langCookie });
+    expect(plain.statusCode).toBe(400);
+    expect(plain.json().error.message).toMatch(/[\u4e00-\u9fff]/);
+
+    // 2) 无设置、带英文头：英文
+    const enHeader = await call('POST', '/api/providers', badBody, {
+      cookie: langCookie,
+      'accept-language': 'en-US,en;q=0.9',
+    });
+    expect(enHeader.json().error.message).not.toMatch(/[\u4e00-\u9fff]/);
+
+    // 3) 租户设置成 en：不带任何语言头也是英文
+    await call('PATCH', '/api/settings/language', { language: 'en' }, { cookie: langCookie });
+    const afterSetting = await call('POST', '/api/providers', badBody, { cookie: langCookie });
+    expect(afterSetting.json().error.message).not.toMatch(/[\u4e00-\u9fff]/);
+    expect(afterSetting.json().error.messageKey).toBeTruthy();
+
+    // 4) 租户设置优先于请求头：设回 zh 后即使带英文头也是中文
+    await call('PATCH', '/api/settings/language', { language: 'zh' }, { cookie: langCookie });
+    const zhWins = await call('POST', '/api/providers', badBody, {
+      cookie: langCookie,
+      'accept-language': 'en-US,en;q=0.9',
+    });
+    expect(zhWins.json().error.message).toMatch(/[\u4e00-\u9fff]/);
+
+    // 收尾：恢复默认
+    await call('PATCH', '/api/settings/language', { language: null }, { cookie: langCookie });
+  });
+
+  it('每条错误都带 messageKey，供调用方免于匹配译文', async () => {
+    // 文案会随语言变，键不会。脚本/前端该用键做分支，而不是匹配中文或英文。
+    const response = await call('GET', '/api/providers/nope');
+    expect(response.json().error.messageKey).toBe('errors.apiRouteMissing');
+
+    const gateway = await call('GET', '/v1/models', undefined, { 'accept-language': 'en' });
+    expect(gateway.statusCode).toBe(401);
+    expect(gateway.json().error.messageKey).toBe('gateway.auth.invalidToken');
+    // 同时钉住"英文下真的是英文"，否则 messageKey 对了但文案没翻也看不出来
+    expect(gateway.json().error.message).toMatch(/^Gateway token/);
   });
 
   it('只读令牌不能改语言；语言不影响其它设置', async () => {

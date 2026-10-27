@@ -1,5 +1,7 @@
 import type { ServerResponse } from 'node:http';
 import type { ProviderRecord } from '../domain/provider';
+import type { UiLanguage } from '../domain/settings';
+import { translate } from '../i18n';
 import { ConversionError, responsesToChatRequest } from './convert/responsesToChat';
 import { chatToResponsesResponse } from './convert/chatToResponses';
 import {
@@ -146,6 +148,13 @@ export interface ForwardOptions {
    */
   deferErrorWrite?: boolean;
   loggerWarn: (message: string, meta?: unknown) => void;
+  /**
+   * 本次请求的响应语言。
+   *
+   * 网关直接写 `reply`（不经过错误处理器），所以转换失败这类响应要在这里自己渲染。
+   * 缺省中文：保持既有内部调用（测试、回退重试）行为不变。
+   */
+  language?: UiLanguage;
 }
 
 function writeLog(
@@ -227,7 +236,12 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
       reply.setHeader('content-type', 'application/json');
       reply.end(
         JSON.stringify({
-          error: { code: 'conversion_failed', message: `请求无法转换为 Chat 格式：${message}` },
+          error: {
+            code: 'conversion_failed',
+            message: translate(options.language ?? 'zh', 'gateway.forward.requestConvertFailed', {
+              detail: message,
+            }),
+          },
         }),
       );
       return { status: 400, stream, latencyMs: Date.now() - startedAt, error: message };
@@ -292,14 +306,19 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
       const reader = response.body?.getReader();
       if (!reader) {
         const latencyMs = Date.now() - startedAt;
+        // 文案同时用作日志与（非流式时的）响应体，因此走字典而不是硬编码
+        const emptyUpstream = translate(
+          options.language ?? 'zh',
+          'gateway.forward.upstreamEmptyBody',
+        );
         reply.end();
         writeLog(options, {
           status: 502,
           latencyMs,
           stream: true,
-          error: '上游未返回响应体',
+          error: emptyUpstream,
         });
-        return { status: 502, stream: true, latencyMs, error: '上游未返回响应体' };
+        return { status: 502, stream: true, latencyMs, error: emptyUpstream };
       }
       try {
         if (convertRequest) {
@@ -383,7 +402,12 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
         reply.setHeader('content-type', 'application/json');
         reply.end(
           JSON.stringify({
-            error: { code: 'conversion_failed', message: `上游响应无法转换为 Responses 格式：${message}` },
+            error: {
+              code: 'conversion_failed',
+              message: translate(options.language ?? 'zh', 'gateway.forward.responseConvertFailed', {
+                detail: message,
+              }),
+            },
           }),
         );
         return { status: 502, stream: false, latencyMs, error: message };
@@ -401,7 +425,7 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
     const message =
       error instanceof Error
         ? error.name === 'AbortError'
-          ? '请求被中止（客户端断开或超时）'
+          ? translate(options.language ?? 'zh', 'gateway.forward.requestAborted')
           : error.message
         : String(error);
     writeLog(options, { status: 502, latencyMs, stream, error: message });
@@ -409,7 +433,14 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
       reply.statusCode = 502;
       reply.setHeader('content-type', 'application/json');
       reply.end(
-        JSON.stringify({ error: { code: 'upstream_error', message: `上游请求失败：${message}` } }),
+        JSON.stringify({
+          error: {
+            code: 'upstream_error',
+            message: translate(options.language ?? 'zh', 'gateway.forward.upstreamRequestFailed', {
+              detail: message,
+            }),
+          },
+        }),
       );
     }
     return { status: 502, stream, latencyMs, error: message };
@@ -428,6 +459,7 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
 export function writeDeferredError(
   reply: ServerResponse,
   outcome: Pick<ForwardOutcome, 'status' | 'upstreamBody' | 'upstreamContentType' | 'error'>,
+  language: UiLanguage = 'zh',
 ): void {
   if (reply.headersSent || reply.writableEnded) return;
   reply.statusCode = outcome.status;
@@ -437,7 +469,9 @@ export function writeDeferredError(
       JSON.stringify({
         error: {
           code: 'upstream_error',
-          message: outcome.error ?? `上游返回 ${outcome.status}`,
+          message:
+            outcome.error ??
+            translate(language, 'gateway.forward.upstreamStatus', { status: outcome.status }),
         },
       }),
   );
@@ -462,11 +496,13 @@ export function assertApiTypeMatch(
     const convertible =
       allowConversion && required === 'responses' && provider.apiType === 'openai';
     if (convertible) return;
+    const params = { path, apiType: provider.apiType, required, name: provider.name };
     throw new AppError(
       'not_implemented',
-      allowConversion
-        ? `不支持 ${path} → ${provider.apiType} 的转换：目前只支持 Responses → Chat，供应商 ${provider.name} 是 ${provider.apiType}`
-        : `未开启协议转换：${path} 需要 ${required} 上游，而供应商 ${provider.name} 是 ${provider.apiType}。可在设置页开启"跨协议转发"让网关把 Responses 请求转成 Chat 发送`,
+      {
+        key: allowConversion ? 'gateway.forward.conversionUnsupported' : 'gateway.forward.conversionDisabled',
+        params,
+      },
       // 机读标记：前端据此弹出"一键开启"提示，而不是只让用户读一句错误文字。
       // 只有"开关没开、但打开就能解决"这种情况才带，避免误导。
       allowConversion || required !== 'responses' || provider.apiType !== 'openai'

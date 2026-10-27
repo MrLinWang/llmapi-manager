@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context';
-import { AppError, forbidden, unauthorized } from '../http/errors';
+import { forbidden, internalError, unauthorized } from '../http/errors';
 import { resolvePrincipalFromSession } from '../auth/principal';
 import { resolvePrincipalFromApiToken } from '../auth/apiTokenPrincipal';
 import { assertCan } from '../auth/policy';
@@ -44,10 +44,10 @@ export function registerApiGuard(
 
     if (!access) {
       // 走到这里说明有路由没登记，宁可拒绝也不默认放行
-      throw new AppError(
-        'internal_error',
-        `路由 ${request.method} ${routeUrl} 未在访问登记簿中声明`,
-      );
+      throw internalError('auth.guard.routeNotDeclared', {
+        method: request.method,
+        url: routeUrl,
+      });
     }
     if (access === 'public') return;
 
@@ -63,7 +63,7 @@ export function registerApiGuard(
       // 令牌不该能改口令——那等于凭据泄露后可以永久接管账号，
       // 而吊销令牌反而救不回来（口令已被改）。
       if (principal.via === 'api-token') {
-        throw forbidden('该接口需要登录会话，API 令牌不能调用');
+        throw forbidden('auth.guard.sessionRequired');
       }
     } else {
       assertCan(principal, access as Permission);

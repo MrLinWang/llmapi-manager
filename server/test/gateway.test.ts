@@ -37,10 +37,15 @@ describe('上游地址拼接', () => {
 
 describe('协议类型文案', () => {
   it('三个 label 用同一句式：<厂商> 兼容（<API 形态>）', () => {
+    // 默认语言是中文（部署者默认环境），显式传入语言则跟随界面/请求语言
     for (const apiType of API_TYPES) {
-      expect(apiTypeLabel(apiType)).toMatch(/兼容（.+）$/);
+      expect(apiTypeLabel(apiType, 'zh')).toMatch(/兼容（.+）$/);
+      expect(apiTypeLabel(apiType, 'en')).toMatch(/-compatible \(.+\)$/);
     }
     // 不含第三种"OpenAI Responses"这种句式不一致的旧写法
+    expect(apiTypeLabel('responses', 'zh')).toBe('OpenAI 兼容（Responses）');
+    expect(apiTypeLabel('responses', 'en')).toBe('OpenAI-compatible (Responses)');
+    // 不传语言时回落到中文：服务端内部（日志、启动横幅）固定用中文
     expect(apiTypeLabel('responses')).toBe('OpenAI 兼容（Responses）');
   });
 });

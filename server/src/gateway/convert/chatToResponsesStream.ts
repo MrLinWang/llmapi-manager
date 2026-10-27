@@ -24,6 +24,7 @@
  *   Responses 协议里没有"流悄悄结束"这种正常终止态
  */
 
+import { translate } from '../../i18n';
 type JsonObject = Record<string, unknown>;
 
 function isObject(value: unknown): value is JsonObject {
@@ -499,7 +500,7 @@ export class ChatStreamToResponsesConverter {
             ...this.responseShell('failed', []),
             error: {
               code: asString(error.code) || 'upstream_error',
-              message: asString(error.message) || '上游返回错误',
+              message: asString(error.message) || translate('zh', 'gateway.convert.upstreamError'),
             },
           },
         }),

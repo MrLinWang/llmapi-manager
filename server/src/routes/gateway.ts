@@ -4,6 +4,7 @@ import { resolveGatewayPrincipal } from '../gateway/auth';
 import { ProviderService } from '../services/providers';
 import { listAliases } from '../domain/aliases';
 import { badRequest, unauthorized } from '../http/errors';
+import { resolveRequestLanguage } from '../i18n/language';
 import {
   GATEWAY_PATHS as GATEWAY_PATHS_ALL,
   assertApiTypeMatch,
@@ -33,7 +34,7 @@ export function registerGatewayRoutes(
 ): void {
   const authGateway = (request: FastifyRequest): Principal => {
     const principal = resolveGatewayPrincipal(request, ctx);
-    if (!principal) throw unauthorized('网关令牌缺失或无效');
+    if (!principal) throw unauthorized('gateway.auth.invalidToken');
     return principal;
   };
 
@@ -64,6 +65,8 @@ export function registerGatewayRoutes(
     async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
       const principal = authGateway(request);
       const repos = ctx.store.forTenant(principal.tenantId);
+      // 网关响应直接写 reply.raw，不经过错误处理器，语言必须在这里解析一次
+      const language = resolveRequestLanguage(request, ctx);
       const logService = new RequestLogService(repos.requestLog, repos.tenantId);
       let settings = repos.settings.read();
       const records = providerService.listRecords();
@@ -81,7 +84,7 @@ export function registerGatewayRoutes(
       // 会自动写设置，所以要在响应头里标记出来，让调用方能发现行为被改变了。
       const body = (request.body ?? {}) as Record<string, unknown>;
       if (typeof body.model !== 'string' || body.model.trim() === '') {
-        throw badRequest('请求体必须包含 model 字段');
+        throw badRequest('gateway.request.modelRequired');
       }
       const requestedModel = body.model;
       const stream = body.stream === true;
@@ -138,7 +141,8 @@ export function registerGatewayRoutes(
           },
           (error) => ctx.logger.warn('写入请求日志失败', error),
         );
-        throw badRequest(selection.reason);
+        // 用键 + 参数：`reason` 是中文渲染结果（给日志看），回给客户端要按请求语言渲染
+        throw badRequest(selection.reasonKey, selection.reasonParams);
       }
 
       // 兜底再校验一次：别名模式是直接按 providerId 取供应商，不走上面的协议过滤，
@@ -169,6 +173,8 @@ export function registerGatewayRoutes(
           mode: selection.mode,
           fallback,
           deferErrorWrite: deferError,
+          // 网关直接写 reply，不经过错误处理器，所以语言要在这里传进去
+          language,
           loggerWarn: (message, meta) => ctx.logger.warn(message, meta),
           onLog: (record) =>
             logService.append(record, (error) =>
@@ -185,7 +191,7 @@ export function registerGatewayRoutes(
       if (!mayFallback || primaryResult.status < 500) {
         // 主供应商那次是延迟写模式，错误尚未发给客户端，这里必须补写；
         // 否则客户端会收到 200 + 空 body（曾被真实 bug 踩过）。
-        writeDeferredError(reply.raw, primaryResult);
+        writeDeferredError(reply.raw, primaryResult, language);
         return;
       }
 
