@@ -6,6 +6,8 @@ import { zhGateway } from './gateway';
 import { zhProviders } from './providers';
 import { zhSettings } from './settings';
 import { zhTokens } from './tokens';
+import { zhLogs } from './logs';
+import { zhWarnings } from './warnings';
 
 /**
  * 服务端简体中文字典（键的唯一来源）。
@@ -22,4 +24,6 @@ export const zh = {
   auth: zhAuth,
   tokens: zhTokens,
   settings: zhSettings,
+  warnings: zhWarnings,
+  logs: zhLogs,
 };

@@ -362,10 +362,13 @@ export function registerDiagnosticsRoutes(
         upstreamText = await response.text();
         // 诊断会真打上游、真烧额度，必须留痕：出现"谁在反复调诊断"时
         // 要能从日志查到。正常转发每笔都写日志，诊断不该是盲区。
-        ctx.logger.info(
-          `诊断转发：provider=${provider.name}(${provider.id}) status=${upstreamStatus} ` +
-            `latency=${Date.now() - startedAt}ms by=${request.principal?.userId ?? 'unknown'}`,
-        );
+        ctx.logger.info('logs.gateway.diagnosticsForward', {
+          name: provider.name,
+          id: provider.id,
+          status: upstreamStatus,
+          latency: Date.now() - startedAt,
+          user: request.principal?.userId ?? 'unknown',
+        });
         steps.push({
           step: 'upstream',
           ok: response.ok,

@@ -355,8 +355,13 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
   优先级：租户设置 > `Accept-Language` > 中文（`server/src/i18n/language.ts`）。
 - **错误响应同时带 `messageKey`**：调用方与测试都用键做判断，不要匹配会随语言变化的
   译文。给 `badRequest(key, params)` 时**第二参是插值参数、第三参才是 details**。
-- **日志与 CLI 固定中文**：`ctx.logger.*`、`console.log`、启动横幅不迁移。
-  同一故障在不同客户端下长得不一样，会让 grep 与排查变难。
+- **日志与 CLI 跟随 `LOG_LANGUAGE`（默认 `zh`），不跟随请求语言**：日志的读者是
+  部署者，同一故障在不同客户端下长得不一样会让 grep 失效。`ctx.logger.info('logs.xxx', {…})`
+  直接传**键**，logger 按 `logLanguage` 渲染、并把 meta 当插值参数；传成品文案也支持
+  （含变量拼接时），此时不翻译。启动横幅与 `scripts/` 的 CLI 输出用 `translate(config.logLanguage, …)`。
+- **启动告警存"键 + 参数"**（`addWarning(code, messageKey, params)`）：告警在启动期产生、
+  拿不到 Request，由 `/api/health` 用 `getWarningsFor(language)` 在响应阶段渲染。
+  `warning.message` 仍是中文渲染结果（日志与既有测试在读）。
 - 新增语义时同步两边字典：界面文案进 `web/src/i18n/locales/`，接口文案进
   `server/src/i18n/locales/`。`server/test/i18n.test.ts` 会校验键集一致、插值一致、无空文案。
 - **语言偏好存服务端**（`TenantSettings.language`，`null` = 跟随浏览器），
@@ -370,7 +375,7 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
 
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 296 + web 28 = 324 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 299 + web 28 = 327 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。

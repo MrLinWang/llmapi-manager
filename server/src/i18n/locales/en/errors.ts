@@ -7,5 +7,6 @@ export const enErrors: typeof zhErrors = {
   internal: 'Internal server error',
   routeNotDeclared: 'Route {{method}} {{url}} is not declared in the access registry',
   apiRouteMissing: 'No such endpoint: {{method}} {{url}}',
+  frontendNotBuilt: 'The frontend has not been built yet. Run npm run build (in dev mode, open the Vite port instead).',
   framework: 'Malformed request',
 };

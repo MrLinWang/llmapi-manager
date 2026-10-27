@@ -60,7 +60,7 @@ describe('JSON 补丁', () => {
       applyJsonWrites(JSON.stringify({ env: 'not-an-object' }), [
         { path: 'env.ANTHROPIC_MODEL', value: 'x' },
       ]),
-    ).toThrow(/不是对象/);
+    ).toThrow(/not an object/);
   });
 
   it('原文件损坏时抛错，不写空文件', () => {

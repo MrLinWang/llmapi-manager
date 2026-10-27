@@ -176,7 +176,7 @@ function writeLog(
       error: outcome.error,
     });
   } catch (error) {
-    options.loggerWarn('写入请求日志失败', error);
+    options.loggerWarn('logs.gateway.logWriteFailed', error);
   }
 }
 

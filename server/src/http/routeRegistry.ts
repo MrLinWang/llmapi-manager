@@ -31,7 +31,10 @@ export class RouteRegistry {
     );
     if (missing.length > 0) {
       const list = missing.map((item) => `${item.method} ${item.url}`).join(', ');
-      throw new Error(`以下路由未声明访问权限：${list}`);
+      throw new Error(
+        `routes missing an access declaration: ${list}. ` +
+          'Every /api route must be registered via defineRoute.',
+      );
     }
   }
 

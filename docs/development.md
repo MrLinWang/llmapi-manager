@@ -74,7 +74,7 @@ Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真
 `processes.test.ts` 只测纯函数（命令行分类与 `etime` 解析），不会真的给任何进程发信号。
 日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**。
 
-当前基线：324 项（server 296 + web 28）。
+当前基线：327 项（server 299 + web 28）。
 
 ```bash
 npm test                                # 全部
@@ -163,7 +163,8 @@ defineRoute(
 
 - **服务端也有一套同构的 i18n**（`server/src/i18n/`），见下面「改服务端文案」。
   接口响应（`error.message`、Agent 描述、诊断输出）跟随请求语言，
-  而**日志与 CLI 输出固定中文**——受众是部署者，不随请求语言漂移才便于排查。
+  而**日志与 CLI 输出跟随 `LOG_LANGUAGE`**（默认中文）——受众是部署者，
+  不随请求语言漂移才便于排查。
 - 语言偏好存服务端（`TenantSettings.language`，`null` = 跟随浏览器），
   接口是 `PATCH /api/settings/language`，随 `GET /api/auth/me` 一并下发。
   **不要用 localStorage**：换浏览器后设置会丢，也可能与另一台设备上的选择打架。
@@ -209,8 +210,11 @@ return { hint: translate(language, 'diagnostics.route.conversionHint') };
 - **错误响应同时带 `messageKey`**：调用方（前端、脚本、诊断）用它做分支，
   而不是匹配会随语言变化的译文。测试也应断言 `messageKey`，而不是中文文案——
   断言译文会让每次文案微调都变成测试失败。
-- **日志与 CLI 固定中文**：`ctx.logger.*`、`console.log`、启动横幅不迁移。
-  同一故障在不同客户端下长得不一样，会让 grep 与排查变难。
+- **日志与 CLI 走 `LOG_LANGUAGE`，不走请求语言**：`ctx.logger.info('logs.xxx', { … })`
+  直接传键，logger 按 `logLanguage` 渲染、meta 兼作插值参数；传成品文案则不翻译。
+  启动横幅与 `scripts/` 的 CLI 用 `translate(config.logLanguage, …)`。
+- **启动告警存"键 + 参数"**：`addWarning(code, messageKey, params)`，由 `/api/health`
+  在响应阶段用 `getWarningsFor(language)` 渲染（启动期拿不到 Request）。
 - 新增区域：加 `locales/{zh,en}/<area>.ts`，在 `locales/{zh,en}/index.ts` 各注册一行。
   en 侧声明成 `typeof zhXxx`，漏键编译不过。
 

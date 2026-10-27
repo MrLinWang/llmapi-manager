@@ -114,6 +114,63 @@ describe('AppError', () => {
   });
 });
 
+describe('日志与 CLI 文案', () => {
+  // 日志不跟随请求语言（由 LOG_LANGUAGE 决定），但它同样要能翻译成英文：
+  // 否则 `LOG_LANGUAGE=en` 就是个死开关。
+  it('logger 用键渲染，并按 options.language 选语言', async () => {
+    const { createLogger } = await import('../src/logger');
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (line: string) => void lines.push(String(line));
+    try {
+      createLogger('info', { language: 'zh' }).info('logs.startup.shuttingDown', {
+        signal: 'SIGTERM',
+      });
+      createLogger('info', { language: 'en' }).info('logs.startup.shuttingDown', {
+        signal: 'SIGTERM',
+      });
+    } finally {
+      console.log = original;
+    }
+    expect(lines[0]).toContain('收到 SIGTERM');
+    expect(lines[1]).toContain('Received SIGTERM');
+  });
+
+  it('成品文案原样输出，不被当成键渲染', async () => {
+    // 含变量的日志有时直接在调用点拼好再传进来；把成品文案误判为键会显示成键名。
+    const { createLogger } = await import('../src/logger');
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (line: string) => void lines.push(String(line));
+    try {
+      createLogger('info', { language: 'en' }).info('plain text stays as is');
+    } finally {
+      console.log = original;
+    }
+    expect(lines[0]).toContain('plain text stays as is');
+  });
+});
+
+describe('启动告警', () => {
+  it('收集时存键，响应时按语言渲染', async () => {
+    const { addWarning, getWarnings, getWarningsFor, resetWarnings } = await import(
+      '../src/resilience'
+    );
+    resetWarnings();
+    addWarning('corrupt_file', 'warnings.corruptFileQuarantined', {
+      file: 'providers.json',
+      target: 'providers.json.corrupt-1',
+    });
+
+    // 既有调用方读 message（中文渲染结果，日志与测试在用）
+    expect(getWarnings()[0]?.message).toContain('providers.json');
+    // 界面读按语言渲染的版本
+    expect(getWarningsFor('zh')[0]?.message).toContain('已隔离为');
+    expect(getWarningsFor('en')[0]?.message).toContain('was quarantined as');
+    resetWarnings();
+  });
+});
+
 describe('Accept-Language 解析', () => {
   it('认出 zh / en，含 q 值与多值', () => {
     expect(languageFromHeader('zh-CN,zh;q=0.9,en;q=0.8')).toBe('zh');

@@ -109,9 +109,7 @@ export function registerGatewayRoutes(
           updatedAt: new Date().toISOString(),
         };
         repos.settings.write(settings);
-        ctx.logger.info(
-          `已自动开启跨协议转发：${path} 需要 responses 上游，但当前只有 openai 供应商`,
-        );
+        ctx.logger.info('logs.gateway.autoEnabledConversion', { path });
         // 让客户端能看出"这次请求被转换了，且设置被改动"。
         // 必须设在 raw 上：转发是直接写 reply.raw 的，Fastify 层的 header 不会发出去。
         reply.raw.setHeader('x-llmapi-auto-conversion', '1');
@@ -139,7 +137,7 @@ export function registerGatewayRoutes(
             fallback: false,
             error: selection.reason,
           },
-          (error) => ctx.logger.warn('写入请求日志失败', error),
+          (error) => ctx.logger.warn('logs.gateway.logWriteFailed', error),
         );
         // 用键 + 参数：`reason` 是中文渲染结果（给日志看），回给客户端要按请求语言渲染
         throw badRequest(selection.reasonKey, selection.reasonParams);
@@ -178,7 +176,7 @@ export function registerGatewayRoutes(
           loggerWarn: (message, meta) => ctx.logger.warn(message, meta),
           onLog: (record) =>
             logService.append(record, (error) =>
-              ctx.logger.warn('写入请求日志失败', error),
+              ctx.logger.warn('logs.gateway.logWriteFailed', error),
             ),
         });
 
@@ -198,7 +196,7 @@ export function registerGatewayRoutes(
       if (reply.raw.headersSent) return;
 
       const fallbackCandidate = selection.fallbacks[0];
-      ctx.logger.warn('主供应商失败，尝试回退', {
+      ctx.logger.warn('logs.gateway.fallbackAttempted', {
         primary: selection.primary.provider.name,
         fallback: fallbackCandidate.provider.name,
         status: primaryResult.status,

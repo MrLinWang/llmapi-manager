@@ -14,5 +14,6 @@ export const zhErrors = {
   /** `/api/*` 或 `/v1/*` 下不存在的路径 */
   apiRouteMissing: '接口不存在：{{method}} {{url}}',
   /** Fastify 自身的 schema 校验/JSON 解析失败：文案来自框架，不翻译 */
+  frontendNotBuilt: '前端尚未构建，请执行 npm run build（开发模式请访问 Vite 端口）',
   framework: '请求格式不正确',
 };

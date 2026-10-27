@@ -124,7 +124,7 @@ export async function bootstrapIdentity(
     identity.write(data);
     markCompleted(setup, setup.read(), now);
     ensureTenantFiles(paths);
-    logger.info('已按 ADMIN_PASSWORD 创建管理员账号', {
+    logger.info('logs.startup.adminCreated', {
       username: user.username,
       tenantId: user.tenantId,
       role: user.role,
@@ -143,10 +143,7 @@ export async function bootstrapIdentity(
   const { token, hash } = createSetupToken();
   setup.write({ ...defaultSetupState(), tokenHash: hash, createdAt: now });
   ensureTenantFiles(paths);
-  addWarning(
-    'setup_pending',
-    '尚未设置管理员账号：打开控制台首页，用启动日志里的一次性初始化令牌完成设置。',
-  );
+  addWarning('setup_pending', 'warnings.setupPending');
   return { needsSetup: true, setupToken: token, createdOwner: false };
 }
 

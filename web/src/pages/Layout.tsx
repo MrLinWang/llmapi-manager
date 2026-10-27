@@ -338,7 +338,7 @@ export default function Layout(): JSX.Element {
             {warnings.length > 0 && (
               <Notice tone="warn">
                 <div className="space-y-0.5">
-                  {/* 服务端返回的告警 message 仍是中文：这是已知边界，前端不翻译 */}
+                  {/* 告警文案由服务端按 Accept-Language 渲染（见 server/src/resilience.ts），这里直接显示 */}
                   {warnings.map((item) => (
                     <p key={item.code}>{item.message}</p>
                   ))}

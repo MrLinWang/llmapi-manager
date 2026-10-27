@@ -19,6 +19,7 @@
 | `SESSION_SECRET` | 自动生成 | 会话签名密钥；未设置时生成并存入 `data/instance.json` |
 | `DATA_ENCRYPTION_KEY` | 无 | 凭据落盘加密密钥（任意字符串，内部派生 AES-256）；不设则明文并告警 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+| `LOG_LANGUAGE` | `zh` | `zh` / `en`：**运行日志、启动横幅与 CLI 输出**的语言。与接口文案的语言是两回事——接口跟随请求语言，日志跟随这个设置，否则同一故障在不同客户端下会长得不一样、没法 grep |
 | `LOG_DIR` | 仓库根 `log/` | 运行日志目录；设为 `off` 则只输出到控制台 |
 | `LOG_MAX_BYTES` | `5242880`（5MB） | 单个日志文件的滚动阈值 |
 | `LOG_MAX_FILES` | `5` | 保留的历史日志文件个数 |

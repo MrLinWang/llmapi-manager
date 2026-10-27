@@ -21,10 +21,7 @@ function plainCodec(): SecretCodec {
 
 export function createSecretCodec(encryptionKey: string | undefined): SecretCodec {
   if (!encryptionKey) {
-    addWarning(
-      'plaintext_credentials',
-      '未设置 DATA_ENCRYPTION_KEY，供应商 API Key 将以明文保存在 data 目录，建议仅用于单机自托管。',
-    );
+    addWarning('plaintext_credentials', 'warnings.plaintextCredentials');
     return plainCodec();
   }
 
@@ -60,10 +57,7 @@ export function createSecretCodec(encryptionKey: string | undefined): SecretCode
         ]).toString('utf8');
       } catch {
         // 密钥变更后无法解密：返回空串让上层按"无凭据"处理，而不是崩溃
-        addWarning(
-          'credential_decrypt_failed',
-          '存在无法解密的供应商凭据，通常是 DATA_ENCRYPTION_KEY 变更所致，请重新填写该供应商的 API Key。',
-        );
+        addWarning('credential_decrypt_failed', 'warnings.credentialDecryptFailed');
         return '';
       }
     },

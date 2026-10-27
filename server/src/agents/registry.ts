@@ -69,7 +69,7 @@ export class AgentPathResolver {
   resolve(agentId: AgentId, input: ResolveInput, role: AgentFileRole): string {
     const definition = AGENT_DEFINITIONS[agentId];
     const spec = definition.files.find((item) => item.role === role);
-    if (!spec) throw new Error(`Agent ${agentId} 未声明 ${role} 文件`);
+    if (!spec) throw new Error(`Agent ${agentId} does not declare a ${role} file`);
     return path.join(this.agentRoot(agentId, input), spec.relativePath);
   }
 }

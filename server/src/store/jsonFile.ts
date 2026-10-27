@@ -41,14 +41,16 @@ function quarantine(filePath: string, reason: string, logger?: Logger): void {
   const target = `${filePath}.corrupt-${stamp}`;
   try {
     fs.renameSync(filePath, target);
-    logger?.warn('已隔离损坏的数据文件', { file: path.basename(filePath), target, reason });
-    addWarning(
-      'corrupt_file',
-      `数据文件 ${path.basename(filePath)} 无法解析，已隔离为 ${path.basename(target)} 并以空数据启动。`,
-    );
+    logger?.warn('logs.store.quarantined', { file: path.basename(filePath), target, reason });
+    addWarning('corrupt_file', 'warnings.corruptFileQuarantined', {
+      file: path.basename(filePath),
+      target: path.basename(target),
+    });
   } catch (error) {
-    logger?.error('隔离损坏文件失败', { file: filePath, error });
-    addWarning('corrupt_file', `数据文件 ${path.basename(filePath)} 无法解析且无法隔离。`);
+    logger?.error('logs.store.quarantineFailed', { file: filePath, error });
+    addWarning('corrupt_file', 'warnings.corruptFileNotQuarantined', {
+      file: path.basename(filePath),
+    });
   }
 }
 
@@ -61,7 +63,7 @@ export function createJsonFile<T>(options: JsonFileOptions<T>): JsonFile<T> {
     try {
       raw = fs.readFileSync(filePath, 'utf8');
     } catch (error) {
-      logger?.error('读取数据文件失败', { file: filePath, error });
+      logger?.error('logs.store.readFailed', { file: filePath, error });
       return defaultValue();
     }
     if (raw.trim() === '') return defaultValue();
@@ -70,7 +72,7 @@ export function createJsonFile<T>(options: JsonFileOptions<T>): JsonFile<T> {
     try {
       parsed = JSON.parse(raw);
     } catch (error) {
-      quarantine(filePath, error instanceof Error ? error.message : 'JSON 解析失败', logger);
+      quarantine(filePath, error instanceof Error ? error.message : 'JSON parse failed', logger);
       return defaultValue();
     }
 
@@ -80,7 +82,7 @@ export function createJsonFile<T>(options: JsonFileOptions<T>): JsonFile<T> {
       if (version > schemaVersion) {
         quarantine(
           filePath,
-          `文件版本 ${version} 高于当前支持的 ${schemaVersion}`,
+          `file schemaVersion ${version} is newer than the supported ${schemaVersion}`,
           logger,
         );
         return defaultValue();

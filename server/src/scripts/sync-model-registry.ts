@@ -19,6 +19,7 @@
  * （16 output tokens），只保留返回 2xx 的档位。用于挡掉"数据源声明了、上游却拒绝"
  * 的值（实测 claude-opus-5.5 的 `none` 在上游是 400）。
  */
+import { translate } from '../i18n';
 import { loadConfig } from '../config';
 import { createLogger } from '../logger';
 import { createContext } from '../context';
@@ -76,11 +77,18 @@ async function main(): Promise<void> {
   const ctx = createContext(config, createLogger('error'));
   const service = new ProviderService(ctx.store.forTenant('t_default'), ctx.secrets);
 
-  console.log(`数据目录: ${config.dataDir}`);
-  console.log(`模式: ${write ? '写入' : '演练（加 --write 才落盘）'}`);
-  if (verifyEfforts) {
-    console.log('档位校验: 开启（会真实请求上游，消耗少量额度）');
-  }
+  // CLI 输出跟随 LOG_LANGUAGE（默认中文），与运行日志同一套设置
+  const say = (key: string, params?: Record<string, string | number>): void => {
+    console.log(translate(config.logLanguage, `logs.cli.${key}`, params));
+  };
+  say('dataDir', { dir: config.dataDir });
+  say('mode', {
+    mode: translate(
+      config.logLanguage,
+      write ? 'logs.cli.modeWrite' : 'logs.cli.modeDryRun',
+    ),
+  });
+  if (verifyEfforts) say('verifyEfforts');
   console.log('');
 
   // 两个源独立失败：任一可用就继续，都不可用才退出
@@ -89,17 +97,17 @@ async function main(): Promise<void> {
     fetchModelRegistry({ force: true }),
   ]);
   if (!info && !registry) {
-    console.error(
-      '两个数据源都不可用（网络不可达或响应结构不符）。\n' +
-        '现有配置不受影响；内网可分别用 MODELINFO_URL / MODELS_DEV_URL 指向同构镜像。',
-    );
+    console.error(translate(config.logLanguage, 'logs.cli.sourcesUnavailable'));
     process.exitCode = 1;
     return;
   }
-  console.log(
-    `modelinfo.dev: ${info ? `${Object.keys(info).length} 条` : '不可用'}` +
-      ` | models.dev: ${registry ? `${Object.keys(registry).length} 条` : '不可用'}`,
-  );
+  const describe = (value: unknown): string =>
+    value
+      ? translate(config.logLanguage, 'logs.cli.countItems', {
+          count: Object.keys(value as object).length,
+        })
+      : translate(config.logLanguage, 'logs.cli.unavailable');
+  say('sourceStats', { info: describe(info), registry: describe(registry) });
   console.log('');
 
   let changedProviders = 0;
@@ -136,7 +144,12 @@ async function main(): Promise<void> {
           else dropped.push(effort);
         }
         if (dropped.length > 0) {
-          lines.push(`    ${model}: 上游拒绝档位 ${dropped.join(', ')}`);
+          lines.push(
+            translate(config.logLanguage, 'logs.cli.effortRejected', {
+              model,
+              levels: dropped.join(', '),
+            }),
+          );
         }
         merged = { ...merged, reasoningEfforts: kept };
         // 全被拒绝说明这个模型实际不支持 reasoning，别留一个空壳
@@ -146,7 +159,11 @@ async function main(): Promise<void> {
       if (merged) next[model] = merged;
 
       const fmtEfforts = (values: string[] | undefined): string =>
-        values === undefined ? '未知' : values.length === 0 ? '（无）' : values.join('/');
+        values === undefined
+          ? translate(config.logLanguage, 'logs.cli.unknown')
+          : values.length === 0
+            ? translate(config.logLanguage, 'logs.cli.none')
+            : values.join('/');
       const beforeEfforts = before?.reasoningEfforts;
       const afterEfforts = merged?.reasoningEfforts;
       const beforeCtx = before?.contextWindow;
@@ -161,18 +178,21 @@ async function main(): Promise<void> {
           v === undefined ? '—' : v.toLocaleString('en-US');
         lines.push(
           `    ${model}: ctx ${num(beforeCtx)} → ${num(afterCtx)} | ` +
-            `档位 ${fmtEfforts(beforeEfforts)} → ${fmtEfforts(afterEfforts)}`,
+            translate(config.logLanguage, 'logs.cli.effortChanged', {
+              before: fmtEfforts(beforeEfforts),
+              after: fmtEfforts(afterEfforts),
+            }),
         );
       }
     }
 
     if (changed === 0) {
-      console.log(`${record.name}: 无变化（${record.models.length} 个模型）`);
+      say('unchanged', { name: record.name, count: record.models.length });
       continue;
     }
 
     changedProviders += 1;
-    console.log(`${record.name}: ${changed}/${record.models.length} 个模型有更新`);
+    say('changedCount', { name: record.name, changed, total: record.models.length });
     for (const line of lines) console.log(line);
 
     if (write) {
@@ -188,16 +208,16 @@ async function main(): Promise<void> {
 
   console.log('');
   if (verifyEfforts) {
-    console.log(`档位校验共发出 ${verifiedRequests} 次上游请求。`);
+    say('verifiedRequests', { count: verifiedRequests });
   }
   if (changedProviders === 0) {
-    console.log('全部供应商都已是最新，无需写入。');
+    say('allUpToDate');
     return;
   }
   console.log(
     write
-      ? `已写入 ${changedProviders} 家供应商。记得重新「应用配置」让 Codex 目录生效。`
-      : `共 ${changedProviders} 家供应商待更新。确认无误后加 --write 落盘。`,
+      ? translate(config.logLanguage, 'logs.cli.wroteProviders', { count: changedProviders })
+      : translate(config.logLanguage, 'logs.cli.pendingProviders', { count: changedProviders }),
   );
 }
 

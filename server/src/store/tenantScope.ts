@@ -149,7 +149,7 @@ export function createStore(
     paths,
     identity,
     forTenant(tenantId: string): TenantRepos {
-      if (!tenantId) throw new Error('forTenant 需要显式 tenantId');
+      if (!tenantId) throw new Error('forTenant requires an explicit tenantId');
       const existing = cache.get(tenantId);
       if (existing) return existing;
       const created = build(tenantId);

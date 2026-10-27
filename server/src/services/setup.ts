@@ -85,7 +85,7 @@ export class SetupService {
 
     if (!verifySetupToken(input.token, state.tokenHash)) {
       this.setup.write({ ...state, failedAttempts: state.failedAttempts + 1 });
-      this.logger.warn('初始化令牌校验失败', {
+      this.logger.warn('logs.setup.tokenRejected', {
         failedAttempts: state.failedAttempts + 1,
       });
       // 不回显令牌，也不透露 state 里的任何值：报错本身就是攻击面的探针
@@ -142,7 +142,7 @@ export class SetupService {
     });
     ensureTenantFiles(this.paths);
 
-    this.logger.info('已完成首次初始化', {
+    this.logger.info('logs.setup.completed', {
       username: user.username,
       tenantId: user.tenantId,
       role: user.role,

@@ -46,7 +46,7 @@ export function applyJsonWrites(content: string, writes: DesiredWrites[]): strin
   if (content.trim() !== '') {
     const candidate: unknown = JSON.parse(content);
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-      throw new Error('目标 JSON 顶层不是对象，拒绝覆盖');
+      throw new Error('target JSON is not an object at the top level; refusing to overwrite');
     }
     parsed = candidate as Record<string, unknown>;
   }
@@ -65,7 +65,9 @@ export function applyJsonWrites(content: string, writes: DesiredWrites[]): strin
       }
       if (!next || typeof next !== 'object' || Array.isArray(next)) {
         // 已有同名的非对象值：不擅自覆盖用户结构，直接报错让用户处理
-        throw new Error(`字段 ${segments.slice(0, i + 1).join('.')} 不是对象，无法写入`);
+        throw new Error(
+          `field ${segments.slice(0, i + 1).join('.')} is not an object; cannot write into it`,
+        );
       }
       cursor = next as Record<string, unknown>;
     }
