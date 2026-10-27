@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "main": "dist/index.js",
+  "license": "MIT",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
