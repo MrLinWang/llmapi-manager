@@ -96,6 +96,30 @@ export interface TenantSettings {
    */
   disableCodexWebSearch: boolean;
   /**
+   * 写进 `[model_providers.llmapi]` 的 `stream_max_retries`：流式响应被掐断后
+   * Codex 最多重连几次。null 表示**不写该键**，用 Codex 内置默认的 5 次。
+   *
+   * 默认 10（而不是 null）：实测聚合链路会在约 60 秒无数据时被上游/反代掐断，
+   * 而多数请求重试一两次就能拿到完整响应。默认 5 次时，遇到连续几次掐断就会
+   * "重试耗尽 → 整轮失败"；放到 10 次能显著减少这种整轮失败。
+   *
+   * 注意它**不能消除重连本身**，只是提高"重连后还能继续"的概率 —— 根因在链路。
+   *
+   * 上限 100：Codex 内部用 `.min(MAX_STREAM_MAX_RETRIES)` 静默截断，
+   * 所以超出范围必须在保存时就拒绝，否则用户以为填 200 生效了。
+   */
+  codexStreamMaxRetries: number | null;
+  /**
+   * 写进 `[model_providers.llmapi]` 的 `stream_idle_timeout_ms`：等待流式响应
+   * 有活动的最长时间，超过即判定连接已死。null 表示不写，用 Codex 默认 300000（5 分钟）。
+   *
+   * 默认 600000（10 分钟）：放宽的是 **Codex 自己的 SSE 空闲判据**，
+   * 用来覆盖"上游在长推理期间长时间不吐数据"的场景。
+   * 它管不了"反代在 60 秒无数据时主动掐断"那类问题 —— 那种情况下连接已经断了，
+   * 客户端等多久都没用，只能靠上面的重试次数兜住。
+   */
+  codexStreamIdleTimeoutMs: number | null;
+  /**
    * 按 Agent 分开的下发偏好。键是 AgentId（codex / claude-code）。
    *
    * 分开存是必要的：Codex 与 Claude Code 协议不同、用途也可能不同，
@@ -104,6 +128,20 @@ export interface TenantSettings {
   agentTargets: Partial<Record<AgentId, AgentTargetPreference>>;
   updatedAt: string;
 }
+
+/**
+ * 两个下发数值的允许范围。定义在这里而不是各层各写一份，
+ * 是为了让路由校验、前端提示、文档三者永远不会说成不同的数。
+ *
+ * - `stream_max_retries` 允许 0（明确表示"不重试"，Codex 自身也有 `Some(0)` 的用例）
+ * - `stream_idle_timeout_ms` 下限 1 秒（再低必然误判），上限 1 小时（再长只会掩盖故障）
+ */
+export const CODEX_STREAM_MAX_RETRIES_RANGE = { min: 0, max: 100 } as const;
+export const CODEX_STREAM_IDLE_TIMEOUT_RANGE = { min: 1_000, max: 3_600_000 } as const;
+
+/** 推荐的默认值，来自实测：断流间隔 42–64 秒、多数请求重试一两次即恢复。 */
+export const DEFAULT_CODEX_STREAM_MAX_RETRIES = 10;
+export const DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_MS = 600_000;
 
 export function defaultTenantSettings(): TenantSettings {
   return {
@@ -114,6 +152,9 @@ export function defaultTenantSettings(): TenantSettings {
     gatewayToken: null,
     // 默认关闭：绝大多数聚合上游会因此报错，关掉才是能直接跑通的配置。
     disableCodexWebSearch: true,
+    // 仅写进 config.toml（需重新 apply 才生效），不影响网关转发行为。
+    codexStreamMaxRetries: DEFAULT_CODEX_STREAM_MAX_RETRIES,
+    codexStreamIdleTimeoutMs: DEFAULT_CODEX_STREAM_IDLE_TIMEOUT_MS,
     agentTargets: {},
     updatedAt: new Date().toISOString(),
   };

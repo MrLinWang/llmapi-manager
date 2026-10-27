@@ -17,7 +17,7 @@ import {
   type DesiredWrites,
 } from '../src/agents/patch';
 import { buildModelCatalog } from '../src/domain/modelCatalog';
-import { applyTomlEdits, readTomlScalar } from '../src/agents/toml';
+import { applyTomlEdits, readTomlScalar, removeTomlKeyIfValue } from '../src/agents/toml';
 import { AGENT_DEFINITIONS } from '../src/agents/registry';
 
 const tempDirs: string[] = [];
@@ -144,12 +144,63 @@ describe('TOML 补丁', () => {
     expect(readTomlScalar(next, 'requires_openai_auth', 'model_providers.llmapi')).toBe('true');
   });
 
+  it('流式参数按 raw 写整数，而不是带引号的字符串', () => {
+    // 这两个是 ModelProviderInfo 的 u64 字段。写成 "10" 在 TOML 里是字符串，
+    // Codex 会判类型不符——与 requires_openai_auth 写布尔是同一类坑。
+    const next = applyTomlEdits('', [
+      { key: 'stream_max_retries', value: '10', raw: true, table: 'model_providers.llmapi' },
+      { key: 'stream_idle_timeout_ms', value: '600000', raw: true, table: 'model_providers.llmapi' },
+    ]);
+    expect(next).toContain('stream_max_retries = 10');
+    expect(next).not.toContain('stream_max_retries = "10"');
+    expect(next).toContain('stream_idle_timeout_ms = 600000');
+    // 读回是不带引号的裸文本，快照与还原比对才能对上
+    expect(readTomlScalar(next, 'stream_max_retries', 'model_providers.llmapi')).toBe('10');
+  });
+
+  it('清空流式参数时删除已有键（不写会残留）', () => {
+    // 关键场景：这两个键可能已被上一次 apply 或用户手工写进文件。
+    // 只"不写"会让它留在原地 —— 界面显示未设置、文件里仍生效。
+    const withKeys = applyTomlEdits('', [
+      { key: 'stream_max_retries', value: '10', raw: true, table: 'model_providers.llmapi' },
+      { key: 'stream_idle_timeout_ms', value: '600000', raw: true, table: 'model_providers.llmapi' },
+    ]);
+    expect(withKeys).toContain('stream_max_retries = 10');
+
+    const removed = removeTomlKeyIfValue(
+      withKeys,
+      'stream_max_retries',
+      '10',
+      'model_providers.llmapi',
+    );
+    expect(removed.removed).toBe(true);
+    expect(removed.content).not.toContain('stream_max_retries');
+    // 另一个键不受影响
+    expect(removed.content).toContain('stream_idle_timeout_ms = 600000');
+  });
+
+  it('用户手改过的流式参数不被删除', () => {
+    // 用户把 10 改成了 3：当前值不再等于我们写入的值，必须保留并报冲突，
+    // 否则一次 apply 就会抹掉用户的调整。
+    const edited = applyTomlEdits('', [
+      { key: 'stream_max_retries', value: '3', raw: true, table: 'model_providers.llmapi' },
+    ]);
+    const result = removeTomlKeyIfValue(
+      edited,
+      'stream_max_retries',
+      '10',
+      'model_providers.llmapi',
+    );
+    expect(result.removed).toBe(false);
+    expect(result.content).toContain('stream_max_retries = 3');
+    expect(result.currentValue).toBe('3');
+  });
+
   it('非 raw 的字符串值仍然带引号', () => {
     const next = applyTomlEdits('', [
       { key: 'wire_api', value: 'responses', table: 'model_providers.llmapi' },
     ]);
-    expect(next).toContain('wire_api = "responses"');
-  });
+    expect(next).toContain('wire_api = "responses"');  });
 
   it('Codex 模型目录包含 Codex 解析器要求的必填字段', () => {
     // 字段口径按 `codex debug models` 导出的官方目录对齐（不写死版本号：

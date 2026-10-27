@@ -277,6 +277,13 @@ export class AgentService {
   private buildPlan(principal: Principal, agentId: AgentId): AgentPlan {
     const settings = this.repos.settings.read();
     const providers = this.providerService.listRecords();
+    // 上一次 apply 写进文件的值。**只为删除用**：像 stream_max_retries 这种
+    // 可配置数值，清空时要知道"上次写的是几"才能安全地把它删掉
+    // （removeTomlKeyIfValue 只在当前值仍等于 expected 时才删，
+    // 传空串会永远匹配不上，键就残留了）。
+    const previousBinding = this.repos.agents.getBinding(agentId);
+    const previousValue = (role: AgentFileRole, key: string): string =>
+      previousBinding?.files.find((file) => file.role === role)?.values[key] ?? '';
 
     // 模式按 Agent 各自读取：Codex 与 Claude Code 协议不同、用途也可能不同，
     // 一个全局开关会强迫两者同步切换，这是实际使用中不合理的。
@@ -299,8 +306,7 @@ export class AgentService {
     // 直连不需要网关令牌（用的是上游自己的 Key），只在网关模式下强制要求。
     if (!direct && !token) {
       throw badRequest('尚未生成网关令牌，请先在"模型聚合"页生成');
-    }
-    if (provider.models.length === 0) {
+    }    if (provider.models.length === 0) {
       throw badRequest(`供应商 ${provider.name} 未声明任何模型，请先在供应商页补充模型`);
     }
 
@@ -461,6 +467,55 @@ export class AgentService {
                 raw: true,
                 table: 'model_providers.llmapi',
               },
+              // 流式重连次数与空闲超时。这两项都是 ModelProviderInfo 里的 u64 字段，
+              // 同样是 raw（不加引号）——写成 "10" 在 TOML 里是字符串，Codex 判类型不符。
+              //
+              // 设置值为 null 时必须发**删除**指令而不是"不写"：这两个键很可能已经被
+              // 上一次 apply（或用户手工）写进文件，只"不写"会把它留在原地，
+              // 界面显示"未设置"但文件里仍生效，是最难排查的一类不一致。
+              // 删除只在当前值仍等于我们写入值时执行，用户手改过的值会保留。
+              ...(settings.codexStreamMaxRetries !== null
+                ? [
+                    {
+                      path: 'stream_max_retries',
+                      value: String(settings.codexStreamMaxRetries),
+                      raw: true,
+                      table: 'model_providers.llmapi',
+                    },
+                  ]
+                : [
+                    {
+                      path: 'stream_max_retries',
+                      // 删除时用**上次实际写入的值**作比对基准（取自绑定快照）。
+                      // 传空串会永远匹配不上，键就残留了——那正是"界面显示未设置、
+                      // 文件里仍生效"的来源。用户若手改过该值，比对不上会保留他的改动。
+                      value: previousValue('config', '[model_providers.llmapi] stream_max_retries'),
+                      raw: true,
+                      table: 'model_providers.llmapi',
+                      remove: true,
+                    },
+                  ]),
+              ...(settings.codexStreamIdleTimeoutMs !== null
+                ? [
+                    {
+                      path: 'stream_idle_timeout_ms',
+                      value: String(settings.codexStreamIdleTimeoutMs),
+                      raw: true,
+                      table: 'model_providers.llmapi',
+                    },
+                  ]
+                : [
+                    {
+                      path: 'stream_idle_timeout_ms',
+                      value: previousValue(
+                        'config',
+                        '[model_providers.llmapi] stream_idle_timeout_ms',
+                      ),
+                      raw: true,
+                      table: 'model_providers.llmapi',
+                      remove: true,
+                    },
+                  ]),
             ],
             // 直连写上游真实 Key；网关模式写网关令牌。
             auth: [{ path: 'OPENAI_API_KEY', value: direct ? plainKey : token }],

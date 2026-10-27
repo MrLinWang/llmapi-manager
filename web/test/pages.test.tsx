@@ -399,6 +399,8 @@ describe('前端页面装配', () => {
       '/api/providers': { providers },
       '/api/settings': {
         defaultProviderId: null, defaultModel: null, disableCodexWebSearch: true,
+        // 两个流式参数：默认值与服务端一致（实测得出的 10 次 / 10 分钟）
+        codexStreamMaxRetries: 10, codexStreamIdleTimeoutMs: 600000,
         approvalReviewModel: null, protocolConversion: false,
         agentTargets: { codex: { mode: 'gateway', directProviderId: null, directModel: null, autoReviewModel: null } },
         gatewayBaseUrl: 'http://127.0.0.1:8787/v1',
@@ -434,6 +436,15 @@ describe('前端页面装配', () => {
     expect(gptOption).toContain('wllapi');
     // 同名模型只出现一次（设置里只存模型名，重复行会让人以为能选供应商）
     expect(labels.filter((text) => text.startsWith('gpt-6-luna'))).toHaveLength(1);
+
+    // 两个流式参数要预填服务端已存的值，否则用户会以为没设置过
+    const retries = (await screen.findByLabelText('流式重连上限')) as HTMLInputElement;
+    const idle = (await screen.findByLabelText('流式空闲超时')) as HTMLInputElement;
+    expect(retries.value).toBe('10');
+    expect(idle.value).toBe('600000');
+    // 范围提示必须写在界面上，否则用户不知道该填多少（Codex 会静默截断超限值）
+    expect(document.body.textContent).toContain('允许 0–100');
+    expect(document.body.textContent).toContain('允许 1000–3600000');
     setOverrides({});
   });
 

@@ -7,9 +7,48 @@ import { ProviderService } from '../services/providers';
 import { ALIAS_PREFIX, listAliases } from '../domain/aliases';
 import { createGatewayTokenMeta, viewTokenMeta } from '../gateway/token';
 import { badRequest } from '../http/errors';
-import { AGENT_CONNECTION_MODES, type AgentConnectionMode, type TenantSettings } from '../domain/settings';
+import {
+  AGENT_CONNECTION_MODES,
+  CODEX_STREAM_IDLE_TIMEOUT_RANGE,
+  CODEX_STREAM_MAX_RETRIES_RANGE,
+  type AgentConnectionMode,
+  type TenantSettings,
+} from '../domain/settings';
 import { getAgentDefinition } from '../agents/registry';
 import { notFound } from '../http/errors';
+
+/**
+ * 解析「可空整数 + 范围」类型的设置项。
+ *
+ * 有三条刻意的严格性，都是为了避免"保存成功但实际没按预期生效"：
+ * 1. **不接受字符串**：`"10"` 看着能用，但环境变量/表单都容易把它变成字符串，
+ *    静默转换会让前端与后端对"是否合法"的判断不一致。
+ * 2. **必须是整数**：`10.5` 次重试没有意义，而 Math.floor 会掩盖输入错误。
+ * 3. **越界直接报错**：Codex 对 `stream_max_retries` 超过上限是静默截断，
+ *    放过去会让用户以为设置生效了。
+ *
+ * null 表示"不写该键，用 Codex 默认值"，是合法输入。
+ */
+function parseBoundedInteger(
+  raw: unknown,
+  field: string,
+  range: { min: number; max: number },
+  suffix: string,
+): number | null {
+  if (raw === null) return null;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    throw badRequest(`${field} 必须是数字或 null`);
+  }
+  if (!Number.isInteger(raw)) {
+    throw badRequest(`${field} 必须是整数`);
+  }
+  if (raw < range.min || raw > range.max) {
+    throw badRequest(
+      `${field} 必须是 ${range.min}–${range.max} 的整数${suffix}`,
+    );
+  }
+  return raw;
+}
 
 export function registerModelRoutes(
   app: FastifyInstance,
@@ -60,6 +99,8 @@ export function registerModelRoutes(
         disableCodexWebSearch: settings.disableCodexWebSearch,
         approvalReviewModel: settings.approvalReviewModel,
         protocolConversion: settings.protocolConversion,
+        codexStreamMaxRetries: settings.codexStreamMaxRetries,
+        codexStreamIdleTimeoutMs: settings.codexStreamIdleTimeoutMs,
         agentTargets: settings.agentTargets,
         gatewayBaseUrl: `${ctx.config.publicBaseUrl}/v1`,
         token: viewTokenMeta(settings),
@@ -147,6 +188,8 @@ export function registerModelRoutes(
         disableCodexWebSearch?: unknown;
         approvalReviewModel?: unknown;
         protocolConversion?: unknown;
+        codexStreamMaxRetries?: unknown;
+        codexStreamIdleTimeoutMs?: unknown;
       };
       const settings = repos.settings.read();
 
@@ -170,6 +213,25 @@ export function registerModelRoutes(
         const model = body.approvalReviewModel as string | null;
         next.approvalReviewModel = model === '' ? null : model;
       }
+      // 流式参数：null = 不写该键（用 Codex 默认），数字 = 写进 provider 段。
+      // 必须在这里就挡住越界值：Codex 对 stream_max_retries 超过 100 是**静默截断**，
+      // 用户填 200 却以为生效，排查时会怀疑"设置没保存"。
+      if (body.codexStreamMaxRetries !== undefined) {
+        next.codexStreamMaxRetries = parseBoundedInteger(
+          body.codexStreamMaxRetries,
+          'codexStreamMaxRetries',
+          CODEX_STREAM_MAX_RETRIES_RANGE,
+          '（Codex 对超过上限的值会静默截断，所以在这里直接拒绝）',
+        );
+      }
+      if (body.codexStreamIdleTimeoutMs !== undefined) {
+        next.codexStreamIdleTimeoutMs = parseBoundedInteger(
+          body.codexStreamIdleTimeoutMs,
+          'codexStreamIdleTimeoutMs',
+          CODEX_STREAM_IDLE_TIMEOUT_RANGE,
+          '',
+        );
+      }
       next.updatedAt = new Date().toISOString();
       repos.settings.write(next);
 
@@ -177,6 +239,8 @@ export function registerModelRoutes(
         disableCodexWebSearch: next.disableCodexWebSearch,
         approvalReviewModel: next.approvalReviewModel,
         protocolConversion: next.protocolConversion,
+        codexStreamMaxRetries: next.codexStreamMaxRetries,
+        codexStreamIdleTimeoutMs: next.codexStreamIdleTimeoutMs,
         // 提示调用方：这项改动要重新"应用配置"才会写进 Agent 的文件
         requiresReapply: true,
       };

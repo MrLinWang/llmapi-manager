@@ -150,13 +150,16 @@ export const api = {
       disableCodexWebSearch: boolean;
       approvalReviewModel: string | null;
       protocolConversion: boolean;
+      codexStreamMaxRetries: number | null;
+      codexStreamIdleTimeoutMs: number | null;
       agentTargets: Record<string, AgentTargetPreference>;
     }>('/api/settings'),
   /**
-   * 改 Codex 的三个行为开关。
+   * 改 Codex 的行为开关与下发数值。
    *
-   * 服务端一律返回 requiresReapply: true，但三个开关要不要真的重新 apply 并不相同：
-   * - disableCodexWebSearch：写进 config.toml，必须重新 apply 才生效；
+   * 服务端一律返回 requiresReapply: true，但要不要真的重新 apply 并不相同：
+   * - disableCodexWebSearch / codexStreamMaxRetries / codexStreamIdleTimeoutMs：
+   *   都写进 config.toml，必须重新 apply 才生效；
    * - approvalReviewModel / protocolConversion：纯网关侧运行时行为，不改下发文件，
    *   所以调用方**不要**跟着 apply（AgentsPage 就是按这个区别处理的）。
    */
@@ -164,11 +167,15 @@ export const api = {
     disableCodexWebSearch?: boolean;
     approvalReviewModel?: string | null;
     protocolConversion?: boolean;
+    codexStreamMaxRetries?: number | null;
+    codexStreamIdleTimeoutMs?: number | null;
   }) =>
     request<{
       disableCodexWebSearch: boolean;
       approvalReviewModel: string | null;
       protocolConversion: boolean;
+      codexStreamMaxRetries: number | null;
+      codexStreamIdleTimeoutMs: number | null;
       requiresReapply: boolean;
     }>('/api/settings/codex', { method: 'PATCH', body: JSON.stringify(input) }),
   /**

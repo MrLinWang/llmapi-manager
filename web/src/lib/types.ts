@@ -238,6 +238,10 @@ export interface GatewayOverview {
     protocolConversion: boolean;
     approvalReviewModel: string | null;
     disableCodexWebSearch: boolean;
+    /** 写进 config.toml 的 stream_max_retries；null = 不写，用 Codex 默认 */
+    codexStreamMaxRetries: number | null;
+    /** 写进 config.toml 的 stream_idle_timeout_ms；null = 不写，用 Codex 默认 */
+    codexStreamIdleTimeoutMs: number | null;
     agentTargets: Record<string, AgentTargetPreference>;
   };
   agents: Array<{

@@ -893,6 +893,97 @@ describe('冒烟：Agent 下发', () => {
     expect(bad.statusCode).toBe(400);
   });
 
+  it('流式参数默认写入 10/600000，清空后删除干净', async () => {
+    // 默认预设来自实测（断流间隔 42–64 秒、多数请求重试一两次即恢复）。
+    const initial = await call('GET', '/api/settings', undefined, { cookie });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json().codexStreamMaxRetries).toBe(10);
+    expect(initial.json().codexStreamIdleTimeoutMs).toBe(600000);
+
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const configPath = (
+      await call('POST', '/api/agents/codex/preview', undefined, { cookie })
+    )
+      .json()
+      .files.find((file: { role: string }) => file.role === 'config').path;
+
+    const withDefaults = fs.readFileSync(configPath, 'utf8');
+    // 必须是裸整数，不能带引号——带引号在 TOML 里是字符串，Codex 判类型不符
+    expect(withDefaults).toContain('stream_max_retries = 10');
+    expect(withDefaults).not.toContain('stream_max_retries = "10"');
+    expect(withDefaults).toContain('stream_idle_timeout_ms = 600000');
+
+    // 清空为 null → 重新 apply 后两行都要消失。
+    // 这条覆盖"用户机器上本来就有这两行"的真实场景：只"不写"会残留。
+    const cleared = await call(
+      'PATCH',
+      '/api/settings/codex',
+      { codexStreamMaxRetries: null, codexStreamIdleTimeoutMs: null },
+      { cookie },
+    );
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().codexStreamMaxRetries).toBeNull();
+    expect(cleared.json().codexStreamIdleTimeoutMs).toBeNull();
+
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const afterClear = fs.readFileSync(configPath, 'utf8');
+    expect(afterClear).not.toContain('stream_max_retries');
+    expect(afterClear).not.toContain('stream_idle_timeout_ms');
+
+    // 改回自定义值 → 写回
+    await call(
+      'PATCH',
+      '/api/settings/codex',
+      { codexStreamMaxRetries: 3, codexStreamIdleTimeoutMs: 120000 },
+      { cookie },
+    );
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const restored = fs.readFileSync(configPath, 'utf8');
+    expect(restored).toContain('stream_max_retries = 3');
+    expect(restored).toContain('stream_idle_timeout_ms = 120000');
+
+    // 复原成默认，避免影响后续用例
+    await call(
+      'PATCH',
+      '/api/settings/codex',
+      { codexStreamMaxRetries: 10, codexStreamIdleTimeoutMs: 600000 },
+      { cookie },
+    );
+  });
+
+  it('流式参数越界/小数/字符串一律 400，不静默截断', async () => {
+    // Codex 对 stream_max_retries 超过 100 是静默截断，所以必须在这层就拒绝，
+    // 否则用户填 200 会以为生效了。
+    const over = await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: 200 }, { cookie });
+    expect(over.statusCode).toBe(400);
+    expect(over.json().error.message).toContain('100');
+
+    const negative = await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: -1 }, { cookie });
+    expect(negative.statusCode).toBe(400);
+
+    const fraction = await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: 2.5 }, { cookie });
+    expect(fraction.statusCode).toBe(400);
+    expect(fraction.json().error.message).toContain('整数');
+
+    // 字符串不接受：'10' 看着能用，但静默转换会让前后端判断不一致
+    const str = await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: '10' }, { cookie });
+    expect(str.statusCode).toBe(400);
+
+    // 空闲超时的下限（1 秒）与上限（1 小时）
+    const tooSmall = await call('PATCH', '/api/settings/codex', { codexStreamIdleTimeoutMs: 500 }, { cookie });
+    expect(tooSmall.statusCode).toBe(400);
+    const tooLarge = await call('PATCH', '/api/settings/codex', { codexStreamIdleTimeoutMs: 7200000 }, { cookie });
+    expect(tooLarge.statusCode).toBe(400);
+
+    // 0 次重试是合法值（明确表示不重试）
+    const zero = await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: 0 }, { cookie });
+    expect(zero.statusCode).toBe(200);
+    expect(zero.json().codexStreamMaxRetries).toBe(0);
+
+    // 复原
+    await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: 10 }, { cookie });
+  });
+
   it('结束 Codex 进程的接口受权限保护，且对 Claude Code 明确说明不支持', async () => {
     // 未登录 → 401
     const anonymous = await app.inject({ method: 'POST', url: '/api/agents/codex/stop-processes' });

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import { api, ApiError } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
 import type { AgentConnectionMode, AgentTargetPreference, AgentPreview, Provider } from '../lib/types';
@@ -78,6 +78,33 @@ export default function AgentsPage(): JSX.Element {
   // 提示里可能带内联命令（<code>），所以存 ReactNode 而不是 string。
   const [error, setError] = useState<ReactNode>(null);
   const [message, setMessage] = useState<ReactNode>(null);
+  /**
+   * 两个流式参数的输入框文本。
+   *
+   * 存字符串而不是 number：用户可能正在删改（空串、只输了个 "-"），
+   * 直接绑 number 会让"清空"这一步无法表达。空串在提交时转成 null（=不写该键）。
+   */
+  const [streamMaxRetries, setStreamMaxRetries] = useState('');
+  const [streamIdleTimeoutMs, setStreamIdleTimeoutMs] = useState('');
+  // label 与输入框的关联 id。用 useId 而不是写死：同一页面会渲染多个 Agent 卡片，
+  // 固定 id 会让 label 指到别的卡片上的输入框（ProviderForm 里有同样的约定）。
+  const streamRetriesId = useId();
+  const streamIdleId = useId();
+
+  // 设置加载/刷新后同步到输入框。用 useEffect 而不是把 settings 直接当 value：
+  // 编辑中的内容不该被任何一次后台 reload 覆盖掉。
+  useEffect(() => {
+    const data = settings.data;
+    if (!data) return;
+    setStreamMaxRetries(
+      data.codexStreamMaxRetries === null ? '' : String(data.codexStreamMaxRetries),
+    );
+    setStreamIdleTimeoutMs(
+      data.codexStreamIdleTimeoutMs === null ? '' : String(data.codexStreamIdleTimeoutMs),
+    );
+    // 只在服务端数据变化时同步一次；把 settings.data 拆成两个字段作依赖，
+    // 避免 reload 生成新对象引用时把用户正在输入的内容冲掉。
+  }, [settings.data?.codexStreamMaxRetries, settings.data?.codexStreamIdleTimeoutMs]);
 
   /**
    * 统一的操作包装：置忙、清提示、收错误。
@@ -180,6 +207,66 @@ export default function AgentsPage(): JSX.Element {
       agents.reload();
       if (preview?.agentId === 'codex') setPreview(await api.previewAgent('codex'));
     });
+
+  /**
+   * 保存流式重连次数 / 空闲超时，并立即重新 apply。
+   *
+   * 与 web_search 同理：这两项直接决定我们写进 config.toml 的值，
+   * 不重写文件等于没改。空输入表示"不写该键，用 Codex 默认"，提交 null。
+   *
+   * 前端这里只做**最基本的**空值转换，范围校验交给服务端：
+   * 同一套范围常量只在 server/src/domain/settings.ts 定义一份，
+   * 前端复刻一遍迟早会与后端说成不同的数。
+   */
+  const saveCodexStreamOptions = (input: {
+    codexStreamMaxRetries?: number | null;
+    codexStreamIdleTimeoutMs?: number | null;
+    hint: string;
+  }): Promise<void> =>
+    run('toggle:stream', async () => {
+      await api.setCodexOptions({
+        codexStreamMaxRetries: input.codexStreamMaxRetries,
+        codexStreamIdleTimeoutMs: input.codexStreamIdleTimeoutMs,
+      });
+      await api.applyAgent('codex');
+      setMessage(`${input.hint}已重新应用配置。重启 Codex 后生效。`);
+      settings.reload();
+      agents.reload();
+      if (preview?.agentId === 'codex') setPreview(await api.previewAgent('codex'));
+    });
+
+  /**
+   * 失焦即保存。空串 → null（不写该键）；非空则交给服务端按范围校验。
+   *
+   * 值没变时不发请求：失焦是高频事件，每次点开再点走都写一遍盘没有意义。
+   */
+  const persistStreamOptions = (): Promise<void> => {
+    const nextRetries = streamMaxRetries.trim() === '' ? null : Number(streamMaxRetries);
+    const nextIdle = streamIdleTimeoutMs.trim() === '' ? null : Number(streamIdleTimeoutMs);
+    const unchanged =
+      nextRetries === (settings.data?.codexStreamMaxRetries ?? null) &&
+      nextIdle === (settings.data?.codexStreamIdleTimeoutMs ?? null);
+    if (unchanged) return Promise.resolve();
+
+    // 上下限在这里**不判断**：交给服务端，避免处出现两套规则。
+    // 但仍然挡掉明显不是数字的输入，否则会先发一个必然 400 的请求。
+    if (
+      (nextRetries !== null && !Number.isFinite(nextRetries)) ||
+      (nextIdle !== null && !Number.isFinite(nextIdle))
+    ) {
+      setError('流式参数必须是数字，或留空使用默认值');
+      return Promise.resolve();
+    }
+
+    return saveCodexStreamOptions({
+      codexStreamMaxRetries: nextRetries,
+      codexStreamIdleTimeoutMs: nextIdle,
+      hint:
+        nextRetries === null && nextIdle === null
+          ? '已清空流式参数（改用 Codex 默认）。'
+          : '已保存流式参数并',
+    });
+  };
 
   /**
    * 保存某个 Agent 的连接模式，不自动下发。
@@ -691,6 +778,71 @@ export default function AgentsPage(): JSX.Element {
                     </span>
                   </span>
                 </label>
+
+                {/*
+                  流式重连与空闲超时。两项都是 provider 段里的 u64 字段：
+                  - stream_max_retries：断流后最多重连几次
+                  - stream_idle_timeout_ms：等流式活动的最长时间
+
+                  默认预填 10 / 600000（来自实测）。清空输入框表示"不写该键"，
+                  提交 null，此时 Codex 用内置默认（5 次 / 300000ms）。
+                */}
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <div>
+                    {/*
+                      label 必须用 htmlFor 关联到 input（这里用 useId 生成唯一 id）：
+                      没有关联时点 label 不会聚焦输入框，读屏软件也读不出这是哪个字段。
+                      与 ProviderForm 的处理保持一致。
+                    */}
+                    <label className="label flex items-center gap-1.5" htmlFor={streamRetriesId}>
+                      流式重连上限
+                      {busy === 'toggle:stream' && (
+                        <span className="text-[11px] font-normal text-muted">保存中…</span>
+                      )}
+                    </label>
+                    <input
+                      id={streamRetriesId}
+                      type="number"
+                      className="input font-mono"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={streamMaxRetries}
+                      disabled={settings.loading || busy === 'toggle:stream'}
+                      placeholder="5（Codex 默认）"
+                      onChange={(event) => setStreamMaxRetries(event.target.value)}
+                      onBlur={() => void persistStreamOptions()}
+                    />
+                    <p className="field-hint">
+                      单位：次，允许 0–100。留空表示不写该键、使用 Codex 默认 5 次。
+                    </p>
+                  </div>
+                  <div>
+                    <label className="label" htmlFor={streamIdleId}>流式空闲超时</label>
+                    <input
+                      id={streamIdleId}
+                      type="number"
+                      className="input font-mono"
+                      min={1000}
+                      max={3600000}
+                      step={1000}
+                      value={streamIdleTimeoutMs}
+                      disabled={settings.loading || busy === 'toggle:stream'}
+                      placeholder="300000（Codex 默认）"
+                      onChange={(event) => setStreamIdleTimeoutMs(event.target.value)}
+                      onBlur={() => void persistStreamOptions()}
+                    />
+                    <p className="field-hint">
+                      单位：毫秒，允许 1000–3600000。留空表示使用 Codex 默认 300000（5 分钟）。
+                    </p>
+                  </div>
+                </div>
+                <p className="mt-2 text-[11px] leading-4 text-muted">
+                  链路在空闲约 60 秒时被上游/反向代理掐断的情况下，提高重连上限能减少
+                  「重试耗尽后整轮失败」，但<strong className="text-ink">不能消除重连本身</strong>
+                  ——它只是让每次被掐断后更可能接上。空闲超时放宽的是{' '}
+                  <code className="font-mono">Codex 自己的判据</code>，管不了对端主动断连。
+                </p>
               </div>
             )}
           </Card>

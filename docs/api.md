@@ -278,7 +278,7 @@
 
 ### PATCH /api/settings/codex
 
-权限 `settings:write`。Codex 配置的行为开关。
+权限 `settings:write`。Codex 配置的行为开关与下发数值。
 
 ```json
 { "disableCodexWebSearch": false, "approvalReviewModel": "gpt-6-luna" }
@@ -289,13 +289,24 @@
 | `disableCodexWebSearch` | `true` | 为 `true` 时下发 `web_search = "disabled"`；为 `false` 时**删除**该行（不残留旧值） |
 | `approvalReviewModel` | `null` | 「Approve for me」的模型映射。网关识别出审批请求时，把其 `model`（Codex 硬编码的 `gpt-5.6-luna`）换成此值；`null` 不映射。详见 `docs/gateway.md` |
 | `protocolConversion` | `false` | 跨协议转发。为 `true` 时 `/v1/responses` 可以落到 `openai` 供应商，由网关双向转换（含工具调用与流式）。默认关闭 |
+| `codexStreamMaxRetries` | `10` | 下发 `stream_max_retries`，流被掐断后最多重连几次。**0–100 的整数**；`null` 表示不写该键、用 Codex 默认 5 次 |
+| `codexStreamIdleTimeoutMs` | `600000` | 下发 `stream_idle_timeout_ms`，等流式活动的最长时间（毫秒）。**1000–3600000 的整数**；`null` 表示用 Codex 默认 300000 |
 
 字段可省略（省略即不修改该项，但仍会刷新 `updatedAt`）。传错类型返回 400
 （`disableCodexWebSearch 必须是布尔值` / `approvalReviewModel 必须是字符串或 null`）。
 
-返回 `{ disableCodexWebSearch, requiresReapply: true }` —— 改动只落在设置里，
+两个流式参数额外有三条校验，都是为了避免"保存成功但实际没按预期生效"：
+必须是**数字**（字符串 `"10"` 拒绝）、必须是**整数**（`2.5` 拒绝）、必须在范围内
+（`stream_max_retries` 超过 100 会被 Codex **静默截断**，所以这里直接 400 并说明范围）。
+错误信息形如 `codexStreamMaxRetries 必须是 0–100 的整数（Codex 对超过上限的值会静默截断，所以在这里直接拒绝）`。
+
+设为 `null` 时是**删除**语义，不是"不写"：上一版可能与下过该键，只"不写"会残留，
+导致界面显示未设置、文件里仍生效。删除只在当前值仍等于上次写入值时执行，用户手改过的值会保留。
+
+返回 `{ disableCodexWebSearch, approvalReviewModel, protocolConversion,
+codexStreamMaxRetries, codexStreamIdleTimeoutMs, requiresReapply: true }` —— 改动只落在设置里，
 需要再调一次 `POST /api/agents/codex/apply` 才会写进 `~/.codex/config.toml`
-（前端勾选/取消后会自动补一次 apply）。
+（前端勾选/取消、以及改这两个数值后都会自动补一次 apply）。
 
 ### POST /api/gateway/token
 

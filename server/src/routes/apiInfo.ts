@@ -66,6 +66,8 @@ export function registerApiInfoRoutes(
           protocolConversion: settings.protocolConversion,
           approvalReviewModel: settings.approvalReviewModel,
           disableCodexWebSearch: settings.disableCodexWebSearch,
+          codexStreamMaxRetries: settings.codexStreamMaxRetries,
+          codexStreamIdleTimeoutMs: settings.codexStreamIdleTimeoutMs,
           agentTargets: settings.agentTargets,
         },
         agents: Object.keys(AGENT_DEFINITIONS).map((id) => {

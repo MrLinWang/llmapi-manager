@@ -63,7 +63,38 @@ base_url = "http://127.0.0.1:8787/v1"
 model_catalog_url = "http://127.0.0.1:8787/v1/models"
 wire_api = "responses"        # Codex 现已只接受 responses
 requires_openai_auth = true  # 布尔 true，不是字符串 "true"
+stream_max_retries = 10       # 由 codexStreamMaxRetries 决定，默认 10；整数不加引号
+stream_idle_timeout_ms = 600000  # 由 codexStreamIdleTimeoutMs 决定，默认 600000
 ```
+
+### 流式断流的两个参数：`stream_max_retries` 与 `stream_idle_timeout_ms`
+
+聚合链路（尤其是中间还有反向代理时）常在空闲约 **60 秒**就掐断流式连接，
+表现是 Codex 反复「重连 → 继续」，最终 `stream disconnected before completion:
+Transport error: timeout`。这两个参数是 Codex 官方 `ModelProviderInfo` 的字段，可以缓解。
+
+| 字段 | 默认写入 | 范围 | 作用 |
+| --- | --- | --- | --- |
+| `stream_max_retries` | `10` | 0–100 | 流被掐断后最多重连几次 |
+| `stream_idle_timeout_ms` | `600000` | 1000–3600000 | 等流式活动的最长时间（毫秒） |
+
+Codex 内置默认分别是 5 次和 300000ms；我们默认调高是因为实测断流间隔 42–64 秒、
+而多数请求重试一两次就能拿到完整响应。
+
+几处必须知道的取舍：
+
+- **`stream_max_retries` 有硬上限 100**，Codex 内部用 `.min(MAX_STREAM_MAX_RETRIES)`
+  **静默截断**。所以服务端在保存时就拒绝超限值（400），否则用户填 200 会以为生效了。
+- **`stream_idle_timeout_ms` 没有硬上限**，但服务端限制在 1 秒–1 小时：
+  再低必然误判，再长只会掩盖真实故障。
+- **提高重试次数不能消除重连本身**，只是让每次被掐断后更可能接上。
+  根因在链路（上游或反向代理的读超时），治本要调那一侧。
+- **空了就删，不是"不写"**：把设置清空（null）时会向文件发**删除**指令。
+  只"不写"会让上一版的值残留，界面显示未设置而文件里仍生效 —— 最难排查的一类不一致。
+  删除只在当前值仍等于上次写入值时执行（取自绑定快照），用户手改过的值会保留。
+- 两个值都是 `u64`，必须用 `raw` 标量写入（不加引号）。写成 `"10"` 在 TOML 里是字符串，
+  Codex 会判类型不符 —— 与 `requires_openai_auth` 写布尔是同一类坑。
+
 
 ### 模型目录：`model_catalog_json` 与 `model_catalog_url`
 
