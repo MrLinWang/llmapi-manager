@@ -18,6 +18,12 @@
  * `--verify-efforts` 会真实消耗额度：对每个模型声明的每个档位发一次极小的请求
  * （16 output tokens），只保留返回 2xx 的档位。用于挡掉"数据源声明了、上游却拒绝"
  * 的值（实测 claude-opus-5.5 的 `none` 在上游是 400）。
+ *
+ * 它只校验**数据源已经声明**的档位。数据源没有档位的模型（glm-5.3-flash /
+ * kimi-k2.7-code 这类 `supported=true, efforts=[]`）在这里一个都验不到 ——
+ * 那种情况要用网页上的「逐档实测」（`POST /api/providers/:id/probe-efforts`），
+ * 它会把全部候选档位打一遍。两者共用 `services/effortProbe.ts` 的 `probeEffort()`，
+ * 所以"档位是否被接受"的判定口径只有一份。
  */
 import { translate } from '../i18n';
 import { loadConfig } from '../config';
@@ -27,46 +33,12 @@ import { ProviderService, mergeCapabilities } from '../services/providers';
 import { fetchModelRegistry, lookup as lookupRegistry } from '../services/modelRegistry';
 import { fetchModelInfo, lookup as lookupInfo } from '../services/modelInfo';
 import { API_TYPES, type ModelCapability, type ApiType } from '../domain/provider';
+import { probeEffort } from '../services/effortProbe';
 
 interface VerifyTarget {
   apiType: ApiType;
   baseUrl: string;
   apiKey: string;
-}
-
-/** 向上游发一次极小的 reasoning 请求，判断该档位是否被接受。 */
-async function effortAccepted(
-  target: VerifyTarget,
-  model: string,
-  effort: string,
-): Promise<boolean> {
-  const base = target.baseUrl.trim().replace(/\/+$/, '');
-  const url = base.endsWith('/v1') ? `${base}/responses` : `${base}/v1/responses`;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30_000);
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${target.apiKey}`,
-      },
-      // 只要判定"参数是否被接受"，不需要真实回答，所以把输出压到最小
-      body: JSON.stringify({
-        model,
-        input: 'hi',
-        reasoning: { effort },
-        max_output_tokens: 16,
-        store: false,
-      }),
-      signal: controller.signal,
-    });
-    return response.ok;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 async function main(): Promise<void> {
@@ -140,7 +112,8 @@ async function main(): Promise<void> {
         const dropped: string[] = [];
         for (const effort of merged.reasoningEfforts) {
           verifiedRequests += 1;
-          if (await effortAccepted(target, model, effort)) kept.push(effort);
+          const accepted = await probeEffort(target, model, effort, config.logLanguage);
+          if (accepted.accepted) kept.push(effort);
           else dropped.push(effort);
         }
         if (dropped.length > 0) {

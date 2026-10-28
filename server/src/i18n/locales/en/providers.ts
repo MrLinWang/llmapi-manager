@@ -28,6 +28,11 @@ export const enProviders: typeof zhProviders = {
   models: {
     apiKeyRequired: 'No API key provided, and no saved key available to reuse',
   },
+  probe: {
+    noModels: 'This provider has no models to probe',
+    unsupportedProtocol: 'The {{apiType}} protocol has no reasoning-effort concept',
+    allRejected: 'The upstream rejected every candidate effort level',
+  },
   test: {
     timeout: 'Request timed out ({{seconds}}s)',
     invalidJson: 'Response is not valid JSON: {{detail}}',

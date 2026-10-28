@@ -186,6 +186,26 @@ function installFetch(): void {
     }
 
     const payload = path in overrides ? overrides[path] : routes[path];
+    // 约定：`__ndjson` 是流式响应体（逐行事件，例如逐档实测）。
+    // 客户端在拿不到 response.body 时会退化为整段文本逐行解析。
+    const ndjson = (payload as { __ndjson?: unknown; __delayMs?: unknown } | undefined)
+      ?.__ndjson;
+    if (typeof ndjson === 'string') {
+      // __delayMs 让这条流式响应晚一点返回，便于在测试里观察到"探测中"的进度条；
+      // 默认 0，不影响其他用例。
+      const delayMs =
+        typeof (payload as { __delayMs?: unknown }).__delayMs === 'number'
+          ? ((payload as { __delayMs?: number }).__delayMs as number)
+          : 0;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => {
+          if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+          return ndjson;
+        },
+      } as Response;
+    }
     // 约定：带 `error` 字段的 payload 视为错误响应，按其中的 statusCode 返回
     const err = (payload as { error?: unknown; statusCode?: number } | undefined)?.error
       ? (payload as { statusCode?: number })
@@ -240,6 +260,75 @@ describe('前端页面装配', () => {
     expect(screen.getByRole('button', { name: '新增供应商' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '测试' })).toBeTruthy();
     expect(screen.queryByText('gpt-x-mini')).toBeTruthy();
+  });
+
+  it('供应商页可逐档实测：确认后调用接口并展示接受的档位', async () => {
+    // jsdom 没有实现 window.confirm（直接调用会抛 "Not implemented"），必须 stub。
+    // 用 try/finally 恢复：这条用例失败时也不能把 stub 泄漏给后续用例。
+    const originalConfirm = window.confirm;
+    window.confirm = () => true;
+    requests = [];
+    setOverrides({
+      '/api/providers/p_1/probe-efforts': {
+        // 与服务端一致：NDJSON 流，start → progress* → result
+        __delayMs: 300,
+        __ndjson:
+          [
+            {
+              type: 'start',
+              total: 6,
+              candidates: ['low', 'medium', 'high'],
+              models: ['gpt-x', 'gpt-x-mini'],
+            },
+            { type: 'progress', done: 1, total: 3, model: 'gpt-x', effort: 'low', accepted: true },
+            { type: 'progress', done: 2, total: 3, model: 'gpt-x', effort: 'medium', accepted: true },
+            { type: 'progress', done: 3, total: 3, model: 'gpt-x', effort: 'high', accepted: true },
+            {
+              type: 'result',
+              provider: providers[0],
+              candidates: ['low', 'medium', 'high'],
+              models: [
+                { model: 'gpt-x', accepted: ['low', 'medium', 'high'], rejected: ['none'] },
+              ],
+            },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join('\n') + '\n',
+      },
+    });
+    try {
+      const { render, screen, fireEvent, waitFor } = await import('@testing-library/react');
+      const { AuthProvider } = await import('../src/lib/auth');
+      const ProvidersPage = (await import('../src/pages/ProvidersPage')).default;
+
+      render(
+        <AuthProvider>
+          <ProvidersPage />
+        </AuthProvider>,
+      );
+
+      await screen.findByText('Mock OpenAI');
+      // 图标按钮的 aria-label 就是动作文案，因此可以直接按名字点
+      fireEvent.click(screen.getByRole('button', { name: '逐档实测' }));
+
+      // 等待期间必须能看到进度条（这是本用例的核心回归点：不能只显示一句"请稍候"）
+      const bar = await waitFor(() => screen.getByRole('progressbar'));
+      // 初始分母 = 模型数（2）× 候选档位数（9）——此时服务端 start 事件还没到
+      expect(bar.getAttribute('aria-valuemax')).toBe('18');
+
+      await waitFor(() => expect(screen.getByText('low / medium / high')).toBeTruthy());
+
+      const posted = requests.find(
+        (item) =>
+          item.method === 'POST' && item.path === '/api/providers/p_1/probe-efforts',
+      );
+      expect(posted).toBeDefined();
+      // 无 body 的 POST 不能带 JSON 头：服务端会把空 body 判成 400
+      expect(posted?.headers['content-type']).toBeUndefined();
+    } finally {
+      window.confirm = originalConfirm;
+      setOverrides({});
+    }
   });
 
   it('模型聚合页展示网关地址、脱敏令牌与别名', async () => {

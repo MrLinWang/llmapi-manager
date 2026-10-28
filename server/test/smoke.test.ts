@@ -344,6 +344,154 @@ describe('冒烟：供应商与聚合', () => {
   });
 });
 
+describe('冒烟：逐档实测', () => {
+  it('探测结果写回供应商能力，并保留原有上下文数据', async () => {
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '逐档实测供应商',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-probe',
+        models: ['gpt-x'],
+        modelCapabilities: { 'gpt-x': { contextWindow: 400_000 } },
+        notes: '探测备注',
+        websiteUrl: 'https://example.com/provider',
+        priority: 7,
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const providerId = (created.json().provider as { id: string }).id;
+
+    const probed = await call(
+      'POST', `/api/providers/${providerId}/probe-efforts`, undefined, { cookie },
+    );
+    expect(probed.statusCode).toBe(200);
+    // 响应是 NDJSON 流：每行一个事件。注入器会把整个流收完再返回，内容仍是
+    // 「一行一个 JSON」——不能再用 .json() 整体解析。
+    expect(String(probed.headers['content-type'])).toContain('application/x-ndjson');
+    const events = probed.body
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line) as { type: string } & Record<string, unknown>);
+
+    expect(events[0]).toMatchObject({ type: 'start', total: 9 });
+    // 进度事件按完成数递增：这个用例的假上游全部 200，所以 9 条全到齐
+    const progress = events.filter((event) => event.type === 'progress');
+    expect(progress).toHaveLength(9);
+    expect(progress.map((event) => event.done)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    for (const event of progress) {
+      expect(event.model).toBe('gpt-x');
+      expect(event.total).toBe(9);
+      expect(typeof event.effort).toBe('string');
+    }
+
+    const result = events.find((event) => event.type === 'result');
+    expect(result).toBeTruthy();
+    const body = result as unknown as {
+      candidates: string[];
+      models: Array<{ model: string; accepted: string[]; rejected: string[]; error?: string }>;
+      provider: {
+        modelCapabilities: Record<string, { contextWindow?: number; reasoningEfforts?: string[] }>;
+        notes?: string;
+        websiteUrl?: string;
+        priority?: number;
+        enabled?: boolean;
+      };
+    };
+
+    // 假上游对任何 /responses 请求都回 200，所以全部候选档位都应被接受
+    expect(body.candidates).toEqual([
+      'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent',
+    ]);
+    expect(body.models).toHaveLength(1);
+    expect(body.models[0].accepted).toEqual(body.candidates);
+    expect(body.models[0].rejected).toEqual([]);
+    // 合并而不是覆盖：上下文窗口必须还在
+    expect(body.provider.modelCapabilities['gpt-x']).toMatchObject({
+      contextWindow: 400_000,
+      reasoningEfforts: body.candidates,
+    });
+    // update() 是全量更新：写能力表时不能把备注/官网/优先级/启用状态抹掉
+    expect(body.provider).toMatchObject({
+      notes: '探测备注',
+      websiteUrl: 'https://example.com/provider',
+      priority: 7,
+      enabled: true,
+    });
+
+    // 落盘验证：重新读供应商列表也能看到
+    const listed = (await call('GET', '/api/providers', undefined, { cookie })).json()
+      .providers as Array<{
+        id: string;
+        modelCapabilities?: Record<string, { reasoningEfforts?: string[] }>;
+      }>;
+    expect(
+      listed.find((item) => item.id === providerId)?.modelCapabilities?.['gpt-x']
+        ?.reasoningEfforts,
+    ).toEqual(body.candidates);
+
+    await call('DELETE', `/api/providers/${providerId}`, undefined, { cookie });
+  });
+
+  it('anthropic 协议没有 effort 概念，明确返回 400', async () => {
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '逐档实测 anthropic',
+        apiType: 'anthropic',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-probe-anthropic',
+        models: ['claude-x'],
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const providerId = (created.json().provider as { id: string }).id;
+
+    const response = await call(
+      'POST', `/api/providers/${providerId}/probe-efforts`, undefined, { cookie },
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.messageKey).toBe('providers.probe.unsupportedProtocol');
+
+    await call('DELETE', `/api/providers/${providerId}`, undefined, { cookie });
+  });
+
+  it('没有模型时返回 400，不会去发空探测', async () => {
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '逐档实测空模型',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-probe-empty',
+        models: [],
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const providerId = (created.json().provider as { id: string }).id;
+
+    const response = await call(
+      'POST', `/api/providers/${providerId}/probe-efforts`, undefined, { cookie },
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.messageKey).toBe('providers.probe.noModels');
+
+    await call('DELETE', `/api/providers/${providerId}`, undefined, { cookie });
+  });
+
+  it('未知供应商返回 404', async () => {
+    const response = await call(
+      'POST', '/api/providers/p_missing/probe-efforts', undefined, { cookie },
+    );
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error.messageKey).toBe('providers.notFound');
+  });
+});
+
 describe('冒烟：网关', () => {
   it('缺少令牌返回 401', async () => {
     const response = await call('POST', '/v1/chat/completions', {
@@ -1870,6 +2018,25 @@ describe('冒烟：API 令牌与信息接口', () => {
     );
     expect(response.statusCode).toBe(403);
     expect(response.json().error.message).toContain('登录会话');
+  });
+
+  it('只读令牌不能触发逐档实测（需要 providers:write）', async () => {
+    const providersList = (await call('GET', '/api/providers', undefined, { cookie: tokenCookie }))
+      .json().providers as Array<{ id: string }>;
+    expect(providersList.length).toBeGreaterThan(0);
+
+    const created = await call(
+      'POST', '/api/tokens',
+      { name: '只读探测', scopes: ['providers:read'] },
+      { cookie: tokenCookie },
+    );
+    const token = created.json().token as string;
+
+    const response = await call(
+      'POST', `/api/providers/${providersList[0].id}/probe-efforts`, undefined, bearer(token),
+    );
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.messageKey).toBe('auth.permission.tokenMissing');
   });
 
   it('令牌不能创建或吊销令牌，避免自我续命', async () => {

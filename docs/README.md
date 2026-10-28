@@ -27,6 +27,7 @@
 - 三种协议分别接哪条路径、为什么不能直通 → [gateway.md](./gateway.md#协议匹配)、[api.md](./api.md#网关)
 - Codex 为什么只能选 `responses`、`wire_api` 为什么固定写 `responses` → [agents.md](./agents.md#选哪个供应商)
 - Codex 的 `/model` 列表来自哪个文件、`web_search` 为什么默认关闭 → [agents.md](./agents.md#模型目录model_catalog_json-与-model_catalog_url)
+- `/model` 里的思考档位不对、比别的工具少 → [agents.md](./agents.md#131-推理档位只能靠实测不能靠声明)、[api.md](./api.md#post-apiprovidersidprobe-efforts)
 - 改完配置后 Codex 没生效、要重启 → [agents.md](./agents.md#结束正在运行的进程)
 - 我要改网关转发逻辑 → [AGENTS.md](../AGENTS.md) 的「必须遵守的约束」+ [gateway.md](./gateway.md)
 
@@ -40,6 +41,7 @@
 | 别名规则、选路、协议匹配 | `gateway.md` |
 | 新增/修改 `apiType`（协议枚举、文案、鉴权头分组） | `gateway.md`、`api.md`、`README.md`、`AGENTS.md` |
 | Agent 写入字段、`wire_api` 规则或模型目录 | `agents.md`、`api.md` |
+| 逐档实测 / 推理档位来源（`probe-efforts`、NDJSON 进度流） | `api.md`、`agents.md`、`README.md` |
 | 环境变量或数据目录结构 | `configuration.md` |
 | 权限位、角色映射或权限的副作用（如结束进程） | `security.md`、`api.md` |
 | 测试基线数量 | `development.md`、`AGENTS.md` |

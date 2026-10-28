@@ -10,7 +10,7 @@
 
 ## 能力范围
 
-- **供应商管理**：三种协议 —— OpenAI 兼容（Chat Completions）/ OpenAI 兼容（Responses）/ Anthropic 兼容（Messages）；API Key 加密落盘、列表脱敏、优先级排序、启用开关、连通性测试（请求上游 `/models`）、按表单当前值一键拉取上游模型列表并勾选启用。
+- **供应商管理**：三种协议 —— OpenAI 兼容（Chat Completions）/ OpenAI 兼容（Responses）/ Anthropic 兼容（Messages）；API Key 加密落盘、列表脱敏、优先级排序、启用开关、连通性测试（请求上游 `/models`）、按表单当前值一键拉取上游模型列表并勾选启用；另有**逐档实测**：按思考档位逐个打一次极小请求，让 Codex 模型目录只列出上游真正接受的档位。
 - **模型聚合**：把启用供应商的模型发布为 `lam-<供应商key>/<模型>` 别名；另可配置"默认供应商 + 默认模型"承接不带别名的请求。
 - **统一网关**：`/v1/models`、`/v1/chat/completions`、`/v1/messages`、`/v1/responses`；支持 SSE 流式透传；默认路径失败时按优先级回退一次。
 - **Agent 下发**：Codex CLI（`~/.codex/config.toml` + `auth.json` + `llmapi-model-catalog.json`，只接受 `responses` 供应商，`wire_api` 固定 `responses`）与 Claude Code（`~/.claude/settings.json`，需要 `anthropic`）；支持预览、应用、还原、结束 Codex 进程，写前备份，只改自己拥有的键。
@@ -70,6 +70,7 @@ npm start               # http://127.0.0.1:8787
 | PUT/DELETE | `/api/providers/:id` | 更新 / 删除 |
 | PATCH | `/api/providers/:id/enabled` | 启用开关 |
 | POST | `/api/providers/:id/test` | 连通性测试 |
+| POST | `/api/providers/:id/probe-efforts` | 逐档实测思考档位（NDJSON 进度流） |
 | POST | `/api/providers/models` | 按表单临时值拉取模型列表（新增时也能用） |
 | PUT | `/api/providers/order` | 调整优先级顺序 |
 | GET | `/api/models` | 聚合别名、默认模型、网关地址与令牌（脱敏） |

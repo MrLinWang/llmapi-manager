@@ -16,7 +16,9 @@ implementation — neither project's source was copied.
   OpenAI-compatible (Responses), and Anthropic-compatible (Messages). API keys are encrypted at
   rest and masked in the UI, with priority ordering, per-provider enable/disable, connectivity
   tests (hits the upstream `/models`), and one-click model discovery that works off the current
-  form values before you even save.
+  form values before you even save. A per-provider **effort probe** sends one minimal request per
+  reasoning level, so the Codex model catalog advertises only the levels your upstream actually
+  accepts.
 - **Model aggregation**: every enabled provider's models are published as
   `lam-<provider-key>/<model>` aliases. You can also set a default provider + default model to
   serve requests that carry no alias.
@@ -84,6 +86,7 @@ Admin endpoints (require a session cookie):
 | PUT/DELETE | `/api/providers/:id` | Update / delete |
 | PATCH | `/api/providers/:id/enabled` | Enable or disable |
 | POST | `/api/providers/:id/test` | Connectivity test |
+| POST | `/api/providers/:id/probe-efforts` | Probe reasoning-effort levels (NDJSON progress stream) |
 | POST | `/api/providers/models` | Discover models from unsaved form values |
 | PUT | `/api/providers/order` | Reorder by priority |
 | GET | `/api/models` | Aliases, default model, gateway URL and token (masked) |

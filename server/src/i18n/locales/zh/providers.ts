@@ -39,6 +39,12 @@ export const zhProviders = {
   models: {
     apiKeyRequired: '尚未填写 API Key，且没有可沿用的已保存 Key',
   },
+  /** 逐档实测（`POST /api/providers/:id/probe-efforts`） */
+  probe: {
+    noModels: '供应商还没有模型，无法逐档实测',
+    unsupportedProtocol: '{{apiType}} 协议没有 reasoning effort 概念，无法逐档实测',
+    allRejected: '所有候选档位都被上游拒绝',
+  },
   /** 连通性测试 / 模型拉取失败时的说明，会显示在界面上 */
   test: {
     timeout: '请求超时（{{seconds}}s）',

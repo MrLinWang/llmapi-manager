@@ -63,6 +63,36 @@ export interface TestResult {
   error?: string;
 }
 
+/**
+ * 逐档实测里单个模型的结果。
+ *
+ * `accepted` 是上游真正接受的档位（服务端已写回 `modelCapabilities`）；
+ * `rejected` 是试过但被拒绝的档位。整条探测失败时 `error` 给出原因。
+ */
+export interface EffortProbeModelResult {
+  model: string;
+  accepted: string[];
+  rejected: string[];
+  error?: string;
+}
+
+/** 逐档实测的进度事件（服务端按完成数推送） */
+export interface EffortProbeProgress {
+  done: number;
+  total: number;
+  model: string;
+  effort: string;
+  accepted: boolean;
+}
+
+/** POST /api/providers/:id/probe-efforts 的最终结果：写入后的供应商 + 逐模型结果 */
+export interface EffortProbeResult {
+  provider: Provider;
+  /** 服务端尝试过的档位列表，顺序即探测顺序 */
+  candidates: string[];
+  models: EffortProbeModelResult[];
+}
+
 export interface ModelAlias {
   alias: string;
   providerId: string;

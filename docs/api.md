@@ -156,6 +156,7 @@
 | DELETE | `/api/providers/:id` | `providers:write` | 若删的是默认供应商，返回 `{ newDefaultProviderId }` |
 | PUT | `/api/providers/order` | `providers:write` | `{ "ids": [...] }`，按数组顺序重排 `priority` |
 | POST | `/api/providers/:id/test` | `providers:write` | 请求上游 `/models`，10s 超时；结果写回 `lastTest` |
+| POST | `/api/providers/:id/probe-efforts` | `providers:write` | 逐档实测 reasoning effort，把上游接受的档位写回 `modelCapabilities` |
 | POST | `/api/providers/models` | `providers:write` | 按表单**临时值**拉取模型列表，不要求供应商已保存 |
 | POST | `/api/providers/:id/default` | `providers:write` | 设为默认，可带 `{ "model": "..." }` |
 
@@ -262,7 +263,8 @@
 
 `inputModalities` 一定经过白名单过滤：Codex 的模态枚举不认 `pdf` / `video` / `document`，
 写进去会让整份目录解析失败并静默回退到内置官方列表（详见 `docs/agents.md`）。
-上游没声明时可由 `npm run registry:sync -w server` 从 modelinfo.dev / models.dev 补齐。
+上游没声明时可由 `npm run registry:sync -w server` 从 modelinfo.dev / models.dev 补齐；
+数据源也没档位时，用下一节的「逐档实测」向上游逐个确认。
 
 连上了但响应里没有可识别的 `data[]` / `models[]` 时返回 `ok: false` 并说明原因，
 而不是给一个空列表——否则界面看起来像是"上游真的没有模型"。
@@ -270,6 +272,43 @@
 
 前端把返回结果渲染成**可点选的模型片段**（参考 new-api 渠道编辑的模型框）：
 点一下加入、再点一下取消，已选模型以强调色显示。
+
+### POST /api/providers/:id/probe-efforts
+
+权限 `providers:write`。对供应商的**每个模型 × 每个候选档位**真实发一次极小请求，
+只保留上游返回 2xx 的档位，并写回该供应商的 `modelCapabilities[model].reasoningEfforts`
+（同时把 `supportsReasoning` 置为 `true`）。前端「逐档实测」按钮调用它。
+
+候选档位就是 Codex 认识的 `none` / `minimal` / `low` / `medium` / `high` / `xhigh` /
+`max` / `ultra` / `persistent`；探测结果按强度升序返回。
+
+**响应是 NDJSON 流**（`Content-Type: application/x-ndjson`），一行一个事件——
+探测要发几十到几百次请求，不给中间进度前端只能干等。事件顺序：
+
+```jsonl
+{"type":"start","total":9,"candidates":["none","minimal","low","medium","high","xhigh","max","ultra","persistent"],"models":["gpt-x"]}
+{"type":"progress","done":1,"total":9,"model":"gpt-x","effort":"none","accepted":false}
+{"type":"progress","done":2,"total":9,"model":"gpt-x","effort":"minimal","accepted":false}
+{"type":"result","provider":{"id":"p_...","modelCapabilities":{"gpt-x":{"reasoningEfforts":["low","high"]}}},"candidates":["..."],"models":[{"model":"gpt-x","accepted":["low","high"],"rejected":["none","minimal"],"error":"HTTP 400: ..."}]}
+```
+
+- `progress` 每完成一次上游请求推一条；`done` 单调递增。服务端并发 4，所以事件可能
+  成组到达（一次多 4 条），进度条只依赖 `done / total`。
+- `result` 与旧版响应体一致：`{ provider, candidates, models }`。
+- 流中途失败（响应头已发出，改不了状态码）会再推一条
+  `{"type":"error","message":"..."}` 然后结束；前端据此报错，而不是当成"卡住"。
+- 参数校验失败（无模型 / anthropic / 供应商不存在）发生在开流之前，仍是普通 JSON 错误响应。
+- `Cache-Control: no-cache`、`x-accel-buffering: no` 是给 nginx 等中间层的：不这样写，
+  它们会缓冲整个响应，进度事件会攒到结束才一起到。
+- 请求形状按协议区分：`responses` → `/v1/responses` + `reasoning.effort`；
+  `openai` → `/v1/chat/completions` + `reasoning_effort`；`anthropic` 没有 effort
+  概念，直接 400 `providers.probe.unsupportedProtocol`。
+- **一个档位都没被接受时不改该模型的配置**，并在 `error` 里带上上游给的第一条原因。
+  这覆盖两种情况：模型确实不支持推理，或者地址/Key/协议配错了——两者都不该被
+  固化成"不支持推理"。用户可据此自行判断。
+- 没有模型时 400 `providers.probe.noModels`；供应商不存在时 404 `providers.notFound`。
+- 请求可能较慢（模型数 × 9，并发 4、单请求 20s 超时），这是预期行为，不是挂起。
+- 写回的是供应商记录，**模型目录要重新 apply 才更新**。
 
 ## 聚合与设置
 

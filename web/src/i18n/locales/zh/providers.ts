@@ -14,6 +14,7 @@ export const zhProviders = {
   actions: {
     create: '新增供应商',
     test: '测试',
+    probe: '逐档实测',
     moveUp: '提高优先级',
     moveDown: '降低优先级',
     enable: '启用',
@@ -28,6 +29,17 @@ export const zhProviders = {
   test: {
     ok: '连通',
     fail: '失败',
+  },
+  /** 逐档实测（按档位向上游发真实请求）的确认、进行中与结果面板 */
+  probe: {
+    confirm:
+      '将对该供应商的 {{models}} 个模型 × {{requests}} 个档位发起真实请求（会消耗少量额度），可能耗时较长。继续？',
+    progress: '正在逐档实测 {{done}} / {{total}}（{{model}} · {{effort}}）',
+    running: '正在逐档实测，请稍候…',
+    title: '逐档实测结果',
+    hint: '已写入模型能力；重新应用 Codex 配置后模型目录才会更新。',
+    close: '关闭',
+    allRejected: '未探测到可用档位，已保留原配置',
   },
   removeConfirm: '确定删除供应商「{{name}}」？该操作不可撤销。',
   list: {

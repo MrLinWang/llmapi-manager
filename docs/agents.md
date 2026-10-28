@@ -247,6 +247,20 @@ npm run registry:sync -w server -- --write --verify-efforts
 档位集合是模型特定的，不能跨模型推断。该开关会为每个模型声明的每个档位发一次极小请求
 （16 output tokens），只保留返回 2xx 的。**它默认关闭**，因为会真实消耗额度。
 
+**网页上的「逐档实测」按钮**（`POST /api/providers/:id/probe-efforts`）做的是更彻底的一件事：
+不依赖数据源声明，直接把 Codex 认识的**全部 9 个候选档位**各打一次上游，把 2xx 的写回
+`modelCapabilities`。数据源没有档位（如 `glm-5.3-flash` / `kimi-k2.7-code`）或对聚合上游
+不适用时，这是唯一能拿到真实档位的方式。两者共用 `services/effortProbe.ts` 的 `probeEffort()`，
+不要各写一份（否则会出现"CLI 说支持、网页说不支持"）。探测只改供应商记录，**目录要重新
+apply 才生效**。
+
+一个供应商可能是「12 个模型 × 9 档 = 108 次请求」，所以接口回的是 **NDJSON 进度流**而不是
+一次性 JSON：先 `start`（带 `total`），每完成一次请求推一条 `progress`（`done` 单调递增），
+最后 `result`。**不要把它改回普通 JSON** —— 没有中间进度，用户只会看到界面卡住几十秒，
+以为功能挂了（这正是加进度条的原因）。前端进度条只依赖 `done / total`，不假设并发顺序；
+`Cache-Control: no-cache` 与 `x-accel-buffering: no` 也不能去掉，否则 nginx 会把整条流
+缓冲到结束才发。
+
 ### 推理档位（`supported_reasoning_levels`）
 
 档位**按模型实际能力生成**，不是所有模型共用一套。上一版写死 `low/medium/high`，

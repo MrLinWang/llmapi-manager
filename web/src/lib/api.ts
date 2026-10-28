@@ -5,6 +5,8 @@ import type {
   AgentConnectionMode,
   AgentTargetPreference,
   ApiTokenView,
+  EffortProbeProgress,
+  EffortProbeResult,
   GatewayOverview,
   StopProcessesResult,
   AgentSummary,
@@ -51,6 +53,108 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   onUnauthorized = handler;
 }
 
+/**
+ * 统一把非 2xx 响应的载荷转成 ApiError。
+ *
+ * 抽出来是因为「逐档实测」走流式响应，错误仍然可能是普通 JSON（400/404/401），
+ * 而它的读取路径不经过 request()。两处必须共用同一套错误解析与 401 处理。
+ */
+function toApiError(response: Response, payload: unknown): ApiError {
+  const body = payload as {
+    error?: { code?: string; message?: string; messageKey?: string; details?: unknown };
+  } | null;
+  const code = body?.error?.code ?? 'unknown';
+  // 服务端 message 已经按请求语言渲染（见上面 accept-language 与
+  // server/src/i18n/language.ts 的优先级），可以直接显示。
+  // 这里只兜"连 message 都没有"的情况——那是前端自己造的句子，走字典。
+  const message =
+    body?.error?.message ?? i18next.t('common.requestFailed', { status: response.status });
+  if (response.status === 401) onUnauthorized?.();
+  return new ApiError(
+    response.status,
+    code,
+    message,
+    body?.error?.details,
+    body?.error?.messageKey,
+  );
+}
+
+/**
+ * 读「逐档实测」的 NDJSON 流：每行一个事件。
+ *
+ * 事件类型：
+ * - start    : { total, candidates, models }，用于进度条分母
+ * - progress : { done, total, model, effort, accepted }，每完成一次上游请求一条
+ * - result   : 最终结果（写入后的供应商 + 逐模型 accepted/rejected）
+ * - error    : 流中途失败（响应头已发出，改不了状态码）
+ *
+ * 没有 `response.body` 时（测试桩或环境不支持流）退化为整段文本解析，
+ * 这样两种读取路径共用同一套事件处理。
+ */
+async function readProbeStream(
+  response: Response,
+  onProgress?: (progress: EffortProbeProgress) => void,
+): Promise<EffortProbeResult> {
+  const handle = (line: string): EffortProbeResult | undefined => {
+    const trimmed = line.trim();
+    if (trimmed === '') return undefined;
+    let event: { type?: string } & Record<string, unknown>;
+    try {
+      event = JSON.parse(trimmed) as { type?: string } & Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
+    if (event.type === 'progress') {
+      onProgress?.(event as unknown as EffortProbeProgress);
+      return undefined;
+    }
+    if (event.type === 'error') {
+      throw new ApiError(
+        502,
+        'probe_stream_error',
+        String(event.message ?? i18next.t('common.requestFailed', { status: 502 })),
+      );
+    }
+    if (event.type === 'result') {
+      return event as unknown as EffortProbeResult;
+    }
+    return undefined;
+  };
+
+  let result: EffortProbeResult | undefined;
+  const reader = response.body?.getReader();
+  if (!reader) {
+    for (const line of (await response.text()).split('\n')) {
+      result = handle(line) ?? result;
+    }
+  } else {
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      let index = buffer.indexOf('\n');
+      while (index >= 0) {
+        result = handle(buffer.slice(0, index)) ?? result;
+        buffer = buffer.slice(index + 1);
+        index = buffer.indexOf('\n');
+      }
+    }
+    // 最后一行可能没有换行符（服务端 end 前都会补，但不要依赖它）
+    result = handle(buffer) ?? result;
+  }
+
+  if (!result) {
+    throw new ApiError(
+      502,
+      'probe_stream_truncated',
+      i18next.t('common.requestFailed', { status: 502 }),
+    );
+  }
+  return result;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { ...(init?.headers as Record<string, string>) };
   // 只有真的有 body 时才声明 JSON：Fastify 对「Content-Type: application/json + 空 body」
@@ -83,25 +187,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
 
-  if (!response.ok) {
-    const body = payload as {
-      error?: { code?: string; message?: string; messageKey?: string; details?: unknown };
-    } | null;
-    const code = body?.error?.code ?? 'unknown';
-    // 服务端 message 已经按请求语言渲染（见上面 accept-language 与
-    // server/src/i18n/language.ts 的优先级），可以直接显示。
-    // 这里只兜"连 message 都没有"的情况——那是前端自己造的句子，走字典。
-    const message =
-      body?.error?.message ?? i18next.t('common.requestFailed', { status: response.status });
-    if (response.status === 401) onUnauthorized?.();
-    throw new ApiError(
-      response.status,
-      code,
-      message,
-      body?.error?.details,
-      body?.error?.messageKey,
-    );
-  }
+  if (!response.ok) throw toApiError(response, payload);
 
   return payload as T;
 }
@@ -146,6 +232,36 @@ export const api = {
     }),
   testProvider: (id: string) =>
     request<TestResult>(`/api/providers/${id}/test`, { method: 'POST' }),
+  /**
+   * 逐档实测：服务端按档位逐个向上游发极小请求，把真正接受的档位写回
+   * `modelCapabilities`。响应是 NDJSON 流（进度事件 + 最终结果）。
+   *
+   * 无 body 的 POST —— 不要加 JSON 头，Fastify 会把「application/json + 空 body」
+   * 直接判 400。这里没有复用 request()，因为它要等整个响应体读完，会把进度丢掉。
+   */
+  probeProviderEfforts: async (
+    id: string,
+    onProgress?: (progress: EffortProbeProgress) => void,
+  ): Promise<EffortProbeResult> => {
+    const response = await fetch(`/api/providers/${id}/probe-efforts`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'accept-language': currentLanguage() },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      let payload: unknown = null;
+      if (text) {
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          payload = null;
+        }
+      }
+      throw toApiError(response, payload);
+    }
+    return readProbeStream(response, onProgress);
+  },
   /**
    * 按表单当前值拉取上游模型列表，不要求供应商已保存。
    * apiKey 留空时传 providerId，服务端沿用已保存的 Key。

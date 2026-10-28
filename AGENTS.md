@@ -299,6 +299,29 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
   改这块时注意 `ProviderForm` 用 `useId()` 生成输入框 id —— 同一页面可能同时存在多个
   实例，写死 id 会让 label 关联到别的表单。
 
+### 13.1 推理档位只能靠实测，不能靠声明
+
+Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities[model].reasoningEfforts`，
+没有数据就回落三档 `low/medium/high`。而档位恰恰是最容易"看着有、其实不对"的字段：
+
+- 上游 `/models` 基本不给档位（实测聚合上游只给 context/output）；
+- modelinfo.dev / models.dev 经常 `supported=true, efforts=[]`（glm-5.3-flash、kimi-k2.7-code 都是）；
+- 数据源说支持 ≠ 上游接受（`claude-opus-5.5` 的 `none` 在上游是 400）。
+  默认三档里的 `medium` 对只接受 `low/high/max` 的模型同样会 400。
+
+所以有两个入口，**都走 `services/effortProbe.ts` 的 `probeEffort()`**：
+
+- CLI：`npm run registry:sync -w server -- --write --verify-efforts`，只校验数据源**已声明**的档位。
+- 网页「逐档实测」：`POST /api/providers/:id/probe-efforts`，把 9 个候选档位全打一遍。
+
+两条硬规则：
+
+- **响应必须是 NDJSON 进度流，不能改回一次性 JSON。** 108 次请求要几十秒，没有中间进度
+  用户会以为卡死。`Cache-Control: no-cache` 与 `x-accel-buffering: no` 也不能去掉——
+  nginx 默认会缓冲整条流，进度会攒到最后一起到。
+- **全档位被拒时不要写能力表。** 那可能是网络抖动、Key 错或协议错，固化成"不支持推理"
+  会让用户更难排查；把上游第一条原因带进 `error` 让用户自己判断。
+
 ### 14. API 令牌只能收窄权限
 
 `/api/*` 除会话 cookie 外还接受 `Authorization: Bearer api_…`。三条硬规则：
@@ -375,7 +398,7 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
 
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 299 + web 28 = 327 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 313 + web 29 = 342 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
@@ -393,6 +416,9 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
   并确认 smoke 里三条都在："自动开启后打通 Chat 上游"、"有 responses 供应商时不自动开"、
   "转换解决不了时仍 501 且不改设置"。
 - 改到模型拉取 → 补 `server/test/smoke.test.ts`（三种协议、`/v1` 拼接、借用已保存 Key、上游不可达不 500）。
+- 改到逐档实测 → 补 `server/test/effortProbe.test.ts`（两种协议的请求形状、`/v1` 拼接、accepted/rejected、
+  全拒时不写能力、进度回调），并确认 smoke 里「NDJSON 流事件顺序」「anthropic 400」「无模型 400」
+  「未知 id 404」「只读令牌 403」仍在。
 - 改 web 测试 → 记住 `globals: false` 让 RTL **不自动 cleanup**，清理靠
   `web/test/setup.ts` 的 `afterEach(cleanup)`。少了它，上一个用例的 DOM 会留到下一个，
   症状是"单独跑通过、整个文件跑失败"或读到上一条用例的 mock 数据。

@@ -47,6 +47,9 @@ export const zhLogs = {
     tokenRejected: '初始化令牌校验失败',
     completed: '已完成首次初始化',
   },
+  providers: {
+    probeFailed: '逐档实测失败：供应商 {{id}}（{{error}}）',
+  },
   tokens: {
     revoked: '已吊销',
     expired: '已过期',

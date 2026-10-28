@@ -43,6 +43,9 @@ export const enLogs: typeof zhLogs = {
     tokenRejected: 'Setup token verification failed',
     completed: 'First-time setup completed',
   },
+  providers: {
+    probeFailed: 'Effort probe failed for provider {{id}} ({{error}})',
+  },
   tokens: {
     revoked: 'revoked',
     expired: 'expired',

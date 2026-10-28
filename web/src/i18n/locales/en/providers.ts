@@ -9,6 +9,7 @@ export const enProviders: typeof zhProviders = {
   actions: {
     create: 'Add provider',
     test: 'Test',
+    probe: 'Probe efforts',
     moveUp: 'Raise priority',
     moveDown: 'Lower priority',
     enable: 'Enable',
@@ -21,6 +22,16 @@ export const enProviders: typeof zhProviders = {
   test: {
     ok: 'Connected',
     fail: 'Failed',
+  },
+  probe: {
+    confirm:
+      'This will send real requests for {{models}} models × {{requests}} effort levels (small token cost) and may take a while. Continue?',
+    progress: 'Probing {{done}} / {{total}} ({{model}} · {{effort}})',
+    running: 'Probing effort levels, please wait…',
+    title: 'Effort probe results',
+    hint: 'Saved to model capabilities. Re-apply the Codex config for the model catalog to update.',
+    close: 'Close',
+    allRejected: 'No accepted effort levels; previous config kept',
   },
   removeConfirm: 'Delete provider “{{name}}”? This cannot be undone.',
   list: {

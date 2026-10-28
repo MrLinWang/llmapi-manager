@@ -54,6 +54,7 @@ npm run dev -w web        # vite，热更新
 | `server/test/convert.test.ts` | Responses ←→ Chat 的请求 / 响应 / 流式三向映射，含工具调用与有损字段 |
 | `server/test/apiToken.test.ts` | API 令牌生成与校验：`api_` 前缀区分、sha256 比对与 `timingSafeEqual`、空 scopes / 过期 / 吊销一律拒绝、`lastUsedAt` 60 秒节流、对外视图不含 hash |
 | `server/test/agents.test.ts` | JSON/TOML 补丁（含 `raw` 布尔）、Codex 模型目录生成（含按模型分化的推理档位与模态白名单）、备份、还原冲突、空壳文件清理 |
+| `server/test/effortProbe.test.ts` | 逐档实测：responses/openai 各自发对路径与字段、`/v1` 不重复拼接、accepted/rejected 判定、全档位被拒时不写能力、进度回调（`done` 单调递增）、候选档位白名单 |
 | `server/test/modelInfo.test.ts` | modelinfo.dev 的字段映射、`document` 模态过滤、档位白名单与升序、`efforts: []` 与未知的区分 |
 | `server/test/modelRegistry.test.ts` | models.dev 的名字归一化与多候选放弃、四源合并优先级（上游 > modelinfo > models.dev > 默认）、输出上限取最小 |
 | `server/test/processes.test.ts` | Codex 进程识别（TUI / `exec` / 不误伤 `mycodex` 与一次性命令）、`etime` 解析 |
@@ -74,7 +75,7 @@ Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真
 `processes.test.ts` 只测纯函数（命令行分类与 `etime` 解析），不会真的给任何进程发信号。
 日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**。
 
-当前基线：327 项（server 299 + web 28）。
+当前基线：342 项（server 313 + web 29）。
 
 ```bash
 npm test                                # 全部
