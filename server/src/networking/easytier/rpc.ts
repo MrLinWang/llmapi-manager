@@ -241,10 +241,24 @@ function decodeCompressionInfoOrNull(buffer: Buffer | null): RpcCompressionInfo 
  * 见 `fixtures-protocol-oracle.json` 的 `rpc.ospf_sync_route_info`。
  */
 export const OSPF_SERVICE = {
-  protoName: 'peer_rpc.OspfRouteRpc',
+  /**
+   * proto 名**不带包名**。
+   *
+   * 两个值都是实测出来的（dump 官方真实请求的描述符），与最初假设不同：
+   * - `protoName` 是 `OspfRouteRpc`，**不带** `peer_rpc.` 包名——
+   *   官方注册表按 `(domain, service, proto)` 三元组精确匹配，
+   *   带包名的 key 查不到服务，报 `InvalidService`（错误消息里的引号
+   *   只是 Rust Debug 格式，别被误导）。
+   * - `methodIndex` 是 **1**，不是 0——`SyncRouteInfo` 是服务里
+   *   第二个方法（第一个是 trait 的某个保留方法）。
+   *
+   * 教训：这两个值最早靠猜，当时没有任何调用能走到服务匹配层，
+   * 所以错了也没暴露。靠 dump 真实包才纠正。
+   */
+  protoName: 'OspfRouteRpc',
   serviceName: 'OspfRouteRpc',
-  /** `SyncRouteInfo` 在服务里的索引 */
-  syncRouteInfoMethodIndex: 0,
+  /** `SyncRouteInfo` 在服务里的方法索引 */
+  syncRouteInfoMethodIndex: 1,
 } as const;
 
 /** 构造一个 OSPF `SyncRouteInfo` 的请求 RPC 包。 */
@@ -260,13 +274,20 @@ export function buildOspfSyncRouteRequest(options: {
    */
   transactionId: bigint;
   body: Buffer;
+  /**
+   * 网络名（RPC 描述符的 `domainName`）。
+   *
+   * **实测官方的 OSPF 请求里这里填的是网络名**，不是空——
+   * 我们曾填空串，路由广播整包被官方忽略且无日志。
+   */
+  networkName: string;
 }): RpcPacket {
   return {
     fromPeer: options.fromPeer,
     toPeer: options.toPeer,
     transactionId: options.transactionId,
     descriptor: {
-      domainName: '',
+      domainName: options.networkName,
       protoName: OSPF_SERVICE.protoName,
       serviceName: OSPF_SERVICE.serviceName,
       methodIndex: OSPF_SERVICE.syncRouteInfoMethodIndex,

@@ -39,7 +39,7 @@
 | 解密对端加密 RPC | ✅ 可用 | 正确解码官方 OSPF 请求（peer_id 等字段全对） |
 | 应答 OSPF 同步请求（**接受方角色**） | ✅ 可用 | 事务号精确匹配、无 inflight miss、无 sync 超时 |
 | Ping/Pong 保活 | ✅ 可用 | 连接长期稳定，不再每秒重连 |
-| OSPF 路由广播（peer_infos + conn_peer_list） | ⚠️ 已发出 | 对端图里有本节点，但路由表未列出 Route 条目（见下）|
+| OSPF 路由广播 | ✅ 可用 | 官方路由表列出 TS 条目，peer 列表主机名 `ts-node` |
 
 ### 为什么"回应 OSPF"不可用
 
@@ -95,14 +95,13 @@ Tests: 2 passed（握手+OSPF 应答；无 sync 超时）
 5. **conn_info 缺失**：路由表的下一跳图由各节点的 conn_info 拼成，
    只发 peer_infos 图里没有边，路由装不上。
 
-### 仍待解：路由表条目
+### 最后一关的根因（已解决）
 
-官方能把 TS 学进 OSPF 图（"no peer in graph" 警告不再复现），但路由表
-未列出 TS 的 Route 条目，peer 列表主机名是 `peer-<id>` 兜底。广播字节
-（peer_infos + conn_peer_list）自解正确、与官方样本字段布局一致，native
-处理无任何错误日志。待查方向：`peer_ospf_route.rs:3697` 的原始字节交叉
-校验对编码的深层约束，或路由安装需要 ipv4_addr。对应测试已 `it.skip`
-并附完整诊断记录。
+`OSPF_SERVICE` 常量带着早期假设：protoName 带包名 + methodIndex 0。
+官方注册表按 `(domain, service, proto)` 三元组精确匹配，带包名的 key
+查不到服务，报 `InvalidService`（响应里能直接看到）。另需
+`domainName=网络名` 与广播带 `ipv4_addr`。修正后官方 peer 列表出现
+`ts-node`，广播响应 `error=null`。
 
 ## 关键验证：真实建连
 

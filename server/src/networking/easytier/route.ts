@@ -32,6 +32,7 @@ import {
   getBytes,
   getVarint,
 } from './protobuf';
+import { encodeIpv4Addr, numberToIpv4 } from './address';
 
 /**
  * `RoutePeerInfo` 的字段号。
@@ -75,6 +76,14 @@ export interface RoutePeerInfo {
   version: number;
   /** 对端主机名（可能没有） */
   hostname: string | null;
+  /**
+   * 虚拟 IPv4（点分字符串；可能没有）。
+   *
+   * **路由安装的必要条件**：官方 OSPF 的路由表按 IPv4 组织，
+   * 无虚拟 IP 的节点进不了路由表——连接与 OSPF 应答都正常，
+   * 但对端 peer 列表的主机名永远是 `peer-<id>` 兜底（实测踩过）。
+   */
+  ipv4Addr: string | null;
   /** 对端声明的 EasyTier 版本字符串 */
   easytierVersion: string;
   /** 该节点代理的网段 */
@@ -96,8 +105,11 @@ export function encodeRoutePeerInfo(route: RoutePeerInfo): Buffer {
   for (const cidr of route.proxyCidrs) {
     parts.push(encodeStringField(RoutePeerInfoField.proxyCidrs, cidr));
   }
-  if (route.hostname !== null) {
+  if (route.hostname != null) {
     parts.push(encodeStringField(RoutePeerInfoField.hostname, route.hostname));
+  }
+  if (route.ipv4Addr != null) {
+    parts.push(encodeBytesField(RoutePeerInfoField.ipv4Addr, encodeIpv4Addr(route.ipv4Addr)));
   }
   if (route.version !== 0) {
     parts.push(encodeVarintField(RoutePeerInfoField.version, route.version));
@@ -111,7 +123,7 @@ export function encodeRoutePeerInfo(route: RoutePeerInfo): Buffer {
   if (route.networkLength !== 0) {
     parts.push(encodeVarintField(RoutePeerInfoField.networkLength, route.networkLength));
   }
-  if (route.noiseStaticPubkey !== null) {
+  if (route.noiseStaticPubkey != null) {
     parts.push(encodeBytesField(RoutePeerInfoField.noiseStaticPubkey, route.noiseStaticPubkey));
   }
 
@@ -129,10 +141,16 @@ export function decodeRoutePeerInfo(buffer: Buffer): RoutePeerInfo {
   const hostnameBytes = getBytes(fields, RoutePeerInfoField.hostname);
   const pubkeyBytes = getBytes(fields, RoutePeerInfoField.noiseStaticPubkey);
 
+  const ipv4Bytes = getBytes(fields, RoutePeerInfoField.ipv4Addr);
+
   return {
     peerId: getVarint(fields, RoutePeerInfoField.peerId) ?? 0,
     cost: getVarint(fields, RoutePeerInfoField.cost) ?? 0,
     version: getVarint(fields, RoutePeerInfoField.version) ?? 0,
+    ipv4Addr:
+      ipv4Bytes === null
+        ? null
+        : numberToIpv4(getVarint(decodeFields(ipv4Bytes), 1) ?? 0),
     hostname: hostnameBytes === null ? null : hostnameBytes.toString('utf8'),
     easytierVersion: getBytes(fields, RoutePeerInfoField.easytierVersion)?.toString('utf8') ?? '',
     proxyCidrs: getAllBytes(fields, RoutePeerInfoField.proxyCidrs).map((b) => b.toString('utf8')),

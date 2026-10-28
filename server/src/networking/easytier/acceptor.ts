@@ -54,6 +54,7 @@ import {
   encodeRpcRequestWrapper,
   decodeRpcPacket,
   decodeRpcRequestWrapper,
+  decodeRpcResponse,
   decodeSyncRouteInfoRequest,
   encodeRpcPacket,
   encodeSyncRouteInfoResponse,
@@ -106,6 +107,14 @@ export interface AcceptorOptions {
   staticPrivateKey?: Buffer;
   /** 广播给对端的主机名（会出现在对端的 peer 列表里） */
   hostname?: string;
+  /**
+   * 本节点的虚拟 IPv4（如 `10.126.200.1`）。
+   *
+   * **路由安装需要它**：官方 OSPF 的路由表按 IPv4 组织，无虚拟 IP 的节点
+   * 进不了路由表——连接与 OSPF 应答都正常，但对端 peer 列表的主机名
+   * 永远是 `peer-<id>` 兜底（实测踩过）。
+   */
+  virtualIpv4?: string;
   /** 握手完成后是否主动广播自己的 RoutePeerInfo（默认 false） */
   advertiseRoute?: boolean;
   /** 数据面加密算法，与官方默认一致 */
@@ -358,6 +367,37 @@ export class EasyTierAcceptor {
       return;
     }
 
+    // 对端对我们广播的响应（成功或 MalformatRpcPacket 错误）——
+    // 这是判断"广播是否被接受"的唯一权威来源
+    if (header.packetType === PacketType.RpcResp) {
+      if (process.env.EASYTIER_ACCEPTOR_DEBUG) {
+        try {
+          const respRpc = decodeRpcPacket(
+            decryptPayload({
+              key: deriveTrafficKey(
+                conn.rootKey,
+                0,
+                directionForSender(conn.remotePeerId, this.options.myPeerId),
+              ),
+              ciphertextWithTail: frame.subarray(16),
+              algorithm: this.options.algorithm ?? 'aes-gcm',
+            }),
+          );
+          const unwrapped = decodeRpcResponse(respRpc.body);
+          process.stdout.write(
+            `[ts-acceptor] 广播响应: txn=${respRpc.transactionId} error=${JSON.stringify(
+              unwrapped.error,
+            )} payload=${unwrapped.response.toString('hex').slice(0, 60)}\n`,
+          );
+        } catch (e) {
+          process.stdout.write(
+            `[ts-acceptor] 广播响应解码失败: ${(e as Error).message}\n`,
+          );
+        }
+      }
+      return;
+    }
+
     if (header.packetType !== PacketType.RpcReq) return;
     if (responder === null) return;
     if ((header.flags & PeerManagerHeaderFlags.ENCRYPTED) === 0) return;
@@ -441,6 +481,10 @@ export class EasyTierAcceptor {
   /** 构造并发送自己的 `SyncRouteInfo` 请求（让对端把本节点加进路由表）。 */
   private advertiseRoute(conn: Connection): void {
     const directPeers = [...this.connections].map((c) => c.remotePeerId);
+    // ipv4 是路由安装的必要条件：官方 OSPF 路由表按 IPv4 组织，
+    // 无虚拟 IP 的节点进不了路由表（实测踩过：连接/应答都正常，
+    // 但对端 peer 列表主机名一直是 peer-<id> 兜底）。
+    const ip = this.options.virtualIpv4 ?? null;
     const route: RoutePeerInfo = {
       peerId: this.options.myPeerId,
       cost: 1,
@@ -449,7 +493,8 @@ export class EasyTierAcceptor {
       easytierVersion: '2.7.0',
       proxyCidrs: [],
       peerRouteId: Date.now() % 0x7fffffff,
-      networkLength: 0,
+      networkLength: ip === null ? 0 : 24,
+      ipv4Addr: ip,
       // 带上我们的 Noise 静态公钥：官方做 relay 握手时需要它
       noiseStaticPubkey: this.staticKeyPair.publicKey,
     };
@@ -501,9 +546,11 @@ export class EasyTierAcceptor {
       transactionId: BigInt(Date.now()),
       // 请求方向的 body 同样要包 RpcRequest（与响应方向的 RpcResponse 对称）
       body: encodeRpcRequestWrapper(body),
+      networkName: this.options.networkName,
     });
     if (process.env.EASYTIER_ACCEPTOR_DEBUG) {
       process.stdout.write(
+        `[ts-acceptor] descriptor=${JSON.stringify(packet.descriptor)}\n` +
         `[ts-acceptor] 广播 body=${body.toString('hex')}\n` +
           `[ts-acceptor] 自解 peer_infos=${JSON.stringify(
             decodeRoutePeerInfos(innerInfos).map((r) => ({

@@ -515,6 +515,8 @@ function oracleRoute(): RoutePeerInfo {
     cost: i.cost,
     version: i.version,
     hostname: i.hostname,
+    // oracle 样本未覆盖 ipv4（fixture 里没有），保持缺省不参与编码
+    ipv4Addr: null,
     easytierVersion: i.easytier_version,
     proxyCidrs: i.proxy_cidrs,
     peerRouteId: i.peer_route_id,

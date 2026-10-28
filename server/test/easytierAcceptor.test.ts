@@ -102,6 +102,7 @@ beforeAll(async () => {
       networkName: NETWORK_NAME,
       networkSecret: NETWORK_SECRET,
       hostname: 'ts-node',
+      virtualIpv4: '10.126.200.1',
       advertiseRoute: true,
       algorithm: 'aes-gcm',
     },
@@ -160,6 +161,9 @@ beforeAll(async () => {
   `;
   native = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
   native.stdout?.on('data', (chunk: Buffer) => {
+    // STATUS 行在 stdout（子进程脚本打印），也要进日志供探针解析——
+    // 只存 stderr 的话 waitFor 永远拿不到状态（踩过：探针读错流）。
+    nativeLog.push(chunk.toString());
     process.stdout.write(`[official] ${chunk}`);
   });
   native.stderr?.on('data', (chunk: Buffer) => {
@@ -211,23 +215,12 @@ describe.skipIf(!CAN_RUN)('EasyTier 接受方：官方节点作为发起方连�
     30_000,
   );
 
-  // ⚠️ 已知待解项（2026-10-29）：连接与 OSPF 应答都已通过 native 实测，
-  // 但 native 的 peer 列表里主机名仍是兜底的 peer-<id>。
-  //
-  // 已实证的范围：native 与 TS 完成服务端握手（NetworkSecretConfirmed）、
-  // TS 正确解码 native 的 SyncRouteInfo 请求并应答（事务号精确匹配、
-  // 无 inflight miss、无 sync 超时）、Ping/Pong 保活、连接长期稳定。
-  // native 也把 TS 学进了 OSPF 图（启动期 "no peer in graph" 警告不再复现）。
-  //
-  // 差在最后一步：native 的路由表未列出 TS 的 Route 条目。已确认
-  // 广播字节（peer_infos + conn_peer_list）自解正确、与官方样本字段布局
-  // 一致；native 处理无任何错误日志。待查方向：官方在
-  // `peer_ospf_route.rs:3697` 会从原始字节交叉验证 peer_infos（可能
-  // 对我们的编码有更深的约束），或路由安装需要 ipv4_addr 等字段。
-  //
-  // 在解决之前跳过此项——它不代表退步：skip 的基线就是上面两项已通过的
-  // 实测能力。
-  it.skip(
+  // 最终一关的根因（2026-10-29 已解决）：`OSPF_SERVICE` 常量还带着早期
+  // 的错误假设——protoName 带包名（应为 `OspfRouteRpc`）、methodIndex 0
+  // （应为 1）。这两个值最早靠猜，当时没有任何调用能走到服务匹配层，
+  // 错了也不暴露；dump 真实包才纠正。另需 domainName=网络名 与
+  // 广播带 ipv4_addr（路由安装的必要条件）。
+  it(
     '官方的路由表里学到本节点（主机名 ts-node 出现在 peer 列表）',
     async () => {
       const { ok, last } = await waitFor(() => {
