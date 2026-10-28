@@ -6,6 +6,8 @@ import { zhGateway } from './gateway';
 import { zhProviders } from './providers';
 import { zhSettings } from './settings';
 import { zhTokens } from './tokens';
+import { zhSync } from './sync';
+import { zhNetworking } from './networking';
 import { zhLogs } from './logs';
 import { zhWarnings } from './warnings';
 
@@ -23,6 +25,8 @@ export const zh = {
   agents: zhAgents,
   auth: zhAuth,
   tokens: zhTokens,
+  sync: zhSync,
+  networking: zhNetworking,
   settings: zhSettings,
   warnings: zhWarnings,
   logs: zhLogs,

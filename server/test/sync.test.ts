@@ -11,6 +11,7 @@ import { SyncService } from '../src/services/sync';
 import { resetWarnings } from '../src/resilience';
 import type { SyncSnapshot } from '../src/domain/sync';
 import type { ProviderRecord } from '../src/domain/provider';
+import { translate } from '../src/i18n';
 
 /**
  * 同步的单元测试。
@@ -490,5 +491,56 @@ describe('同步：范围的空值语义', () => {
     expect(snapshot.settings).toBeUndefined();
     expect(snapshot.agentTargets).toBeUndefined();
     expect(snapshot.scopes).toEqual([]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// 界面语言：报错文案跟随 i18n
+// ══════════════════════════════════════════════════════════════════
+
+describe('同步接口的错误文案走 i18n', () => {
+  /**
+   * 这一组是合并 `main` 的 i18n 之后补的。
+   *
+   * 原先 `routes/sync.ts` 把中文成品文案直接传给 `badRequest()`，
+   * 而 `MessageKey` 是 `string`，**类型检查抓不到**：英文界面下会原样输出中文。
+   * 只能靠断言 `messageKey` 来锁住。
+   */
+
+  it('sync 字典在中英文里都有翻译（不是回落到键名）', () => {
+    // 回落到键名是 `translate` 查不到键时的行为（`missing()` 返回 key 本身），
+    // 那样界面会显示 "sync.scopes.mustBeArray" 这种字符串。
+    for (const key of [
+      'sync.scopes.mustBeArray',
+      'sync.masterUrl.invalid',
+      'sync.pull.tokenRequired',
+      'sync.conflict.unknown',
+      'sync.snapshot.mustUseHttps',
+    ]) {
+      for (const language of ['zh', 'en'] as const) {
+        const text = translate(language, key as never, { value: 'X', id: 'Y' });
+        expect(text, `${language} 缺 ${key}`).not.toBe(key);
+        expect(text.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('中英文文案确实不同（避免只写了中文）', () => {
+    // 两个字典都填了同一句中文是最常见的半成品状态，这条能抓出来
+    const zh = translate('zh', 'sync.scopes.mustBeArray' as never);
+    const en = translate('en', 'sync.scopes.mustBeArray' as never);
+    expect(zh).not.toBe(en);
+    expect(/[\u4e00-\u9fff]/.test(zh)).toBe(true);
+    expect(/[\u4e00-\u9fff]/.test(en)).toBe(false);
+  });
+
+  it('插值参数会真的被替换', () => {
+    const text = translate('en', 'sync.pull.badStatus' as never, {
+      status: 502,
+      reason: 'bad gateway',
+    });
+    expect(text).toContain('502');
+    expect(text).toContain('bad gateway');
+    expect(text).not.toContain('{{');
   });
 });

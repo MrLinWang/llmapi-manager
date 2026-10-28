@@ -12,15 +12,20 @@ import {
   type SyncRole,
   type SyncScope,
 } from '../domain/sync';
+import { translate } from '../i18n';
+import type { UiLanguage } from '../domain/settings';
 
 const ROLES: readonly SyncRole[] = ['standalone', 'master', 'follower'];
 
 function parseScopes(raw: unknown): SyncScope[] {
-  if (!Array.isArray(raw)) throw badRequest('scopes 必须是数组');
+  if (!Array.isArray(raw)) throw badRequest('sync.scopes.mustBeArray');
   const out: SyncScope[] = [];
   for (const item of raw) {
     if (typeof item !== 'string' || !(SYNC_SCOPES as readonly string[]).includes(item)) {
-      throw badRequest(`未知的同步范围 ${String(item)}；可选：${SYNC_SCOPES.join(', ')}`);
+      throw badRequest('sync.scopes.unknown', {
+        value: String(item),
+        available: SYNC_SCOPES.join(', '),
+      });
     }
     if (!out.includes(item as SyncScope)) out.push(item as SyncScope);
   }
@@ -75,11 +80,7 @@ function assertSecureTransport(request: FastifyRequest, ctx: AppContext): void {
   // 导致对外监听的服务明文就能取走全部上游 Key。
   if (ctx.config.trustProxy !== false && request.protocol === 'https') return;
 
-  throw forbidden(
-    '同步快照包含上游 API Key 明文，必须走 HTTPS。' +
-      '请在前面部署反向代理并设置 TRUST_PROXY=1（反代需覆盖 X-Forwarded-Proto），' +
-      '或（仅在可信内网，例如 EasyTier 隧道内）设置 SYNC_ALLOW_INSECURE=1。',
-  );
+  throw forbidden('sync.snapshot.mustUseHttps');
 }
 
 /**
@@ -93,18 +94,50 @@ function assertMasterUrlAllowed(masterUrl: string, allowInsecure: boolean): void
   try {
     parsed = new URL(masterUrl);
   } catch {
-    throw badRequest(`master 地址不合法：${masterUrl}`);
+    throw badRequest('sync.masterUrl.invalid', { value: masterUrl });
   }
   if (parsed.protocol === 'https:') return;
   if (parsed.protocol !== 'http:') {
-    throw badRequest(`master 地址必须用 http 或 https：${masterUrl}`);
+    throw badRequest('sync.masterUrl.mustBeHttp', { value: masterUrl });
   }
   if (isLoopbackHost(parsed.hostname)) return;
   if (allowInsecure) return;
-  throw forbidden(
-    `master 地址是明文 HTTP（${masterUrl}），拉取时会暴露 API 令牌与上游 Key。` +
-      '请改用 https，或（仅在可信内网）设置 SYNC_ALLOW_INSECURE=1。',
-  );
+  throw forbidden('sync.masterUrl.insecure', { value: masterUrl });
+}
+
+/**
+ * 拼出"上次拉取结果"摘要。
+ *
+ * 这段文案会落进 `settings.sync.lastPullResult` 并显示在同步页的「上次结果」里，
+ * 所以要走字典——不能直接拼中文，否则英文界面下会看到中文摘要。
+ *
+ * 语言取 `LOG_LANGUAGE` 之外的语言不存在：拉取是后台动作，没有"当前请求"的语境，
+ * 这里用租户设置的语言（`resolveRequestLanguage` 需要 Request，不适用）。
+ */
+function buildPullSummary(input: {
+  language: UiLanguage;
+  applied: number;
+  conflictCount: number;
+  elapsedMs: number;
+  masterChanged: boolean;
+}): string {
+  const parts: string[] = [];
+  if (input.applied > 0) {
+    parts.push(translate(input.language, 'sync.summary.applied', { count: input.applied }));
+  }
+  if (input.conflictCount > 0) {
+    parts.push(
+      translate(input.language, 'sync.summary.conflicts', { count: input.conflictCount }),
+    );
+  }
+  if (parts.length === 0) parts.push(translate(input.language, 'sync.summary.unchanged'));
+
+  let summary = parts.join('，');
+  summary += translate(input.language, 'sync.summary.elapsed', { ms: input.elapsedMs });
+  if (input.masterChanged) {
+    summary += '。' + translate(input.language, 'sync.summary.masterChanged');
+  }
+  return summary;
 }
 
 export function registerSyncRoutes(
@@ -152,7 +185,7 @@ export function registerSyncRoutes(
 
       if (body.role !== undefined) {
         if (typeof body.role !== 'string' || !ROLES.includes(body.role as SyncRole)) {
-          throw badRequest(`role 必须是 ${ROLES.join(' / ')} 之一`);
+          throw badRequest('sync.role.unknown', { available: ROLES.join(' / ') });
         }
         next.role = body.role as SyncRole;
       }
@@ -161,7 +194,7 @@ export function registerSyncRoutes(
         if (body.masterUrl === null || body.masterUrl === '') {
           next.masterUrl = null;
         } else if (typeof body.masterUrl !== 'string') {
-          throw badRequest('masterUrl 必须是字符串或 null');
+          throw badRequest('sync.masterUrl.mustBeStringOrNull');
         } else {
           // 去掉尾部斜杠，避免拼出双斜杠的接口地址
           next.masterUrl = body.masterUrl.trim().replace(/\/+$/, '');
@@ -175,7 +208,7 @@ export function registerSyncRoutes(
       // follower 必须有 master 地址，否则拉取时无从下手——在保存时就拦住，
       // 比等到点"同步"才报错更早暴露配置漏项
       if (next.role === 'follower' && !next.masterUrl) {
-        throw badRequest('选择 follower 角色时必须填写 master 地址');
+        throw badRequest('sync.masterUrl.requiredForFollower');
       }
 
       repos.settings.write({
@@ -202,7 +235,7 @@ export function registerSyncRoutes(
     async (request, reply) => {
       const config = service.readConfig();
       if (config.role !== 'master') {
-        throw badRequest('当前不是 master 角色，没有可导出的快照');
+        throw badRequest('sync.role.mustBeMasterToExport');
       }
 
       assertSecureTransport(request, ctx);
@@ -214,9 +247,7 @@ export function registerSyncRoutes(
       // 早先的实现把空数组当成全部范围——那等于"用户没勾选任何项，系统却擅自
       // 把全部上游 Key 导出"，是个危险的默认值。安全默认应当是什么都不做。
       if (scopes.length === 0) {
-        throw badRequest(
-          '未选择任何同步范围。请在"同步范围"里勾选要同步的内容（当前为空白表示不同步任何数据）。',
-        );
+        throw badRequest('sync.scopes.emptyForExport');
       }
 
       const snapshot = service.exportSnapshot(scopes);
@@ -256,9 +287,9 @@ export function registerSyncRoutes(
     async (request) => {
       const config = service.readConfig();
       if (config.role !== 'follower') {
-        throw badRequest('只有 follower 角色才能拉取');
+        throw badRequest('sync.role.mustBeFollowerToPull');
       }
-      if (!config.masterUrl) throw badRequest('尚未配置 master 地址');
+      if (!config.masterUrl) throw badRequest('sync.pull.noMasterUrl');
       // 保存时校验过，这里再校一次：配置可能是旧版本写入的，
       // 也可能 SYNC_ALLOW_INSECURE 在当前进程里被关掉了
       assertMasterUrlAllowed(config.masterUrl, ctx.config.syncAllowInsecure);
@@ -266,14 +297,14 @@ export function registerSyncRoutes(
       const body = (request.body ?? {}) as { token?: unknown };
       const token = typeof body.token === 'string' ? body.token.trim() : '';
       if (!token.startsWith('api_')) {
-        throw badRequest('需要 master 的 API 令牌（api_ 前缀，且包含 sync:read 权限）');
+        throw badRequest('sync.pull.tokenRequired');
       }
 
       // 与 snapshot 侧保持同一口径：空 scopes = 不同步，而不是全部
       const scopes = config.scopes;
       if (scopes.length === 0) {
         throw badRequest(
-          '未选择任何同步范围。请先在"同步范围"里勾选要同步的内容（空白表示不同步任何数据）。',
+          'sync.scopes.emptyForPull',
         );
       }
       const url = `${config.masterUrl}/api/sync/snapshot?scopes=${scopes.join(',')}`;
@@ -288,28 +319,36 @@ export function registerSyncRoutes(
         if (!response.ok) {
           const text = await response.text();
           // 不要把整个响应体带进错误（可能是 master 的错误细节），只要前 200 字
-          throw badRequest(
-            `master 返回 ${response.status}：${text.slice(0, 200) || '(空响应)'}`,
-          );
+          throw badRequest('sync.pull.badStatus', {
+            status: response.status,
+            // 只留前 200 字：整段响应可能是 master 的错误细节，可能很长
+            reason: text.slice(0, 200) || '(empty response)',
+          });
         }
         snapshot = (await response.json()) as Parameters<typeof service.applySnapshot>[0];
       } catch (cause) {
         if (cause instanceof Error && cause.name === 'TimeoutError') {
-          throw badRequest('拉取超时（30 秒），检查 master 地址与网络连通性');
+          throw badRequest('sync.pull.timeout');
         }
-        throw badRequest(
-          `拉取失败：${cause instanceof Error ? cause.message : String(cause)}`,
-        );
+        throw badRequest('sync.pull.failed', {
+          reason: cause instanceof Error ? cause.message : String(cause),
+        });
       }
 
       const { applied, conflicts } = service.applySnapshot(snapshot);
       const masterChanged = service.takeMasterChanged();
 
       const settings = repos.settings.read();
-      const summary =
-        `从 ${config.masterUrl} 拉取完成：应用 ${applied} 项，` +
-        `产生 ${conflicts.length} 条冲突待仲裁（${Date.now() - startedAt}ms）` +
-        (masterChanged ? '。注意：master 的实例标识变了，可能换了一台机器，建议核对配置' : '');
+      // 摘要会落进 `lastPullResult` 并显示在界面上，所以也要走字典。
+      // 语言取租户设置：拉取是后台动作，没有「当前请求」的语境可用。
+      const language = repos.settings.read().language ?? 'zh';
+      const summary = buildPullSummary({
+        language,
+        applied,
+        conflictCount: conflicts.length,
+        elapsedMs: Date.now() - startedAt,
+        masterChanged,
+      });
       repos.settings.write({
         ...settings,
         sync: {
@@ -349,7 +388,7 @@ export function registerSyncRoutes(
       const { id } = request.params as { id: string };
       const body = (request.body ?? {}) as { choice?: unknown };
       if (body.choice !== 'local' && body.choice !== 'remote') {
-        throw badRequest('choice 必须是 local 或 remote');
+        throw badRequest('sync.conflict.choiceInvalid');
       }
       let ok: boolean;
       try {
@@ -359,13 +398,12 @@ export function registerSyncRoutes(
         // 后者才是 id 写错了。混在一起说会让用户无从下手。
         if (cause instanceof SyncSealedUnavailableError) {
           throw badRequest(
-            `${cause.message}请先设置 DATA_ENCRYPTION_KEY 并重启，再重新拉取以重建冲突记录；` +
-              '或者改选"用本地"。',
+            'sync.conflict.undecodable',
           );
         }
         throw cause;
       }
-      if (!ok) throw badRequest(`未知冲突：${id}`);
+      if (!ok) throw badRequest('sync.conflict.unknown', { id });
       return { ok: true, conflictCount: repos.syncConflicts.list().length };
     },
   );

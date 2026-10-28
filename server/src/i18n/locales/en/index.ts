@@ -6,6 +6,8 @@ import { enGateway } from './gateway';
 import { enProviders } from './providers';
 import { enSettings } from './settings';
 import { enTokens } from './tokens';
+import { enSync } from './sync';
+import { enNetworking } from './networking';
 import { enLogs } from './logs';
 import { enWarnings } from './warnings';
 
@@ -18,6 +20,8 @@ export const en = {
   agents: enAgents,
   auth: enAuth,
   tokens: enTokens,
+  sync: enSync,
+  networking: enNetworking,
   settings: enSettings,
   warnings: enWarnings,
   logs: enLogs,

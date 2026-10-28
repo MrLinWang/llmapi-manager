@@ -73,17 +73,17 @@ export function registerNetworkingRoutes(
       const next = { ...current };
 
       if (body.enabled !== undefined) {
-        if (typeof body.enabled !== 'boolean') throw badRequest('enabled 必须是布尔值');
+        if (typeof body.enabled !== 'boolean') throw badRequest('networking.enabled.mustBeBoolean');
         next.enabled = body.enabled;
       }
       if (body.networkName !== undefined) {
         if (typeof body.networkName !== 'string' || body.networkName.trim() === '') {
-          throw badRequest('networkName 不能为空');
+          throw badRequest('networking.networkName.required');
         }
         next.networkName = body.networkName.trim();
       }
       if (body.networkSecret !== undefined) {
-        if (typeof body.networkSecret !== 'string') throw badRequest('networkSecret 必须是字符串');
+        if (typeof body.networkSecret !== 'string') throw badRequest('networking.networkSecret.mustBeString');
         // 前端提交打码值时表示"不修改"——否则用户一保存就会把密钥改成星号
         if (!body.networkSecret.includes('*')) {
           next.networkSecret = body.networkSecret;
@@ -91,13 +91,13 @@ export function registerNetworkingRoutes(
       }
       if (body.peers !== undefined) {
         if (!Array.isArray(body.peers) || body.peers.some((p) => typeof p !== 'string')) {
-          throw badRequest('peers 必须是字符串数组');
+          throw badRequest('networking.peers.mustBeStringArray');
         }
         next.peers = body.peers.map((p) => (p as string).trim()).filter((p) => p !== '');
       }
       if (body.hostname !== undefined) {
         if (typeof body.hostname !== 'string' || body.hostname.trim() === '') {
-          throw badRequest('hostname 不能为空');
+          throw badRequest('networking.hostname.required');
         }
         next.hostname = body.hostname.trim();
       }
@@ -105,7 +105,7 @@ export function registerNetworkingRoutes(
         if (body.ipv4 === null || body.ipv4 === '') {
           next.ipv4 = null;
         } else if (typeof body.ipv4 !== 'string') {
-          throw badRequest('ipv4 必须是字符串或 null');
+          throw badRequest('networking.ipv4.mustBeStringOrNull');
         } else {
           next.ipv4 = body.ipv4.trim();
         }
@@ -131,7 +131,7 @@ export function registerNetworkingRoutes(
     async () => {
       const config = readConfig(repos, ctx.secrets);
       if (!config.enabled) {
-        throw badRequest('请先在配置里启用设备互联（enabled），再启动');
+        throw badRequest('networking.start.needEnable');
       }
       await runtime.start(config);
       return { status: await runtime.status(config) };
