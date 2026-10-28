@@ -55,7 +55,7 @@ export const zhSync = {
     /** 冲突已被处理过（并发仲裁） */
     alreadyResolved: '这条冲突已经处理过，请刷新后重试',
     /** 冲突里的值无法解码（换了 DATA_ENCRYPTION_KEY） */
-    undecodable: '冲突内容无法解码，可能是本机的数据密钥变了',
+    undecodable: '冲突内容无法解码，可能是本机的数据密钥变了。原因：{{reason}}',
   },
   snapshot: {
     /** 导出侧的链路检查：快照含全部上游 Key 明文 */

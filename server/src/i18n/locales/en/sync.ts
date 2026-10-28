@@ -46,7 +46,7 @@ export const enSync: typeof zhSync = {
     choiceInvalid: 'choice must be local or remote',
     unknown: 'Unknown conflict: {{id}}',
     alreadyResolved: 'This conflict was already handled; refresh and try again',
-    undecodable: 'Conflict content cannot be decoded; this machine’s data key may have changed',
+    undecodable: 'Conflict content cannot be decoded; this machine’s data key may have changed. Reason: {{reason}}',
   },
   snapshot: {
     mustUseHttps:

@@ -397,9 +397,7 @@ export function registerSyncRoutes(
         // 区分"没有封存值"与"未知冲突"：前者要引导用户去配密钥，
         // 后者才是 id 写错了。混在一起说会让用户无从下手。
         if (cause instanceof SyncSealedUnavailableError) {
-          throw badRequest(
-            'sync.conflict.undecodable',
-          );
+          throw badRequest('sync.conflict.undecodable', { reason: cause.message });
         }
         throw cause;
       }

@@ -10,7 +10,6 @@
 | [gateway.md](./gateway.md) | 别名格式、选路规则、三条路径的协议匹配与鉴权头、地址拼接、流式转发、限制与调用示例 |
 | [agents.md](./agents.md) | Codex / Claude Code 的写入内容、Codex 模型目录与 `web_search` 开关、三条硬约束、快照、还原、结束进程、扩展方式、排错 |
 | [sync.md](./sync.md) | 多设备配置同步：角色、同步范围、凭据为什么明文过网、冲突仲裁、接口与已知限制 |
-| [configuration.md](./configuration.md) | 环境变量、两个密钥的含义、数据目录、首次启动、生产部署、迁移 |
 | [configuration.md](./configuration.md) | 环境变量（含 `LOG_LANGUAGE`）、两个密钥的含义、数据目录、首次启动、生产部署、迁移 |
 
 | [security.md](./security.md) | 两类凭据、口令与会话、令牌、权限矩阵、上游凭据、文件系统边界、部署风险 |
