@@ -1,5 +1,8 @@
 # 文档索引
 
+仓库主 README 有中英两份：[English](../README.md) | [简体中文](../README.zh-CN.md)。
+**本目录下的文档目前只有中文。**
+
 | 文档 | 内容 |
 | --- | --- |
 | [architecture.md](./architecture.md) | 进程结构、分层约定、租户与身份、两条数据流、存储布局、设计取舍 |

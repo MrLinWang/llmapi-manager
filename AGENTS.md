@@ -403,7 +403,9 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
   报错文案跟随租户语言与 Accept-Language、每条错误都带 `messageKey`）。
 - 改服务端文案 → 键进 `server/src/i18n/locales/{zh,en}/`，跑 `npm test -w server`
   （含 `server/test/i18n.test.ts` 的字典契约）。**测试断言用 `messageKey`，不要断言译文。**
-- 改了品牌名 / 对外文案 → 同步 `README.md`、`web/index.html`、登录页与侧边栏。
+- 改了品牌名 / 对外文案 → 同步 `README.md`（英文主文档）与 `README.zh-CN.md`（中文版）、
+  `web/index.html`、登录页与侧边栏。**两份 README 必须同时改**：只改一份会让另一份悄悄过期。
+  它们是人工维护的镜像，没有测试能抓出来。
 
 ## 明确不做的事
 

@@ -1,100 +1,116 @@
 # LLM API Manager
 
-自托管的 LLM API 控制台：在一个网页里维护各家 LLM API，聚合成统一模型别名，
-再把聚合结果下发到你本机的 Agent（首期支持 Codex CLI 与 Claude Code）。
+**English** | [简体中文](./README.zh-CN.md)
 
-设计参考了 `cc-switch`（供应商切换 + 把配置写进 Agent、且只拥有最小字段集）与
-`new-api`（多渠道网关 + 优先级选路），但代码是独立实现的，未复制两者源码。
+A self-hosted console for LLM APIs: manage all your providers in one web UI, publish them as
+unified model aliases, and provision the result into the coding agents on your machine
+(Codex CLI and Claude Code today).
 
-## 能力范围
+The design borrows ideas from `cc-switch` (own only a minimal set of Agent config keys) and
+`new-api` (multi-channel gateway with priority-based routing), but the code is an independent
+implementation — neither project's source was copied.
 
-- **供应商管理**：三种协议 —— OpenAI 兼容（Chat Completions）/ OpenAI 兼容（Responses）/ Anthropic 兼容（Messages）；API Key 加密落盘、列表脱敏、优先级排序、启用开关、连通性测试（请求上游 `/models`）、按表单当前值一键拉取上游模型列表并勾选启用。
-- **模型聚合**：把启用供应商的模型发布为 `lam-<供应商key>/<模型>` 别名；另可配置"默认供应商 + 默认模型"承接不带别名的请求。
-- **统一网关**：`/v1/models`、`/v1/chat/completions`、`/v1/messages`、`/v1/responses`；支持 SSE 流式透传；默认路径失败时按优先级回退一次。
-- **Agent 下发**：Codex CLI（`~/.codex/config.toml` + `auth.json` + `llmapi-model-catalog.json`，只接受 `responses` 供应商，`wire_api` 固定 `responses`）与 Claude Code（`~/.claude/settings.json`，需要 `anthropic`）；支持预览、应用、还原、结束 Codex 进程，写前备份，只改自己拥有的键。
-- **可观测**：请求日志与今日统计（请求数、成功率、平均耗时）。
-- **双语界面与双语报错**：控制台支持简体中文 / English 切换，语言偏好保存在服务端
-  （租户设置），换浏览器或清缓存后仍然生效；未登录时按浏览器语言显示。
-  接口返回的 `error.message`、Agent 描述与诊断输出同样跟随语言。
+## What it does
 
-## 快速开始
+- **Provider management**: three protocols — OpenAI-compatible (Chat Completions),
+  OpenAI-compatible (Responses), and Anthropic-compatible (Messages). API keys are encrypted at
+  rest and masked in the UI, with priority ordering, per-provider enable/disable, connectivity
+  tests (hits the upstream `/models`), and one-click model discovery that works off the current
+  form values before you even save.
+- **Model aggregation**: every enabled provider's models are published as
+  `lam-<provider-key>/<model>` aliases. You can also set a default provider + default model to
+  serve requests that carry no alias.
+- **Unified gateway**: `/v1/models`, `/v1/chat/completions`, `/v1/messages`, `/v1/responses`,
+  with SSE streaming pass-through and one priority-based fallback when the primary path fails.
+- **Agent provisioning**: Codex CLI (`~/.codex/config.toml` + `auth.json` +
+  `llmapi-model-catalog.json`; requires a `responses` provider and pins `wire_api` to
+  `responses`) and Claude Code (`~/.claude/settings.json`; requires `anthropic`). Preview,
+  apply, revert, and stop running Codex processes — with a backup before every write, touching
+  only the keys we own.
+- **Observability**: request log plus today's stats (request count, success rate, average
+  latency).
+- **Bilingual UI and bilingual errors**: the console switches between Simplified Chinese and
+  English. The preference is stored server-side (tenant settings), so it survives a browser
+  change or a cache wipe; before sign-in the browser language is used. The API's
+  `error.message`, Agent descriptions, and diagnostics output follow the same language.
+
+## Quick start
 
 ```bash
 npm install
-cp .env.example .env    # 按需修改
-npm run dev             # 服务端 :8787 + 前端 :5173
+cp .env.example .env    # edit as needed
+npm run dev             # server :8787 + web :5173
 ```
 
-打开 http://localhost:5173 ，首次启动会引导你**自己设置**管理员用户名与口令：
-把控制台打印的一次性初始化令牌填进设置页即可。
+Open http://localhost:5173. On first launch you **set your own** admin username and password:
+copy the one-time setup token printed by the server into the setup page.
 
-生产模式（单进程托管前端）：
+Production mode (a single process serves the API and the built frontend):
 
 ```bash
 npm run build
 npm start               # http://127.0.0.1:8787
 ```
 
-其他命令：`npm run typecheck`、`npm test`。
+Other commands: `npm run typecheck`, `npm test`.
 
-## 文档
+## Documentation
 
-完整文档在 [docs/](./docs/README.md)：
+Full docs live in [docs/](./docs/README.md) (written in Chinese):
 
-| 文档 | 内容 |
+| Document | Contents |
 | --- | --- |
-| [docs/architecture.md](./docs/architecture.md) | 架构、分层、租户与身份、数据流 |
-| [docs/api.md](./docs/api.md) | 接口参考（路径、权限、示例、错误码） |
-| [docs/gateway.md](./docs/gateway.md) | 别名、选路、协议匹配、流式转发 |
-| [docs/agents.md](./docs/agents.md) | Codex / Claude Code 配置下发细节 |
-| [docs/configuration.md](./docs/configuration.md) | 环境变量、数据目录、部署、迁移 |
-| [docs/security.md](./docs/security.md) | 鉴权、权限矩阵、凭据与安全边界 |
-| [docs/development.md](./docs/development.md) | 开发、测试、扩展方式 |
+| [docs/architecture.md](./docs/architecture.md) | Process layout, layering, tenants and identity, data flows |
+| [docs/api.md](./docs/api.md) | API reference (paths, permissions, examples, error codes) |
+| [docs/gateway.md](./docs/gateway.md) | Aliases, routing, protocol matching, streaming |
+| [docs/agents.md](./docs/agents.md) | Codex / Claude Code provisioning details |
+| [docs/configuration.md](./docs/configuration.md) | Environment variables, data directory, deployment, migration |
+| [docs/security.md](./docs/security.md) | Auth, permission matrix, credentials and security boundaries |
+| [docs/development.md](./docs/development.md) | Development, testing, extension guide |
 
-参与开发（尤其是 AI 编码代理）请先读 [AGENTS.md](./AGENTS.md)。
+If you are contributing — especially as an AI coding agent — read [AGENTS.md](./AGENTS.md) first.
 
+## API at a glance
 
-## 接口速查
+Admin endpoints (require a session cookie):
 
-管理接口（需登录会话 Cookie）：
-
-| 方法 | 路径 | 说明 |
+| Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/health` | 健康检查与启动告警（免鉴权） |
-| POST | `/api/auth/login` / `/api/auth/logout` | 登录 / 退出 |
-| GET | `/api/auth/me` | 当前身份、权限与界面语言（`language`，`null` = 跟随浏览器） |
-| POST | `/api/auth/password` | 修改口令（会使旧会话失效） |
-| GET/POST | `/api/providers` | 供应商列表 / 新增 |
-| PUT/DELETE | `/api/providers/:id` | 更新 / 删除 |
-| PATCH | `/api/providers/:id/enabled` | 启用开关 |
-| POST | `/api/providers/:id/test` | 连通性测试 |
-| POST | `/api/providers/models` | 按表单临时值拉取模型列表（新增时也能用） |
-| PUT | `/api/providers/order` | 调整优先级顺序 |
-| GET | `/api/models` | 聚合别名、默认模型、网关地址与令牌（脱敏） |
-| PUT | `/api/settings/default` | 设置默认供应商与模型 |
-| GET | `/api/settings` | 读取租户设置（含 `language`、`disableCodexWebSearch`） |
-| PATCH | `/api/settings/language` | 设置界面语言：`zh` / `en` / `null`（跟随浏览器） |
-| PATCH | `/api/settings/codex` | Codex 行为开关：是否关闭联网搜索 |
-| POST | `/api/gateway/token` | 生成/重置网关令牌（明文只返回一次） |
-| GET | `/api/agents` | Agent 列表与接管状态 |
-| POST | `/api/agents/:id/preview` \| `apply` \| `revert` | 预览 / 应用 / 还原 |
-| POST | `/api/agents/:id/stop-processes` | 结束本机 Codex 进程，使其重读配置 |
-| GET | `/api/logs`、`/api/stats` | 请求日志与统计 |
+| GET | `/api/health` | Health check and startup warnings (no auth) |
+| POST | `/api/auth/login` / `/api/auth/logout` | Sign in / sign out |
+| GET | `/api/auth/me` | Current identity, permissions and UI language (`language`; `null` = follow the browser) |
+| POST | `/api/auth/password` | Change password (invalidates existing sessions) |
+| GET/POST | `/api/providers` | List / create providers |
+| PUT/DELETE | `/api/providers/:id` | Update / delete |
+| PATCH | `/api/providers/:id/enabled` | Enable or disable |
+| POST | `/api/providers/:id/test` | Connectivity test |
+| POST | `/api/providers/models` | Discover models from unsaved form values |
+| PUT | `/api/providers/order` | Reorder by priority |
+| GET | `/api/models` | Aliases, default model, gateway URL and token (masked) |
+| PUT | `/api/settings/default` | Set the default provider and model |
+| GET | `/api/settings` | Read tenant settings (including `language`, `disableCodexWebSearch`) |
+| PATCH | `/api/settings/language` | Set UI language: `zh` / `en` / `null` (follow the browser) |
+| PATCH | `/api/settings/codex` | Codex behaviour flags, e.g. disable web search |
+| POST | `/api/gateway/token` | Create or reset the gateway token (plaintext returned once) |
+| GET | `/api/agents` | Agent list and provisioning status |
+| POST | `/api/agents/:id/preview` \| `apply` \| `revert` | Preview / apply / revert |
+| POST | `/api/agents/:id/stop-processes` | Stop local Codex processes so they reload config |
+| GET | `/api/logs`, `/api/stats` | Request log and stats |
 
-网关接口（需网关令牌，`Authorization: Bearer <token>` 或 `x-api-key`）：
+Gateway endpoints (require a gateway token via `Authorization: Bearer <token>` or `x-api-key`):
 
 ```
 GET  /v1/models
-POST /v1/chat/completions    # 需要 apiType=openai 的上游（OpenAI 兼容 · Chat Completions）
-POST /v1/messages            # 需要 apiType=anthropic 的上游（Anthropic 兼容 · Messages）
-POST /v1/responses           # 需要 apiType=responses 的上游（OpenAI 兼容 · Responses）
+POST /v1/chat/completions    # needs an apiType=openai upstream (OpenAI-compatible · Chat Completions)
+POST /v1/messages            # needs an apiType=anthropic upstream (Anthropic-compatible · Messages)
+POST /v1/responses           # needs an apiType=responses upstream (OpenAI-compatible · Responses)
 ```
 
-三条 POST 路径都是**严格匹配**：协议不符返回 501，不会退化成正向直通。
-鉴权头按上游体系分组：`openai` 与 `responses` 用 `Authorization: Bearer`，
-`anthropic` 用 `x-api-key` + `anthropic-version`。
+All three POST paths match **strictly**: a protocol mismatch returns 501 rather than being
+silently forwarded. Auth headers are grouped by upstream family: `openai` and `responses` use
+`Authorization: Bearer`, `anthropic` uses `x-api-key` + `anthropic-version`.
 
-示例（令牌在"模型聚合"页生成）：
+Example (create a token on the "Model aggregation" page):
 
 ```bash
 curl http://127.0.0.1:8787/v1/chat/completions \
@@ -103,115 +119,155 @@ curl http://127.0.0.1:8787/v1/chat/completions \
   -d '{"model":"lam-myprovider/gpt-x","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-`model` 用聚合别名时只路由到该供应商；不认识的 `lam-` 别名会返回 400，**不会**回落到默认供应商（避免用错额度、答错模型）。
+When `model` is an aggregation alias the request is routed to that provider only. An unknown
+`lam-` alias returns 400 and **never** falls back to the default provider — a fallback would
+spend another provider's quota and answer with the wrong model without the caller noticing.
 
-错误响应统一为 `{ "error": { "code", "message", "messageKey", "details"? } }`。
-`message` 按请求语言渲染（租户设置 > `Accept-Language` > 中文），
-要判断具体原因请用**不随语言变化**的 `messageKey`（如 `gateway.auth.invalidToken`），
-不要匹配译文。详见 [docs/api.md](./docs/api.md)。
+Errors share one shape: `{ "error": { "code", "message", "messageKey", "details"? } }`.
+`message` is rendered in the request's language (tenant setting > `Accept-Language` > Chinese).
+To branch on a specific cause use **`messageKey`**, which never changes with language (for
+example `gateway.auth.invalidToken`) — do not match on the translated text.
+See [docs/api.md](./docs/api.md).
 
-## 环境变量
+## Environment variables
 
-见 [.env.example](.env.example)。常用的几个：
+See [.env.example](.env.example). The common ones:
 
-| 变量 | 默认 | 说明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `HOST` | `127.0.0.1` | 监听地址；对外暴露请配 HTTPS 反代 |
-| `PORT` | `8787` | 监听端口 |
-| `PUBLIC_BASE_URL` | 由 HOST:PORT 推导 | 写进 Agent 配置的网关地址，反代/容器部署必须显式设置 |
-| `DATA_DIR` | `data` | 数据目录；相对路径按进程 cwd 解析（npm 脚本下即 `server/data`），想固定在仓库根可设 `../data` |
-| `ADMIN_USERNAME` | `admin` | 初始管理员用户名，仅首次创建账号时使用 |
-| `ADMIN_PASSWORD` | 无 | 应急通道：设置后跳过网页初始化，直接以此口令建号（适合 Docker/systemd） |
-| `DATA_ENCRYPTION_KEY` | 无 | 供应商 Key 与网关令牌的落盘加密密钥；不设则为明文并告警 |
-| `LOG_LANGUAGE` | `zh` | 运行日志、启动横幅与 CLI 输出的语言（`zh` / `en`）。与界面语言分开：接口跟随请求语言，日志跟随这个设置 |
-| `LOG_DIR` | 仓库根 `log/` | 运行日志目录；设为 `off` 只输出到控制台 |
-| `LOG_MAX_BYTES` / `LOG_MAX_FILES` | `5242880` / `5` | 单文件滚动阈值与保留的历史文件个数 |
-| `AGENT_HOME_DIR` | OS 家目录 | Agent 配置根目录（其下 `.codex` / `.claude`） |
+| `HOST` | `127.0.0.1` | Listen address; put an HTTPS reverse proxy in front if exposed |
+| `PORT` | `8787` | Listen port |
+| `PUBLIC_BASE_URL` | derived from HOST:PORT | Gateway URL written into Agent config; must be set explicitly behind a proxy or in a container |
+| `DATA_DIR` | `data` | Data directory; relative paths resolve against the process cwd (i.e. `server/data` under npm scripts). Set `../data` to pin it to the repo root |
+| `ADMIN_USERNAME` | `admin` | Initial admin username, used only when first creating the account |
+| `ADMIN_PASSWORD` | none | Escape hatch: skips web setup and creates the account with this password directly (handy for Docker/systemd) |
+| `DATA_ENCRYPTION_KEY` | none | Key used to encrypt provider keys and gateway tokens at rest; if unset they are stored in plaintext and a warning is shown |
+| `LOG_LANGUAGE` | `zh` | Language (`zh` / `en`) of runtime logs, the startup banner and CLI output. Separate from the UI language: the API follows the request language, logs follow this setting |
+| `LOG_DIR` | repo-root `log/` | Runtime log directory; set to `off` for console-only |
+| `LOG_MAX_BYTES` / `LOG_MAX_FILES` | `5242880` / `5` | Rotation threshold and number of retained files |
+| `AGENT_HOME_DIR` | OS home | Root for Agent config (holds `.codex` / `.claude`) |
 
-## 数据与安全边界
+## Data and security boundaries
 
 ```
-data/                                  # 实际落点由 DATA_DIR 决定，npm 脚本下默认 server/data
-├── identity.json                       # 租户与账号（口令只存 scrypt 哈希）
-├── instance.json                       # 会话签名密钥（可重建）
-├── setup.json                          # 首次初始化令牌（哈希），完成后清空
+data/                                  # actual location is DATA_DIR; server/data under npm scripts
+├── identity.json                       # tenants and accounts (passwords stored as scrypt hashes only)
+├── instance.json                       # session signing secret (rebuildable)
+├── setup.json                          # first-run setup token (hashed), cleared once completed
 └── tenants/<tenantId>/
-    ├── providers.json                  # 供应商（API Key 经 AES-256-GCM 加密）
-    ├── settings.json                   # 默认模型、网关令牌（只存哈希 + 密文）、Codex 开关
-    ├── agents.json                     # 下发快照（含 appliedBy）
-    ├── requests.jsonl                  # 网关请求日志
-    └── （备份不再放数据目录，见下）
+    ├── providers.json                  # providers (API keys encrypted with AES-256-GCM)
+    ├── settings.json                   # default model, gateway token (hash + ciphertext only), Codex flags
+    ├── agents.json                     # provisioning snapshot (includes appliedBy)
+    ├── requests.jsonl                  # gateway request log
+    └── (backups are not kept here — see below)
 ```
 
-- **会写你的家目录**：只有点击"应用配置"时才改写 `~/.codex/config.toml`、`~/.codex/auth.json`、`~/.codex/llmapi-model-catalog.json`（模型目录，整份生成）、`~/.claude/settings.json`；写入前在同目录生成 `*.bak-<时间戳>` 备份（如 `~/.codex/config.toml.bak-2026-10-23T14-00-00-000Z`），改坏了可直接找回，不依赖本服务是否还在运行。
-- **会结束你的进程**：Codex 只在启动时读配置与模型目录，所以「退出 Codex 进程」按钮会执行 `codex app-server daemon stop` 并对 `codex` / `codex exec` 进程发信号（先 `SIGTERM`、必要时 `SIGKILL`）。匹配规则保守，不碰 `mycodex`、编辑器插件或 `codex --version` 这类一次性命令。操作结果提示里固定附上兜底命令 `pkill -9 -f codex`，自动结束没覆盖到时可以手动清理。
-- **只拥有最小字段集**：Codex 只改 `model_provider`、`model`、`model_catalog_json`、`web_search` 与 `[model_providers.llmapi]` 段；Claude Code 只改 `env` 下三个键。其余内容（MCP、钩子、权限、其他 provider）原样保留。
-- **还原是保守的**：只移除"当前值仍等于我们写入值"的键；被你手改过的键保留并作为冲突提示。由我们创建、且还原后为空壳的文件会直接删除。
-- **凭据**：口令用 scrypt；网关令牌只存哈希（下发 Agent 时另有密文副本，任何接口都不返回）；供应商 Key 列表接口只返回首 3 位 + 尾 4 位。
-- **明文模式**：不设置 `DATA_ENCRYPTION_KEY` 时凭据以明文保存，`/api/health` 会持续告警，仅建议单机使用。
+- **It writes to your home directory**, but only when you click "Apply config": it updates
+  `~/.codex/config.toml`, `~/.codex/auth.json`, `~/.codex/llmapi-model-catalog.json` (the model
+  catalog, generated in full) and `~/.claude/settings.json`. Before each write it creates a
+  `*.bak-<timestamp>` backup **next to the file** (e.g.
+  `~/.codex/config.toml.bak-2026-10-23T14-00-00-000Z`), so you can recover immediately even if
+  this service is no longer running.
+- **It stops your processes**: Codex only reads config and the model catalog at startup, so the
+  "Stop Codex processes" button runs `codex app-server daemon stop` and signals `codex` /
+  `codex exec` processes (`SIGTERM`, then `SIGKILL` if needed). Matching is conservative: it
+  never touches `mycodex`, editor plugins, or one-shot commands like `codex --version`. The
+  result message always includes the `pkill -9 -f codex` fallback in case automatic cleanup
+  misses something.
+- **It owns a minimal set of keys**: for Codex it only touches `model_provider`, `model`,
+  `model_catalog_json`, `web_search` and the `[model_providers.llmapi]` section; for Claude Code
+  only three keys under `env`. Everything else (MCP servers, hooks, permissions, other
+  providers) is preserved verbatim.
+- **Revert is conservative**: it only removes keys whose current value still equals the value we
+  wrote. Keys you edited by hand are kept and reported as conflicts. Files we created that would
+  be empty after a revert are deleted.
+- **Credentials**: passwords use scrypt; gateway tokens are stored as hashes only (a separate
+  ciphertext copy is used when provisioning Agents and is never returned by any endpoint); the
+  provider list only exposes the first 3 and last 4 characters of a key.
+- **Plaintext mode**: without `DATA_ENCRYPTION_KEY`, credentials are stored in plaintext and
+  `/api/health` keeps warning about it. Single-machine use only.
 
-## 为多用户预留的设计
+## Designed for multi-user
 
-当前是单人使用（一个 `t_default` 租户、一个 `owner` 账号），但结构上已经为多用户/租户隔离与权限控制留好接口：
+The current release is single-user (one `t_default` tenant, one `owner` account), but the
+structure already leaves room for multi-tenant isolation and permission control:
 
-- **身份三层**：`Tenant` / `User(role)` / `Principal`（请求上下文）。会话与网关令牌都解析成 `Principal`，没有"匿名默认租户"的兜底。
-- **数据分区**：所有租户数据在 `data/tenants/<tenantId>/`，仓储只能通过 `forTenant(principal)` 获取，路由层不拼路径。
-- **权限集中裁决**：`server/src/domain/permissions.ts` 定义 `Permission` 与角色映射；每条 `/api` 路由经 `defineRoute` 显式声明所需权限，`policy.ts` 统一判定，漏声明会在启动自检时失败。
-- **路径可替换**：Agent 文件路径由 `AgentPathResolver` 按 `{tenantId, userId}` 解析，`registerTenantWorkspace()` 已预留为每租户独立工作区的入口。
-- **可审计**：日志与 Agent 下发快照都带 `tenantId` / `appliedBy`。
+- **Three identity layers**: `Tenant` / `User(role)` / `Principal` (request context). Both
+  sessions and gateway tokens resolve to a `Principal`; there is no "anonymous default tenant"
+  fallback.
+- **Data partitioning**: all tenant data lives under `data/tenants/<tenantId>/`, repositories are
+  only reachable via `forTenant(principal)`, and routes never build paths themselves.
+- **Centralised permission decisions**: `server/src/domain/permissions.ts` defines `Permission`
+  and the role mapping. Every `/api` route declares its required permission through
+  `defineRoute`, `policy.ts` decides uniformly, and a missing declaration fails the startup
+  self-check.
+- **Replaceable paths**: Agent file paths resolve through `AgentPathResolver` keyed by
+  `{tenantId, userId}`; `registerTenantWorkspace()` is already the entry point for per-tenant
+  workspaces.
+- **Auditable**: logs and provisioning snapshots carry `tenantId` / `appliedBy`.
 
-接入多用户时，需要新增的是用户/租户开通、邀请与登录方式，以及把 `app.ts` 里写死的 `DEFAULT_TENANT_ID` 换成从 `Principal` 取租户——领域模型与接口契约不用动。
+Adding multi-user support means implementing account/tenant provisioning, invitations and
+sign-in flows, and replacing the hard-coded `DEFAULT_TENANT_ID` in `app.ts` with a tenant derived
+from the `Principal`. The domain model and API contracts do not need to change.
 
-## 已知限制
+## Known limitations
 
-- 协议默认严格匹配：`/v1/chat/completions` 要 `openai`、`/v1/messages` 要 `anthropic`、
-  `/v1/responses` 要 `responses`，不匹配明确返回 501、不静默转发。
-  唯一例外是 `/v1/responses → openai`：开启「跨协议转发」（或协议不匹配时网关自动开启）后，
-  由网关双向转换请求、响应与流式事件。托管工具（如 `web_search`）没有 Chat 等价物会被丢弃。
-- 不做计费、配额、多用户 UI、MCP/Skills/会话管理、桌面打包。
-- **日志语言与接口语言是两套设置**：接口响应跟随请求语言（租户设置 > `Accept-Language`），
-  而运行日志、启动横幅与 CLI 输出跟随 `LOG_LANGUAGE`（默认中文）。日志的受众是部署者，
-  跟着某个客户端漂移会让同一故障在不同请求下长得不一样、无法 grep。
-- 存储是 JSON 文件 + 原子写，适合单机自托管；高并发或多实例需要换 SQLite/Postgres 与共享状态。
-- 上游能力以"OpenAI / Anthropic 兼容"为前提（OpenAI 体系含 Chat Completions 与 Responses
-  两种 API 形态）；非兼容的私有协议需要新增适配层。
+- Protocols match strictly by default: `/v1/chat/completions` needs `openai`, `/v1/messages`
+  needs `anthropic`, `/v1/responses` needs `responses`. A mismatch returns 501 instead of
+  silently forwarding. The single exception is `/v1/responses → openai`: with
+  "cross-protocol forwarding" enabled (or auto-enabled when protocols don't match), the gateway
+  converts requests, responses and stream events in both directions. Hosted tools such as
+  `web_search` have no Chat equivalent and are dropped.
+- No billing, quotas, multi-user UI, MCP/Skills/session management, or desktop packaging.
+- **Log language and API language are two separate settings**: API responses follow the request
+  language (tenant setting > `Accept-Language`), while runtime logs, the startup banner and CLI
+  output follow `LOG_LANGUAGE` (Chinese by default). Logs are read by whoever deploys the
+  service; letting them drift with a particular client would make the same failure look
+  different across requests and break `grep`.
+- Storage is JSON files with atomic writes, suited to single-machine self-hosting. High
+  concurrency or multiple instances require SQLite/Postgres and shared state.
+- Upstreams are assumed to be "OpenAI / Anthropic compatible" (the OpenAI family covers both the
+  Chat Completions and Responses API shapes). Non-compatible proprietary protocols need a new
+  adapter layer.
 
-## 目录结构
+## Repository layout
 
 ```
 server/
   src/
-    app.ts                Fastify 装配、错误处理、SPA 托管
-    index.ts              启动入口（bootstrap + listen）
+    app.ts                Fastify wiring, error handling, SPA hosting
+    index.ts              Entry point (bootstrap + listen)
     config.ts  logger.ts  resilience.ts  context.ts  bootstrap.ts
-    i18n/                 服务端文案：语言解析（租户设置 → Accept-Language → 中文）、translate、locales/{zh,en}/ 字典
-    domain/               provider、aliases、identity、permissions、agent、settings、modelCatalog、requestLog
-    store/                jsonFile（原子写/损坏隔离）、paths、tenantScope、identityRepo
-    auth/                 password、session、principal、policy、guard
-    crypto/               secretCodec（AES-256-GCM）
-    gateway/              token、auth、forward
-    services/             providers、connectivity、requestLog、setup
-    agents/               registry（路径解析）、patch（JSON/TOML 保值补丁）、toml、processes、service
-    routes/               auth、providers、models、logs、agents、gateway
-  test/                   单元测试 + 端到端冒烟（含假上游）
+    i18n/                 Server-side copy: language resolution (tenant setting → Accept-Language → Chinese), translate, locales/{zh,en}/
+    domain/               provider, aliases, identity, permissions, agent, settings, modelCatalog, requestLog
+    store/                jsonFile (atomic writes / corruption quarantine), paths, tenantScope, identityRepo
+    auth/                 password, session, principal, policy, guard
+    crypto/               secretCodec (AES-256-GCM)
+    gateway/              token, auth, forward
+    services/             providers, connectivity, requestLog, setup
+    agents/               registry (path resolution), patch (value-preserving JSON/TOML edits), toml, processes, service
+    routes/               auth, providers, models, logs, agents, gateway
+  test/                   Unit tests + end-to-end smoke tests (with fake upstreams)
 web/
   src/pages/              Login / Setup / Layout / Overview / Providers / Models / Agents / Settings
-  src/components/         ui、ProviderForm、CopyButton
-  src/lib/                api、auth、useAsync、types、labels（枚举文案键）
-  src/i18n/               i18next 初始化、语言探测、日期格式化、locales/{zh,en}/ 字典
-  test/                   页面装配测试 + 字典契约 + 硬编码扫描（jsdom）
+  src/components/         ui, ProviderForm, CopyButton
+  src/lib/                api, auth, useAsync, types, labels (enum message keys)
+  src/i18n/               i18next init, language detection, date localisation, locales/{zh,en}/
+  test/                   Page assembly tests + dictionary contract + hardcoded-text scan (jsdom)
 ```
 
-## 致谢
+## Credits
 
-本项目的设计参考了 [cc-switch](https://github.com/farion1231/cc-switch) 与
-[new-api](https://github.com/QuantumNous/new-api) 两个开源项目：
+The design references two open-source projects:
 
-- **cc-switch**：把配置写进本机 Agent、且只拥有最小字段集（不改用户其余配置）的做法；
-- **new-api**：多渠道网关 + 按优先级选路的思路。
+- [cc-switch](https://github.com/farion1231/cc-switch) — writing config into local Agents while
+  owning only a minimal set of keys.
+- [new-api](https://github.com/QuantumNous/new-api) — multi-channel gateway with priority-based
+  routing.
 
-代码为独立实现，未复制两者源码，也未沿用其架构。
+The code here is an independent implementation: neither project's source was copied, nor was its
+architecture adopted.
 
-## 许可
+## License
 
 [MIT](LICENSE) © 2026 LinWang
