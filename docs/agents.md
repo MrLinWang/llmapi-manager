@@ -128,6 +128,8 @@ Codex 的「切换模型」列表读的是模型目录，而不是把 `/v1/model
       "visibility": "list",
       "supported_in_api": true,
       "context_window": 128000,
+      "max_context_window": 128000,
+      "auto_compact_token_limit": 115200,
       "max_output_tokens": 8192,
       "default_reasoning_level": "high",
       "supported_reasoning_levels": [
@@ -137,10 +139,20 @@ Codex 的「切换模型」列表读的是模型目录，而不是把 `/v1/model
         { "effort": "xhigh", "description": "很高的推理投入，适合困难任务" },
         { "effort": "max", "description": "最大推理投入，最慢但最深入" }
       ],
+      "default_reasoning_summary": "auto",
+      "effective_context_window_percent": 95,
       "input_modalities": ["text", "image"],
       "shell_type": "default",
       "truncation_policy": { "mode": "tokens", "limit": 10000 },
       "support_verbosity": false,
+      "additional_speed_tiers": [],
+      "service_tiers": [],
+      "availability_nux": null,
+      "upgrade": null,
+      "supports_image_detail_original": false,
+      "supports_search_tool": false,
+      "supports_parallel_tool_calls": false,
+      "supports_reasoning_summaries": true,
       "experimental_supported_tools": [],
       "base_instructions": "You are a coding assistant served through LLM API Manager, ..."
     }
@@ -168,6 +180,26 @@ Codex 的「切换模型」列表读的是模型目录，而不是把 `/v1/model
   逐字段回落：只声明了上下文、没声明输出上限时，前者用真实值、后者用默认值。
 - `max_output_tokens` 目前不在 Codex 的 `ModelInfo` 里（会被忽略），保留它只是让目录文件自解释；
   有上游声明的 `output_budget` 时一并写入，没有就写 8192。
+- 其余条目字段分四组，取值都是 **Codex 缺省值 / 第三方上游的保守值**，写出来是为了让目录自解释、
+  并兼容旧版解析器（对照 cc-switch 给第三方供应商生成的目录 `ref/cc-switch` 的
+  `codex_catalog_from_specs_for_row`）：
+  - 窗口派生：`max_context_window` 与 `context_window` 相同（Codex 用它 clamp
+    `model_context_window` 覆盖，别让配置把窗口开过上游真实值）；`auto_compact_token_limit`
+    写窗口的 90%，与 Codex 不写该字段时的推导完全一致，不改变压缩时机；
+    `effective_context_window_percent` 写 Codex 默认的 95。
+  - 官方账号权益与服务能力显式清空/关闭：`additional_speed_tiers`、`service_tiers` 为空数组，
+    `availability_nux`、`upgrade` 为 `null`，`supports_image_detail_original`、
+    `supports_search_tool` 为 `false`。联网搜索仍由设置项控制（`web_search = "disabled"`
+    或删除该键），目录不替用户打开。
+  - `default_reasoning_summary` 写 `auto`（Codex 缺省）。**不照抄** cc-switch 给纯第三方模板的
+    `none`：我们的目录里也可能有官方 GPT 模型，写 `none` 会让它们默认不再返回思考摘要。
+  - `supports_parallel_tool_calls` / `supports_reasoning_summaries` 是**旧版 Codex 解析器要求的键**：
+    当前版本（已核 `ref/codex` 的 `ModelInfo`）没有这两个字段，会当作未知键忽略；
+    保留是为了让旧客户端也能加载这份目录（cc-switch 记录过 0.148 缺键会拒绝整份目录）。
+- **刻意不写** `apply_patch_tool_type`、`model_messages`、`tool_mode`、`multi_agent_version` 等字段：
+  `apply_patch_tool_type` 非空会让 Codex 启用 freeform apply_patch 工具，而那套补丁格式依赖官方
+  提示词一起训练；我们的 `base_instructions` 是一段中立短说明，打开它只会给模型一个不会用的工具。
+  cc-switch 对没有官方目录的第三方供应商同样不写 apply_patch。
 
 ### 模型元数据的来源与优先级
 

@@ -43,6 +43,58 @@ export interface CodexCatalogEntry {
    * 不要指望它影响 Codex 的行为。
    */
   max_output_tokens: number;
+  /**
+   * 允许通过 `model_context_window` 配置覆盖到的上限（`ModelInfo.max_context_window`）。
+   *
+   * 不写时 Codex 不设上限；与 `context_window` 保持一致，用户把窗口配大也不会
+   * 超过上游声明的真实值。窗口未知时两者都用保守默认值。
+   */
+  max_context_window: number;
+  /**
+   * 自动压缩阈值（`ModelInfo::auto_compact_token_limit`）。
+   *
+   * 写的是上下文窗口的 90% —— 与 Codex 不写该字段时的推导（`context * 9 / 10`）完全一致，
+   * 属于"把隐含默认值显式化"，不改变行为。
+   */
+  auto_compact_token_limit: number;
+  /**
+   * 推理摘要的默认档位（`ModelInfo.default_reasoning_summary`）。
+   *
+   * 写 `auto`（= Codex 的缺省值）而不是 `none`：我们的目录同时覆盖官方 GPT 模型
+   * （同一个聚合上游），写 `none` 会让这些模型默认不再请求 reasoning summary，
+   * 终端里就看不到思考过程。cc-switch 对纯第三方模板写 `none`，那是它的目录只服务
+   * 第三方模型的取舍；两边前提不同，不要照抄。
+   */
+  default_reasoning_summary: string;
+  /** 可用上下文里有多少比例可用于输入（Codex 默认 95）。 */
+  effective_context_window_percent: number;
+  /**
+   * 官方账号才有的"速度档 / 服务档 / 升级提示"（`ModelInfo.additional_speed_tiers` 等）。
+   * 第三方聚合上游没有这些权益，显式清空，避免从官方目录模板继承下来。
+   */
+  additional_speed_tiers: string[];
+  service_tiers: unknown[];
+  availability_nux: null;
+  upgrade: null;
+  /** 是否支持把图片以 `original` 精度回传给上游（默认 false；未知时不要宣称支持）。 */
+  supports_image_detail_original: boolean;
+  /**
+   * 是否支持 Responses 的托管搜索工具 / 工具检索（`ModelInfo.supports_search_tool`）。
+   *
+   * 第三方上游多数接不了 `web_search` 托管工具（会 400 `unsupported tool type`），
+   * 所以恒为 false；联网搜索是否可用由设置项决定（写 `web_search = "disabled"` 或删除），
+   * 不要在目录里替用户打开它。
+   */
+  supports_search_tool: boolean;
+  /**
+   * 旧版 Codex 解析器要求、但当前 ModelInfo 已没有的键（0.164 的 serde 会当未知字段忽略）。
+   *
+   * 保留是为了兼容旧客户端：cc-switch 记录过 codex 0.148 缺少 `supports_reasoning_summaries`
+   * 会直接拒绝整份目录（见 ref/cc-switch 的 `CODEX_CATALOG_PARSER_REQUIRED_FIELDS`）。
+   * 新版本忽略它们，写成保守值（false/true）不影响行为。
+   */
+  supports_parallel_tool_calls: boolean;
+  supports_reasoning_summaries: boolean;
   default_reasoning_level: string;
   supported_reasoning_levels: CodexReasoningLevel[];
   /**
@@ -60,6 +112,19 @@ export interface CodexCatalogEntry {
   experimental_supported_tools: string[];
   /** 二者至少提供一个，否则 Codex 拒绝加载目录 */
   base_instructions: string;
+  /**
+   * 刻意不写的字段（与 cc-switch 给第三方供应商用的模板一致）：
+   *
+   * - `apply_patch_tool_type`：写任意非 null 值都会让 Codex 启用 freeform
+   *   apply_patch 工具（见 ref/codex `core/src/tools/spec_plan.rs` 里的
+   *   `model_info.apply_patch_tool_type.is_some()`）。freeform 补丁格式是官方模型
+   *   配合官方提示词一起训出来的；我们的 `base_instructions` 是一段中立的短说明，
+   *   打开它只会把模型不会用的工具塞过去。cc-switch 对没有官方目录的第三方供应商
+   *   同样不写（注释原话："no freeform apply_patch"）。
+   * - `model_messages` / `tool_mode` / `multi_agent_version` / `multi_agent_reasoning_effort`
+   *   / `web_search_tool_type` / `include_*_usage_instructions`：官方 harness 的
+   *   提示词与工具编排，套到第三方上游不成立。需要时按模型能力单独评估，不要整段照搬官方目录。
+   */
 }
 
 export interface CodexCatalog {
@@ -78,6 +143,22 @@ export interface CodexCatalog {
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 /** 只为了让目录文件自解释；Codex 的 ModelInfo 没有这个字段，见 CodexCatalogEntry 上的注释。 */
 const DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
+/**
+ * Codex 的 `ModelInfo.effective_context_window_percent` 缺省值（`default_effective_context_window_percent`）。
+ * 显式写出来让目录自解释；改这个值会真实改变可用输入预算，不是"补字段"。
+ */
+const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT = 95;
+
+/**
+ * 自动压缩阈值：与 Codex 在目录未提供该字段时的推导一致（`context_window * 9 / 10`）。
+ *
+ * 之所以显式写：目录是给人看也给人核对的，把"90% 处压缩"这条隐含规则写出来，
+ * 用户调整上下文窗口时能直接看到阈值跟着变（`ModelInfo::auto_compact_token_limit`
+ * 还会再夹一次 90%，所以这里写上不会越界）。
+ */
+function autoCompactTokenLimit(contextWindow: number): number {
+  return Math.floor((contextWindow * 9) / 10);
+}
 
 /**
  * 没有模态信息时的默认值，与 Codex 的 `default_input_modalities()` 保持一致。
@@ -302,6 +383,9 @@ function buildCatalogEntries(
             reasoningLevels.map((level) => level.effort),
           );
 
+    // 窗口只算一次：max_context_window 与自动压缩阈值都由它派生，避免三处各写一份回落逻辑。
+    const contextWindow = input.capability?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+
     entries.push({
       slug: input.model,
       // display_name 直接用别名本身（= slug），不再另拼一个「供应商 + 模型」的人类可读名：
@@ -316,7 +400,12 @@ function buildCatalogEntries(
       supported_in_api: true,
       // 有上游声明的真实值就用它，否则回落保守默认值。逐字段判断：
       // 有的上游只给了上下文没给输出上限，不该因为缺一个字段就两个都退回默认。
-      context_window: input.capability?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      context_window: contextWindow,
+      // 配置覆盖上限与窗口保持一致：Codex 会用它 clamp `model_context_window`，
+      // 不写就看不出"这个模型最多能开到多大"。
+      max_context_window: contextWindow,
+      // 与 Codex 的缺省推导一致（90%），只是把隐含规则写进目录，不改变压缩时机。
+      auto_compact_token_limit: autoCompactTokenLimit(contextWindow),
       max_output_tokens: input.capability?.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
       // 明确声明不支持推理时给空数组（Codex 允许空，表示这个模型没有推理档位）。
       // 未知（undefined）仍给三档：绝大多数上游模型支持 effort 参数，
@@ -326,6 +415,10 @@ function buildCatalogEntries(
       // 不再所有模型共用一套 low/medium/high。
       supported_reasoning_levels: reasoningLevels,
       default_reasoning_level: defaultEffort,
+      // Codex 的默认值。不写 none：目录里同时有官方 GPT 模型（同一个聚合上游），
+      // 写 none 会让它们默认不再返回 reasoning summary，思考过程直接看不见。
+      default_reasoning_summary: 'auto',
+      effective_context_window_percent: DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
       // 走白名单，绝不透传 pdf / video（会让整份目录失效，见 CodexCatalogEntry 注释）。
       //
       // 没有模态信息时用 Codex 自己的默认值 text+image，而不是只给 text：
@@ -339,6 +432,18 @@ function buildCatalogEntries(
       shell_type: 'default',
       truncation_policy: { mode: 'tokens', limit: 10_000 },
       support_verbosity: false,
+      // 官方账号权益（速度档/服务档/升级提示）与第三方聚合上游无关，显式清空，
+      // 避免将来有人整段照搬官方目录时把它们一起带进来。
+      additional_speed_tiers: [],
+      service_tiers: [],
+      availability_nux: null,
+      upgrade: null,
+      // 两项都是 Codex 的默认值：不宣称 original 图片精度、不宣称托管搜索工具能力。
+      supports_image_detail_original: false,
+      supports_search_tool: false,
+      // 旧版解析器要求的兼容键，新版本当作未知字段忽略（原因见 CodexCatalogEntry 注释）。
+      supports_parallel_tool_calls: false,
+      supports_reasoning_summaries: true,
       experimental_supported_tools: [],
       base_instructions: AGGREGATE_INSTRUCTIONS,
     });

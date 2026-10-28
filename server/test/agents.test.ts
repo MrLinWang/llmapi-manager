@@ -250,6 +250,71 @@ describe('TOML 补丁', () => {
     }
   });
 
+  it('目录补全 ModelInfo 的可选字段，且不冒充官方 harness', () => {
+    // 对照 cc-switch 给第三方供应商生成的目录（ref/cc-switch 的
+    // codex_catalog_from_specs_for_row）：我们原先只写 16 个键，缺的这些在新版
+    // Codex 里多数是"缺省即等价"的保守值，写出来是为了让目录自解释、
+    // 并让旧版解析器也能加载。
+    const raw = buildModelCatalog(
+      [
+        {
+          alias: 'lam-a/gpt-x',
+          providerId: 'p1',
+          providerKey: 'a',
+          providerName: 'A',
+          apiType: 'responses',
+          upstreamModel: 'gpt-x',
+          capability: { contextWindow: 262_000 },
+        },
+      ],
+      {},
+    );
+    const model = (JSON.parse(raw) as { models: Array<Record<string, unknown>> }).models[0];
+
+    // 窗口派生字段：上限与自动压缩阈值都从 context_window 推出来
+    expect(model.context_window).toBe(262_000);
+    expect(model.max_context_window).toBe(262_000);
+    expect(model.auto_compact_token_limit).toBe(235_800); // 262000 * 90%
+    expect(model.effective_context_window_percent).toBe(95);
+    expect(model.default_reasoning_summary).toBe('auto');
+
+    // 第三方上游的保守能力声明：没有官方账号权益、也不宣称托管工具能力
+    expect(model.supports_search_tool).toBe(false);
+    expect(model.supports_image_detail_original).toBe(false);
+    expect(model.additional_speed_tiers).toEqual([]);
+    expect(model.service_tiers).toEqual([]);
+    expect(model.availability_nux).toBeNull();
+    expect(model.upgrade).toBeNull();
+
+    // 旧版 Codex 解析器要求的兼容键（新版本 ModelInfo 已没有它们，会被忽略）
+    expect(model.supports_parallel_tool_calls).toBe(false);
+    expect(model.supports_reasoning_summaries).toBe(true);
+
+    // 刻意不写：freeform apply_patch 需要官方提示词配套，model_messages / tool_mode /
+    // multi_agent_version 属于官方 harness，套到第三方上游不成立。
+    expect(model).not.toHaveProperty('apply_patch_tool_type');
+    expect(model).not.toHaveProperty('model_messages');
+    expect(model).not.toHaveProperty('tool_mode');
+    expect(model).not.toHaveProperty('multi_agent_version');
+  });
+
+  it('窗口未知时派生字段一起回落，不会只更新其中一个', () => {
+    const raw = buildModelCatalog(
+      [{ alias: 'lam-a/gpt-x', providerId: 'p1', providerKey: 'a', providerName: 'A', apiType: 'responses', upstreamModel: 'gpt-x' }],
+      {},
+    );
+    const model = (JSON.parse(raw) as {
+      models: Array<{
+        context_window: number;
+        max_context_window: number;
+        auto_compact_token_limit: number;
+      }>;
+    }).models[0];
+    expect(model.context_window).toBe(128_000);
+    expect(model.max_context_window).toBe(128_000);
+    expect(model.auto_compact_token_limit).toBe(115_200);
+  });
+
   it('默认模型不在别名里时不会凭空造条目', () => {
     const raw = buildModelCatalog(
       [{ alias: 'lam-a/gpt-x', providerId: 'p1', providerKey: 'a', providerName: 'A', apiType: 'openai', upstreamModel: 'gpt-x' }],
