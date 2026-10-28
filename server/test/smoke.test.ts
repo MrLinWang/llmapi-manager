@@ -149,6 +149,47 @@ describe('冒烟：供应商与聚合', () => {
     expect(JSON.stringify(provider)).not.toContain('sk-mock-openai-secret');
   });
 
+  it('能力表只保留仍在模型列表里的模型', async () => {
+    // 删掉模型后留下它的能力就是死数据：同名模型下次被加上时会读到上一个模型
+    // 的上下文窗口，属于静默错配。保存时按 models 裁剪。
+    //
+    // 注意这里**必须删掉新增的供应商**：本文件所有用例共享同一个服务实例，
+    // 多留一家会发布额外的别名，让后面断言"别名列表等于某几项"的用例级联失败
+    // （第一版就踩了这个坑）。
+    const created = await call(
+      'POST',
+      '/api/providers',
+      {
+        name: '带能力的供应商',
+        apiType: 'responses',
+        baseUrl: 'http://127.0.0.1:65529',
+        apiKey: 'sk-cap',
+        models: ['keep-me'],
+        modelCapabilities: {
+          'keep-me': { contextWindow: 262_000, maxOutputTokens: 32_000 },
+          'removed-model': { contextWindow: 999_999 },
+          // 非法值整条丢弃：0 / 负数会被当成"窗口为 0"，比缺省更糟
+          'keep-me-bad': { contextWindow: 0 },
+        },
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const provider = created.json().provider as {
+      id: string;
+      modelCapabilities: unknown;
+    };
+    expect(provider.modelCapabilities).toEqual({
+      'keep-me': { contextWindow: 262_000, maxOutputTokens: 32_000 },
+    });
+
+    // 收尾：不留任何痕迹给后续用例
+    const removed = await call('DELETE', `/api/providers/${provider.id}`, undefined, {
+      cookie,
+    });
+    expect(removed.statusCode).toBe(200);
+  });
+
   it('同名供应商被拒绝', async () => {
     const response = await call(
       'POST',
@@ -193,6 +234,11 @@ describe('冒烟：供应商与聚合', () => {
     expect(body.ok).toBe(true);
     expect(body.models).toContain('gpt-x');
     expect(body.models).toContain('gpt-x-mini');
+    // 上游声明了上下文窗口时一并带回，供前端保存进供应商记录。
+    // 没有声明的模型（gpt-x-mini）不出现在 capabilities 里——不能猜。
+    expect(body.capabilities).toEqual({
+      'gpt-x': { contextWindow: 400_000, maxOutputTokens: 64_000 },
+    });
   });
 
   it('anthropic 协议用 x-api-key 拉取，拿到的是它自己的模型', async () => {
@@ -299,6 +345,154 @@ describe('冒烟：供应商与聚合', () => {
   });
 });
 
+describe('冒烟：逐档实测', () => {
+  it('探测结果写回供应商能力，并保留原有上下文数据', async () => {
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '逐档实测供应商',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-probe',
+        models: ['gpt-x'],
+        modelCapabilities: { 'gpt-x': { contextWindow: 400_000 } },
+        notes: '探测备注',
+        websiteUrl: 'https://example.com/provider',
+        priority: 7,
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const providerId = (created.json().provider as { id: string }).id;
+
+    const probed = await call(
+      'POST', `/api/providers/${providerId}/probe-efforts`, undefined, { cookie },
+    );
+    expect(probed.statusCode).toBe(200);
+    // 响应是 NDJSON 流：每行一个事件。注入器会把整个流收完再返回，内容仍是
+    // 「一行一个 JSON」——不能再用 .json() 整体解析。
+    expect(String(probed.headers['content-type'])).toContain('application/x-ndjson');
+    const events = probed.body
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line) as { type: string } & Record<string, unknown>);
+
+    expect(events[0]).toMatchObject({ type: 'start', total: 9 });
+    // 进度事件按完成数递增：这个用例的假上游全部 200，所以 9 条全到齐
+    const progress = events.filter((event) => event.type === 'progress');
+    expect(progress).toHaveLength(9);
+    expect(progress.map((event) => event.done)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    for (const event of progress) {
+      expect(event.model).toBe('gpt-x');
+      expect(event.total).toBe(9);
+      expect(typeof event.effort).toBe('string');
+    }
+
+    const result = events.find((event) => event.type === 'result');
+    expect(result).toBeTruthy();
+    const body = result as unknown as {
+      candidates: string[];
+      models: Array<{ model: string; accepted: string[]; rejected: string[]; error?: string }>;
+      provider: {
+        modelCapabilities: Record<string, { contextWindow?: number; reasoningEfforts?: string[] }>;
+        notes?: string;
+        websiteUrl?: string;
+        priority?: number;
+        enabled?: boolean;
+      };
+    };
+
+    // 假上游对任何 /responses 请求都回 200，所以全部候选档位都应被接受
+    expect(body.candidates).toEqual([
+      'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'persistent',
+    ]);
+    expect(body.models).toHaveLength(1);
+    expect(body.models[0].accepted).toEqual(body.candidates);
+    expect(body.models[0].rejected).toEqual([]);
+    // 合并而不是覆盖：上下文窗口必须还在
+    expect(body.provider.modelCapabilities['gpt-x']).toMatchObject({
+      contextWindow: 400_000,
+      reasoningEfforts: body.candidates,
+    });
+    // update() 是全量更新：写能力表时不能把备注/官网/优先级/启用状态抹掉
+    expect(body.provider).toMatchObject({
+      notes: '探测备注',
+      websiteUrl: 'https://example.com/provider',
+      priority: 7,
+      enabled: true,
+    });
+
+    // 落盘验证：重新读供应商列表也能看到
+    const listed = (await call('GET', '/api/providers', undefined, { cookie })).json()
+      .providers as Array<{
+        id: string;
+        modelCapabilities?: Record<string, { reasoningEfforts?: string[] }>;
+      }>;
+    expect(
+      listed.find((item) => item.id === providerId)?.modelCapabilities?.['gpt-x']
+        ?.reasoningEfforts,
+    ).toEqual(body.candidates);
+
+    await call('DELETE', `/api/providers/${providerId}`, undefined, { cookie });
+  });
+
+  it('anthropic 协议没有 effort 概念，明确返回 400', async () => {
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '逐档实测 anthropic',
+        apiType: 'anthropic',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-probe-anthropic',
+        models: ['claude-x'],
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const providerId = (created.json().provider as { id: string }).id;
+
+    const response = await call(
+      'POST', `/api/providers/${providerId}/probe-efforts`, undefined, { cookie },
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.messageKey).toBe('providers.probe.unsupportedProtocol');
+
+    await call('DELETE', `/api/providers/${providerId}`, undefined, { cookie });
+  });
+
+  it('没有模型时返回 400，不会去发空探测', async () => {
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '逐档实测空模型',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-probe-empty',
+        models: [],
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const providerId = (created.json().provider as { id: string }).id;
+
+    const response = await call(
+      'POST', `/api/providers/${providerId}/probe-efforts`, undefined, { cookie },
+    );
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.messageKey).toBe('providers.probe.noModels');
+
+    await call('DELETE', `/api/providers/${providerId}`, undefined, { cookie });
+  });
+
+  it('未知供应商返回 404', async () => {
+    const response = await call(
+      'POST', '/api/providers/p_missing/probe-efforts', undefined, { cookie },
+    );
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error.messageKey).toBe('providers.notFound');
+  });
+});
+
 describe('冒烟：网关', () => {
   it('缺少令牌返回 401', async () => {
     const response = await call('POST', '/v1/chat/completions', {
@@ -364,7 +558,10 @@ describe('冒烟：网关', () => {
       { authorization: `Bearer ${gatewayToken}` },
     );
     expect(response.statusCode).toBe(400);
-    expect(response.json().error.message).toContain('未知供应商');
+    // 断言 messageKey 而不是中文文案：文案会随语言变，键不会。
+    // 中文渲染仍由 server/test/i18n.test.ts 的字典契约覆盖。
+    expect(response.json().error.messageKey).toBe('gateway.alias.unknownProvider');
+    expect(response.json().error.message).toContain('nobody');
   });
 
   it('/v1/messages 命中 openai 供应商时返回 501', async () => {
@@ -846,6 +1043,97 @@ describe('冒烟：Agent 下发', () => {
     // 非布尔值要拒绝，而不是当成 truthy
     const bad = await call('PATCH', '/api/settings/codex', { disableCodexWebSearch: 'yes' }, { cookie });
     expect(bad.statusCode).toBe(400);
+  });
+
+  it('流式参数默认写入 10/600000，清空后删除干净', async () => {
+    // 默认预设来自实测（断流间隔 42–64 秒、多数请求重试一两次即恢复）。
+    const initial = await call('GET', '/api/settings', undefined, { cookie });
+    expect(initial.statusCode).toBe(200);
+    expect(initial.json().codexStreamMaxRetries).toBe(10);
+    expect(initial.json().codexStreamIdleTimeoutMs).toBe(600000);
+
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const configPath = (
+      await call('POST', '/api/agents/codex/preview', undefined, { cookie })
+    )
+      .json()
+      .files.find((file: { role: string }) => file.role === 'config').path;
+
+    const withDefaults = fs.readFileSync(configPath, 'utf8');
+    // 必须是裸整数，不能带引号——带引号在 TOML 里是字符串，Codex 判类型不符
+    expect(withDefaults).toContain('stream_max_retries = 10');
+    expect(withDefaults).not.toContain('stream_max_retries = "10"');
+    expect(withDefaults).toContain('stream_idle_timeout_ms = 600000');
+
+    // 清空为 null → 重新 apply 后两行都要消失。
+    // 这条覆盖"用户机器上本来就有这两行"的真实场景：只"不写"会残留。
+    const cleared = await call(
+      'PATCH',
+      '/api/settings/codex',
+      { codexStreamMaxRetries: null, codexStreamIdleTimeoutMs: null },
+      { cookie },
+    );
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().codexStreamMaxRetries).toBeNull();
+    expect(cleared.json().codexStreamIdleTimeoutMs).toBeNull();
+
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const afterClear = fs.readFileSync(configPath, 'utf8');
+    expect(afterClear).not.toContain('stream_max_retries');
+    expect(afterClear).not.toContain('stream_idle_timeout_ms');
+
+    // 改回自定义值 → 写回
+    await call(
+      'PATCH',
+      '/api/settings/codex',
+      { codexStreamMaxRetries: 3, codexStreamIdleTimeoutMs: 120000 },
+      { cookie },
+    );
+    await call('POST', '/api/agents/codex/apply', undefined, { cookie });
+    const restored = fs.readFileSync(configPath, 'utf8');
+    expect(restored).toContain('stream_max_retries = 3');
+    expect(restored).toContain('stream_idle_timeout_ms = 120000');
+
+    // 复原成默认，避免影响后续用例
+    await call(
+      'PATCH',
+      '/api/settings/codex',
+      { codexStreamMaxRetries: 10, codexStreamIdleTimeoutMs: 600000 },
+      { cookie },
+    );
+  });
+
+  it('流式参数越界/小数/字符串一律 400，不静默截断', async () => {
+    // Codex 对 stream_max_retries 超过 100 是静默截断，所以必须在这层就拒绝，
+    // 否则用户填 200 会以为生效了。
+    const over = await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: 200 }, { cookie });
+    expect(over.statusCode).toBe(400);
+    expect(over.json().error.message).toContain('100');
+
+    const negative = await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: -1 }, { cookie });
+    expect(negative.statusCode).toBe(400);
+
+    const fraction = await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: 2.5 }, { cookie });
+    expect(fraction.statusCode).toBe(400);
+    expect(fraction.json().error.message).toContain('整数');
+
+    // 字符串不接受：'10' 看着能用，但静默转换会让前后端判断不一致
+    const str = await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: '10' }, { cookie });
+    expect(str.statusCode).toBe(400);
+
+    // 空闲超时的下限（1 秒）与上限（1 小时）
+    const tooSmall = await call('PATCH', '/api/settings/codex', { codexStreamIdleTimeoutMs: 500 }, { cookie });
+    expect(tooSmall.statusCode).toBe(400);
+    const tooLarge = await call('PATCH', '/api/settings/codex', { codexStreamIdleTimeoutMs: 7200000 }, { cookie });
+    expect(tooLarge.statusCode).toBe(400);
+
+    // 0 次重试是合法值（明确表示不重试）
+    const zero = await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: 0 }, { cookie });
+    expect(zero.statusCode).toBe(200);
+    expect(zero.json().codexStreamMaxRetries).toBe(0);
+
+    // 复原
+    await call('PATCH', '/api/settings/codex', { codexStreamMaxRetries: 10 }, { cookie });
   });
 
   it('结束 Codex 进程的接口受权限保护，且对 Claude Code 明确说明不支持', async () => {
@@ -1733,6 +2021,25 @@ describe('冒烟：API 令牌与信息接口', () => {
     expect(response.json().error.message).toContain('登录会话');
   });
 
+  it('只读令牌不能触发逐档实测（需要 providers:write）', async () => {
+    const providersList = (await call('GET', '/api/providers', undefined, { cookie: tokenCookie }))
+      .json().providers as Array<{ id: string }>;
+    expect(providersList.length).toBeGreaterThan(0);
+
+    const created = await call(
+      'POST', '/api/tokens',
+      { name: '只读探测', scopes: ['providers:read'] },
+      { cookie: tokenCookie },
+    );
+    const token = created.json().token as string;
+
+    const response = await call(
+      'POST', `/api/providers/${providersList[0].id}/probe-efforts`, undefined, bearer(token),
+    );
+    expect(response.statusCode).toBe(403);
+    expect(response.json().error.messageKey).toBe('auth.permission.tokenMissing');
+  });
+
   it('令牌不能创建或吊销令牌，避免自我续命', async () => {
     const created = await call(
       'POST', '/api/tokens',
@@ -1810,6 +2117,172 @@ describe('冒烟：API 令牌与信息接口', () => {
       { cookie: tokenCookie },
     );
     expect(response.statusCode).toBe(400);
+  });
+});
+
+describe('冒烟：界面语言设置', () => {
+  // 语言偏好存服务端（settings.json），前端不落 localStorage：
+  // 换浏览器/清缓存后仍然是同一语言，这样"我在公司配成英文"不会在家里变回中文。
+  let langCookie = '';
+
+  beforeAll(async () => {
+    const login = await call('POST', '/api/auth/login', {
+      username: 'admin',
+      password: 'brand-new-password',
+    });
+    expect(login.statusCode).toBe(200);
+    langCookie = String(login.headers['set-cookie']).split(';')[0];
+  });
+
+  it('默认是 null（跟随浏览器），并随身份一起返回', async () => {
+    // 从没设置过语言时必须是 null 而不是 'zh'：null 才代表"按浏览器语言显示"，
+    // 硬编码 zh 会让英文系统打开控制台看到中文。
+    const me = await call('GET', '/api/auth/me', undefined, { cookie: langCookie });
+    expect(me.statusCode).toBe(200);
+    expect(me.json().language).toBeNull();
+
+    const settings = await call('GET', '/api/settings', undefined, { cookie: langCookie });
+    expect(settings.json().language).toBeNull();
+  });
+
+  it('可以设为 en，settings 与 me 同时生效并落盘', async () => {
+    const patched = await call(
+      'PATCH', '/api/settings/language', { language: 'en' }, { cookie: langCookie },
+    );
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json().language).toBe('en');
+
+    // me 也要跟着变：前端启动时只调 me，不能要求它再发一次 /api/settings
+    const me = await call('GET', '/api/auth/me', undefined, { cookie: langCookie });
+    expect(me.json().language).toBe('en');
+
+    // 落盘检查：语言是租户数据，必须在 tenant 目录里
+    const raw = fs.readFileSync(
+      path.join(dataDir, 'tenants', 't_default', 'settings.json'),
+      'utf8',
+    );
+    expect((JSON.parse(raw) as { data: { language: string } }).data.language).toBe('en');
+  });
+
+  it('显式传 null 回到跟随浏览器', async () => {
+    const patched = await call(
+      'PATCH', '/api/settings/language', { language: null }, { cookie: langCookie },
+    );
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json().language).toBeNull();
+  });
+
+  it('非法语言与缺失字段返回 400，且不覆盖已有设置', async () => {
+    await call('PATCH', '/api/settings/language', { language: 'zh' }, { cookie: langCookie });
+
+    const invalid = await call(
+      'PATCH', '/api/settings/language', { language: 'jp' }, { cookie: langCookie },
+    );
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json().error.code).toBe('bad_request');
+
+    // 字段缺失也要拒：多半是调用方字段名写错，静默接受会让用户以为设置生效了
+    const missing = await call('PATCH', '/api/settings/language', {}, { cookie: langCookie });
+    expect(missing.statusCode).toBe(400);
+
+    // 两次失败都不该把上一轮设置改掉
+    const me = await call('GET', '/api/auth/me', undefined, { cookie: langCookie });
+    expect(me.json().language).toBe('zh');
+  });
+
+  it('手改坏的 language 被读路径降级为 null，而不是让控制台打不开', async () => {
+    // settings.json 是纯文本，用户/脚本可能写进任意值。原样透给前端会让界面
+    // 退化成显示键名，所以读路径必须收敛。这里直接改盘再读。
+    const file = path.join(dataDir, 'tenants', 't_default', 'settings.json');
+    const envelope = JSON.parse(fs.readFileSync(file, 'utf8')) as {
+      schemaVersion: number;
+      data: Record<string, unknown>;
+    };
+    envelope.data.language = 'klingon';
+    fs.writeFileSync(file, JSON.stringify(envelope));
+
+    const me = await call('GET', '/api/auth/me', undefined, { cookie: langCookie });
+    expect(me.statusCode).toBe(200);
+    expect(me.json().language).toBeNull();
+
+    // 收尾：恢复成默认，避免影响后续用例（本文件共享同一个服务实例）
+    await call('PATCH', '/api/settings/language', { language: null }, { cookie: langCookie });
+  });
+
+  it('报错文案跟随租户语言与 Accept-Language', async () => {
+    // 语言来源按优先级：租户设置 > Accept-Language > 中文。
+    // 用"已存在的路由 + 非法入参"来测，而不是不存在的路径——后者走
+    // setNotFoundHandler，那里拿不到 principal（守卫对未注册路由直接放行），
+    // 只看请求头。两者的语言来源本来就是不同的，混在一起测会得出错误结论。
+    const badBody = { apiType: 'bogus' };
+    await call('PATCH', '/api/settings/language', { language: null }, { cookie: langCookie });
+
+    // 1) 无设置、无语言头：中文兜底
+    const plain = await call('POST', '/api/providers', badBody, { cookie: langCookie });
+    expect(plain.statusCode).toBe(400);
+    expect(plain.json().error.message).toMatch(/[\u4e00-\u9fff]/);
+
+    // 2) 无设置、带英文头：英文
+    const enHeader = await call('POST', '/api/providers', badBody, {
+      cookie: langCookie,
+      'accept-language': 'en-US,en;q=0.9',
+    });
+    expect(enHeader.json().error.message).not.toMatch(/[\u4e00-\u9fff]/);
+
+    // 3) 租户设置成 en：不带任何语言头也是英文
+    await call('PATCH', '/api/settings/language', { language: 'en' }, { cookie: langCookie });
+    const afterSetting = await call('POST', '/api/providers', badBody, { cookie: langCookie });
+    expect(afterSetting.json().error.message).not.toMatch(/[\u4e00-\u9fff]/);
+    expect(afterSetting.json().error.messageKey).toBeTruthy();
+
+    // 4) 租户设置优先于请求头：设回 zh 后即使带英文头也是中文
+    await call('PATCH', '/api/settings/language', { language: 'zh' }, { cookie: langCookie });
+    const zhWins = await call('POST', '/api/providers', badBody, {
+      cookie: langCookie,
+      'accept-language': 'en-US,en;q=0.9',
+    });
+    expect(zhWins.json().error.message).toMatch(/[\u4e00-\u9fff]/);
+
+    // 收尾：恢复默认
+    await call('PATCH', '/api/settings/language', { language: null }, { cookie: langCookie });
+  });
+
+  it('每条错误都带 messageKey，供调用方免于匹配译文', async () => {
+    // 文案会随语言变，键不会。脚本/前端该用键做分支，而不是匹配中文或英文。
+    const response = await call('GET', '/api/providers/nope');
+    expect(response.json().error.messageKey).toBe('errors.apiRouteMissing');
+
+    const gateway = await call('GET', '/v1/models', undefined, { 'accept-language': 'en' });
+    expect(gateway.statusCode).toBe(401);
+    expect(gateway.json().error.messageKey).toBe('gateway.auth.invalidToken');
+    // 同时钉住"英文下真的是英文"，否则 messageKey 对了但文案没翻也看不出来
+    expect(gateway.json().error.message).toMatch(/^Gateway token/);
+  });
+
+  it('只读令牌不能改语言；语言不影响其它设置', async () => {
+    const created = await call(
+      'POST', '/api/tokens',
+      { name: '语言只读', scopes: ['settings:read'] },
+      { cookie: langCookie },
+    );
+    const token = created.json().token as string;
+
+    const denied = await call(
+      'PATCH', '/api/settings/language', { language: 'en' },
+      { authorization: `Bearer ${token}` },
+    );
+    expect(denied.statusCode).toBe(403);
+
+    // 改语言不该顺手刷掉 codex 的下发数值（真实风险：整体覆盖 settings）
+    const before = (await call('GET', '/api/settings', undefined, { cookie: langCookie })).json() as {
+      codexStreamMaxRetries: number | null;
+    };
+    await call('PATCH', '/api/settings/language', { language: 'zh' }, { cookie: langCookie });
+    const after = (await call('GET', '/api/settings', undefined, { cookie: langCookie })).json() as {
+      codexStreamMaxRetries: number | null;
+    };
+    expect(after.codexStreamMaxRetries).toBe(before.codexStreamMaxRetries);
+    await call('PATCH', '/api/settings/language', { language: null }, { cookie: langCookie });
   });
 });
 

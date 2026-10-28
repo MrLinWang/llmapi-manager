@@ -1,3 +1,5 @@
+import { translate, type MessageKey, type MessageParams } from '../../i18n';
+
 /**
  * Responses API 请求 → Chat Completions 请求。
  *
@@ -30,12 +32,24 @@ export interface ConversionMeta {
   dropped: string[];
 }
 
+/**
+ * 转换失败。
+ *
+ * 文案以"键 + 参数"存下、同时渲染出中文 `message`：`message` 供日志与
+ * 既有 `instanceof` 分支直读，`key` 让响应层能按请求语言重渲染。
+ */
 export class ConversionError extends Error {
-  constructor(message: string) {
-    super(message);
+  readonly key: MessageKey;
+  readonly params?: MessageParams;
+
+  constructor(key: MessageKey, params?: MessageParams) {
+    super(translate('zh', key, params));
     this.name = 'ConversionError';
+    this.key = key;
+    this.params = params;
   }
 }
+
 
 type JsonObject = Record<string, unknown>;
 
@@ -136,7 +150,7 @@ function appendInputItem(
     return;
   }
   if (!isObject(item)) {
-    throw new ConversionError('input 数组里的元素必须是对象或字符串');
+    throw new ConversionError('gateway.convert.inputElementInvalid');
   }
 
   const type = asString(item.type);
@@ -147,7 +161,7 @@ function appendInputItem(
       const callId = asString(item.call_id) || asString(item.id);
       const name = asString(item.name);
       if (!callId || !name) {
-        throw new ConversionError('function_call 缺少 call_id 或 name');
+        throw new ConversionError('gateway.convert.functionCallIncomplete');
       }
       const toolCall = {
         id: callId,
@@ -177,7 +191,7 @@ function appendInputItem(
       const callId = asString(item.call_id) || asString(item.id);
       const name = asString(item.name);
       if (!callId || !name) {
-        throw new ConversionError('custom_tool_call 缺少 call_id 或 name');
+        throw new ConversionError('gateway.convert.customToolCallIncomplete');
       }
       const raw = item.input;
       const input = typeof raw === 'string' ? raw : JSON.stringify(raw ?? '');
@@ -200,7 +214,7 @@ function appendInputItem(
       // 注意这里**不需要**拆 {"input"} 包——工具返回值本来就是自由文本，原样作为
       // tool 消息内容即可；只有响应方向（还原模型发起的调用）才需要解包。
       const callId = asString(item.call_id);
-      if (!callId) throw new ConversionError('custom_tool_call_output 缺少 call_id');
+      if (!callId) throw new ConversionError('gateway.convert.customToolOutputNoCallId');
       const output = item.output;
       messages.push({
         role: 'tool',
@@ -212,7 +226,7 @@ function appendInputItem(
 
     case 'function_call_output': {
       const callId = asString(item.call_id);
-      if (!callId) throw new ConversionError('function_call_output 缺少 call_id');
+      if (!callId) throw new ConversionError('gateway.convert.functionOutputNoCallId');
       const output = item.output;
       messages.push({
         role: 'tool',
@@ -229,7 +243,7 @@ function appendInputItem(
       // `message` 是最常见形态；空 type 也按消息处理（部分客户端会省略）
       const role = asString(item.role) || 'user';
       if (role !== 'user' && role !== 'assistant' && role !== 'system' && role !== 'developer') {
-        throw new ConversionError(`input 消息的 role 不支持: ${role}`);
+        throw new ConversionError('gateway.convert.unsupportedRole', { role });
       }
       // developer 是 Responses 里的新角色（Codex 用它下发环境/权限说明），
       // Chat 没有这个概念；降级为 system 让模型仍能看到这些约束，
@@ -248,7 +262,7 @@ function appendInputItem(
 
     default:
       // 未知类型不猜，明确报错。静默跳过会让上游收到的上下文比用户以为的少。
-      throw new ConversionError(`不支持的 input 项类型: ${type}`);
+      throw new ConversionError('gateway.convert.unsupportedInputType', { type });
   }
 }
 
@@ -259,7 +273,7 @@ function convertTools(tools: unknown, meta: ConversionMeta): unknown[] | undefin
   const out: unknown[] = [];
   for (const tool of tools) {
     if (!isObject(tool)) {
-      throw new ConversionError('tools 里的元素必须是对象');
+      throw new ConversionError('gateway.convert.toolElementInvalid');
     }
     const type = asString(tool.type);
 
@@ -278,7 +292,7 @@ function convertTools(tools: unknown, meta: ConversionMeta): unknown[] | undefin
             properties: {
               input: {
                 type: 'string',
-                description: asString(tool.description) || '工具的原始文本输入',
+                description: asString(tool.description) || translate('zh', 'gateway.convert.rawTextToolInput'),
               },
             },
             required: ['input'],
@@ -360,15 +374,13 @@ export function responsesToChatRequest(
   model: string,
 ): { body: JsonObject; meta: ConversionMeta } {
   if (!isObject(body)) {
-    throw new ConversionError('请求体必须是 JSON 对象');
+    throw new ConversionError('gateway.convert.bodyNotObject');
   }
   const meta: ConversionMeta = { dropped: [] };
 
   for (const field of UNSUPPORTED_FIELDS) {
     if (body[field] !== undefined && body[field] !== null) {
-      throw new ConversionError(
-        `字段 ${field} 依赖服务端会话状态，Chat 上游无法支持；请关闭该特性或改用 Responses 上游`,
-      );
+      throw new ConversionError('gateway.convert.statelessFieldUnsupported', { field });
     }
   }
 
@@ -386,11 +398,11 @@ export function responsesToChatRequest(
   } else if (Array.isArray(input)) {
     for (const item of input) appendInputItem(item, messages, meta);
   } else if (input !== undefined && input !== null) {
-    throw new ConversionError('input 必须是字符串或数组');
+    throw new ConversionError('gateway.convert.inputNotStringOrArray');
   }
 
   if (messages.length === 0) {
-    throw new ConversionError('转换后没有任何消息，请检查 input 与 instructions');
+    throw new ConversionError('gateway.convert.noMessagesAfterConversion');
   }
 
   const out: JsonObject = { model, messages, stream: body.stream === true };

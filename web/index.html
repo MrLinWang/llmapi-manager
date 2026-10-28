@@ -1,4 +1,9 @@
 <!doctype html>
+<!--
+  lang="zh-CN" 只是首帧的静态默认值：真正的语言由 web/src/i18n 在模块加载时
+  按服务端设置（或浏览器语言）同步到 <html lang>，这里是给"JS 还没执行"和
+  "纯爬虫/无 JS 环境"看的。改它不会影响界面语言，别在这里做语言判断。
+-->
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />

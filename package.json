@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Self-hosted console that aggregates LLM API providers and provisions them into local coding agents.",
+  "license": "MIT",
   "workspaces": [
     "server",
     "web"

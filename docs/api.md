@@ -1,11 +1,43 @@
 # 接口参考
 
 - 管理面：`/api/*`，用会话 Cookie 鉴权。所有错误响应统一为
-  `{ "error": { "code": "...", "message": "...", "details"?: ... } }`。
+  `{ "error": { "code": "...", "message": "...", "messageKey": "...", "details"?: ... } }`。
 - 数据面：`/v1/*`，用网关令牌鉴权，错误也复用同一结构（上游原始错误则原样透传）。
 
 `code` 取值：`bad_request`(400) / `unauthorized`(401) / `forbidden`(403) / `not_found`(404) /
 `conflict`(409) / `not_implemented`(501) / `upstream_error`(502) / `internal_error`(500)。
+
+### `message` 跟随语言，`messageKey` 不随语言变化
+
+`message` 是给人读的句子，按下面的优先级渲染成中文或英文：
+
+1. 已登录租户的设置 `language`（用户在控制台里显式选的那项）；
+2. `Accept-Language` 请求头；
+3. 中文兜底（`Accept-Language: *` 视为没表态，同样兜底中文）。
+
+租户设置优先于请求头：用户已经在控制台选过语言，报错还跟着浏览器语言走会出现
+"界面英文、报错中文"。未登录时（401、登录、首次初始化）读不到租户设置，
+此时请求头是唯一线索——控制台前端会带上它。
+
+**调用方不该匹配 `message`**，它随时可能因为语言或措辞变化而不同。要判断错误类型用
+`code`，要区分具体原因用 `messageKey`：
+
+```json
+{
+  "error": {
+    "code": "bad_request",
+    "message": "name 必须是字符串",
+    "messageKey": "providers.validation.nameType"
+  }
+}
+```
+
+`messageKey` 的取值是稳定的内部标识（如 `gateway.auth.invalidToken`、
+`providers.notFound`、`diagnostics.disabled`），不承诺与文档逐条同步，
+但当你需要"精确识别某个错误"时它是唯一可靠依据。
+
+例外：Fastify 自身的请求格式错误（schema 不匹配、JSON 解析失败）文案来自框架、
+无法本地化，此时 `messageKey` 为 `errors.framework`，`message` 原样透传。
 
 ## 鉴权
 
@@ -63,15 +95,20 @@
 
 ### GET /api/auth/me
 
-需登录。返回身份与权限清单（前端据此决定显示哪些菜单）。
+需登录。返回身份与权限清单（前端据此决定显示哪些菜单），以及界面语言偏好。
 
 ```json
 {
   "user": { "id": "u_owner", "tenantId": "t_default", "role": "owner", "username": "admin" },
   "permissions": ["providers:read", "..."],
-  "allPermissions": ["providers:read", "..."]
+  "allPermissions": ["providers:read", "..."],
+  "language": "zh"
 }
 ```
+
+`language` 取 `"zh"` / `"en"` / `null`；`null` 表示"跟随浏览器"，由前端按
+`navigator.languages` 决定。它放在这里（而不是只放 `/api/settings`）的原因：
+`member` 角色没有 `settings:read`，但同样需要看到正确语言的界面。
 
 ### POST /api/auth/password
 
@@ -119,6 +156,7 @@
 | DELETE | `/api/providers/:id` | `providers:write` | 若删的是默认供应商，返回 `{ newDefaultProviderId }` |
 | PUT | `/api/providers/order` | `providers:write` | `{ "ids": [...] }`，按数组顺序重排 `priority` |
 | POST | `/api/providers/:id/test` | `providers:write` | 请求上游 `/models`，10s 超时；结果写回 `lastTest` |
+| POST | `/api/providers/:id/probe-efforts` | `providers:write` | 逐档实测 reasoning effort，把上游接受的档位写回 `modelCapabilities` |
 | POST | `/api/providers/models` | `providers:write` | 按表单**临时值**拉取模型列表，不要求供应商已保存 |
 | POST | `/api/providers/:id/default` | `providers:write` | 设为默认，可带 `{ "model": "..." }` |
 
@@ -131,6 +169,9 @@
   "baseUrl": "https://api.example.com",
   "apiKey": "sk-...",
   "models": ["gpt-x", "gpt-x-mini"],
+  "modelCapabilities": {
+    "gpt-x": { "contextWindow": 400000, "maxOutputTokens": 64000 }
+  },
   "enabled": true,
   "priority": 0,
   "notes": "可选",
@@ -142,6 +183,11 @@
 400 `apiType 只能是 openai / anthropic / responses`）；`baseUrl` 必须是 http/https；
 `models` 去重后保持输入顺序；`priority` 越小越靠前。
 
+`modelCapabilities` 可省略，省略表示**保持已存值不变**（编辑态不必为了保留能力而重填）。
+服务端在落盘前会裁剪：只保留仍出现在 `models` 里的模型，非正整数的值整条丢弃
+（0 / 负数会被当成"窗口为 0"，比缺省更糟）。它的唯一用途是生成 Codex 目录里的
+`context_window` / `max_output_tokens`，见 `docs/agents.md`。
+
 `apiType` 不是展示字段，它决定这条上游只接哪条网关路径：
 
 | `apiType` | 前端文案 | 只接 |
@@ -151,7 +197,8 @@
 | `anthropic` | Anthropic 兼容（Messages） | `/v1/messages` |
 
 协议不符的请求由网关返回 501，供应商本身不会被调用。前端下拉顺序是
-`openai` → `responses` → `anthropic`（`web/src/lib/labels.ts` 的 `API_TYPE_META`）。
+`openai` → `responses` → `anthropic`（`web/src/lib/labels.ts` 的 `API_TYPE_META`，
+文案键在 `web/src/i18n/locales/{zh,en}/labels.ts`）。
 
 连通性测试返回：
 
@@ -187,8 +234,37 @@
 
 ```json
 { "ok": true, "latencyMs": 42, "status": 200, "models": ["gpt-5", "gpt-5-mini", "o3"] }
+{
+  "ok": true,
+  "latencyMs": 42,
+  "status": 200,
+  "models": ["gpt-5", "gpt-5-mini"],
+  "capabilities": { "gpt-5": { "contextWindow": 400000, "maxOutputTokens": 64000 } }
+}
 { "ok": false, "latencyMs": 10003, "error": "请求超时（10s）" }
 ```
+
+`capabilities` 是可选字段：解析上游 `/models` 条目里的 `metadata`
+（`context_limit` / `context_window` / `context_length` 与 `output_budget` / `max_output_tokens`）
+得到，**只包含确实声明了这些字段的模型**。一个都解析不出来时整个字段不出现，
+而不是给一个空对象 —— 空对象会被误读成"上游明确声明无限制"。
+前端拿到后随供应商一起提交到 `modelCapabilities`，生成 Codex 目录时用作
+`context_window`（详见 `docs/agents.md`）。
+
+每个 `capabilities` 条目可能包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `contextWindow` | 上下文窗口（token）。目录里作为 `context_window`，Codex 据此算自动压缩阈值 |
+| `maxOutputTokens` | 单次输出上限。目录里只作自解释，Codex 的 `ModelInfo` 并不读它 |
+| `supportsReasoning` | 是否支持推理档位；`false` 时目录里 `supported_reasoning_levels` 写空数组 |
+| `reasoningEfforts` | 该模型可用的推理档位（已按强度升序）。`[]` 表示查过但无可用档位，与缺省（未知）不同 |
+| `inputModalities` | 输入模态，**只会是 `text` / `image` / `audio` 的子集** |
+
+`inputModalities` 一定经过白名单过滤：Codex 的模态枚举不认 `pdf` / `video` / `document`，
+写进去会让整份目录解析失败并静默回退到内置官方列表（详见 `docs/agents.md`）。
+上游没声明时可由 `npm run registry:sync -w server` 从 modelinfo.dev / models.dev 补齐；
+数据源也没档位时，用下一节的「逐档实测」向上游逐个确认。
 
 连上了但响应里没有可识别的 `data[]` / `models[]` 时返回 `ok: false` 并说明原因，
 而不是给一个空列表——否则界面看起来像是"上游真的没有模型"。
@@ -196,6 +272,43 @@
 
 前端把返回结果渲染成**可点选的模型片段**（参考 new-api 渠道编辑的模型框）：
 点一下加入、再点一下取消，已选模型以强调色显示。
+
+### POST /api/providers/:id/probe-efforts
+
+权限 `providers:write`。对供应商的**每个模型 × 每个候选档位**真实发一次极小请求，
+只保留上游返回 2xx 的档位，并写回该供应商的 `modelCapabilities[model].reasoningEfforts`
+（同时把 `supportsReasoning` 置为 `true`）。前端「逐档实测」按钮调用它。
+
+候选档位就是 Codex 认识的 `none` / `minimal` / `low` / `medium` / `high` / `xhigh` /
+`max` / `ultra` / `persistent`；探测结果按强度升序返回。
+
+**响应是 NDJSON 流**（`Content-Type: application/x-ndjson`），一行一个事件——
+探测要发几十到几百次请求，不给中间进度前端只能干等。事件顺序：
+
+```jsonl
+{"type":"start","total":9,"candidates":["none","minimal","low","medium","high","xhigh","max","ultra","persistent"],"models":["gpt-x"]}
+{"type":"progress","done":1,"total":9,"model":"gpt-x","effort":"none","accepted":false}
+{"type":"progress","done":2,"total":9,"model":"gpt-x","effort":"minimal","accepted":false}
+{"type":"result","provider":{"id":"p_...","modelCapabilities":{"gpt-x":{"reasoningEfforts":["low","high"]}}},"candidates":["..."],"models":[{"model":"gpt-x","accepted":["low","high"],"rejected":["none","minimal"],"error":"HTTP 400: ..."}]}
+```
+
+- `progress` 每完成一次上游请求推一条；`done` 单调递增。服务端并发 4，所以事件可能
+  成组到达（一次多 4 条），进度条只依赖 `done / total`。
+- `result` 与旧版响应体一致：`{ provider, candidates, models }`。
+- 流中途失败（响应头已发出，改不了状态码）会再推一条
+  `{"type":"error","message":"..."}` 然后结束；前端据此报错，而不是当成"卡住"。
+- 参数校验失败（无模型 / anthropic / 供应商不存在）发生在开流之前，仍是普通 JSON 错误响应。
+- `Cache-Control: no-cache`、`x-accel-buffering: no` 是给 nginx 等中间层的：不这样写，
+  它们会缓冲整个响应，进度事件会攒到结束才一起到。
+- 请求形状按协议区分：`responses` → `/v1/responses` + `reasoning.effort`；
+  `openai` → `/v1/chat/completions` + `reasoning_effort`；`anthropic` 没有 effort
+  概念，直接 400 `providers.probe.unsupportedProtocol`。
+- **一个档位都没被接受时不改该模型的配置**，并在 `error` 里带上上游给的第一条原因。
+  这覆盖两种情况：模型确实不支持推理，或者地址/Key/协议配错了——两者都不该被
+  固化成"不支持推理"。用户可据此自行判断。
+- 没有模型时 400 `providers.probe.noModels`；供应商不存在时 404 `providers.notFound`。
+- 请求可能较慢（模型数 × 9，并发 4、单请求 20s 超时），这是预期行为，不是挂起。
+- 写回的是供应商记录，**模型目录要重新 apply 才更新**。
 
 ## 聚合与设置
 
@@ -227,7 +340,29 @@
 
 ### GET /api/settings
 
-权限 `settings:read`。返回 `defaultProviderId` / `defaultModel` / `disableCodexWebSearch` / `approvalReviewModel` / `protocolConversion` / `agentTargets` / `gatewayBaseUrl` / `token`（脱敏）。
+权限 `settings:read`。返回 `defaultProviderId` / `defaultModel` / `language` / `disableCodexWebSearch` / `approvalReviewModel` / `protocolConversion` / `codexStreamMaxRetries` / `codexStreamIdleTimeoutMs` / `agentTargets` / `gatewayBaseUrl` / `token`（脱敏）。
+
+### PATCH /api/settings/language
+
+权限 `settings:write`。设置控制台界面语言。
+
+```json
+{ "language": "en" }
+```
+
+| 字段 | 取值 | 说明 |
+| --- | --- | --- |
+| `language` | `"zh"` / `"en"` / `null` | `null` = 跟随浏览器语言（前端按 `navigator.languages` 探测） |
+
+返回 `{ "language": "en" }`。字段缺失、或值不在允许集合内 → 400
+（`language 必须是 zh 或 en，或 null`）。**字段缺失与显式 `null` 不同**：
+后者是用户选择"跟随浏览器"，前者多半是调用方字段名写错，静默接受会让
+"设置了语言却没生效"变得无从排查。
+
+这是租户级设置，与其它设置共用 `data/tenants/<tenantId>/settings.json`。
+它只是界面偏好：不参与网关转发、不改任何 Agent 下发文件，因此响应里**没有**
+`requiresReapply`。读路径会把非法值（例如手改成 `"jp"`）降级为 `null`，
+写接口则严格返回 400。
 
 ### PUT /api/settings/default
 
@@ -242,7 +377,7 @@
 
 ### PATCH /api/settings/codex
 
-权限 `settings:write`。Codex 配置的行为开关。
+权限 `settings:write`。Codex 配置的行为开关与下发数值。
 
 ```json
 { "disableCodexWebSearch": false, "approvalReviewModel": "gpt-6-luna" }
@@ -253,13 +388,24 @@
 | `disableCodexWebSearch` | `true` | 为 `true` 时下发 `web_search = "disabled"`；为 `false` 时**删除**该行（不残留旧值） |
 | `approvalReviewModel` | `null` | 「Approve for me」的模型映射。网关识别出审批请求时，把其 `model`（Codex 硬编码的 `gpt-5.6-luna`）换成此值；`null` 不映射。详见 `docs/gateway.md` |
 | `protocolConversion` | `false` | 跨协议转发。为 `true` 时 `/v1/responses` 可以落到 `openai` 供应商，由网关双向转换（含工具调用与流式）。默认关闭 |
+| `codexStreamMaxRetries` | `10` | 下发 `stream_max_retries`，流被掐断后最多重连几次。**0–100 的整数**；`null` 表示不写该键、用 Codex 默认 5 次 |
+| `codexStreamIdleTimeoutMs` | `600000` | 下发 `stream_idle_timeout_ms`，等流式活动的最长时间（毫秒）。**1000–3600000 的整数**；`null` 表示用 Codex 默认 300000 |
 
 字段可省略（省略即不修改该项，但仍会刷新 `updatedAt`）。传错类型返回 400
 （`disableCodexWebSearch 必须是布尔值` / `approvalReviewModel 必须是字符串或 null`）。
 
-返回 `{ disableCodexWebSearch, requiresReapply: true }` —— 改动只落在设置里，
+两个流式参数额外有三条校验，都是为了避免"保存成功但实际没按预期生效"：
+必须是**数字**（字符串 `"10"` 拒绝）、必须是**整数**（`2.5` 拒绝）、必须在范围内
+（`stream_max_retries` 超过 100 会被 Codex **静默截断**，所以这里直接 400 并说明范围）。
+错误信息形如 `codexStreamMaxRetries 必须是 0–100 的整数（Codex 对超过上限的值会静默截断，所以在这里直接拒绝）`。
+
+设为 `null` 时是**删除**语义，不是"不写"：上一版可能与下过该键，只"不写"会残留，
+导致界面显示未设置、文件里仍生效。删除只在当前值仍等于上次写入值时执行，用户手改过的值会保留。
+
+返回 `{ disableCodexWebSearch, approvalReviewModel, protocolConversion,
+codexStreamMaxRetries, codexStreamIdleTimeoutMs, requiresReapply: true }` —— 改动只落在设置里，
 需要再调一次 `POST /api/agents/codex/apply` 才会写进 `~/.codex/config.toml`
-（前端勾选/取消后会自动补一次 apply）。
+（前端勾选/取消、以及改这两个数值后都会自动补一次 apply）。
 
 ### POST /api/gateway/token
 

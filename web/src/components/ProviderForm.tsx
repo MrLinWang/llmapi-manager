@@ -1,6 +1,7 @@
 import { useId, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { api, ApiError } from '../lib/api';
-import type { Provider } from '../lib/types';
+import type { ModelCapability, Provider } from '../lib/types';
 import { Badge, IconButton, Notice } from './ui';
 import { API_TYPE_META } from '../lib/labels';
 
@@ -44,6 +45,7 @@ export function ProviderForm({
   onSaved: () => void;
   onCancel: () => void;
 }): JSX.Element {
+  const { t } = useTranslation();
   const [values, setValues] = useState<ProviderFormValues>(toFormValues(provider));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -52,6 +54,15 @@ export function ProviderForm({
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [fetchHint, setFetchHint] = useState<string | null>(null);
+  /**
+   * 按模型名记录的上游能力（上下文窗口等），保存时随供应商提交。
+   *
+   * 初始值来自已保存的供应商：编辑时若不再重新拉列表，不能把已有能力丢掉
+   * （丢了目录就会退回 128k）。只在拉到新数据时合并覆盖。
+   */
+  const [capabilities, setCapabilities] = useState<Record<string, ModelCapability>>(
+    () => ({ ...(provider?.modelCapabilities ?? {}) }),
+  );
   /** 模型框末尾那个空白片段里正在输入的文本 */
   const [draft, setDraft] = useState('');
   const draftInput = useRef<HTMLInputElement>(null);
@@ -116,19 +127,36 @@ export function ProviderForm({
         providerId: provider?.id,
       });
       if (!result.ok || !result.models) {
-        setFetchError(result.error ?? '未能获取模型列表');
+        setFetchError(result.error ?? t('providerForm.models.fetchFailed'));
         setCandidates(null);
         return;
       }
       if (result.models.length === 0) {
-        setFetchHint('上游返回了空列表，请确认该供应商是否开放了模型列表接口。');
+        setFetchHint(t('providerForm.models.emptyList'));
         setCandidates(null);
         return;
       }
       setCandidates(result.models);
-      setFetchHint(`上游返回 ${result.models.length} 个模型（${result.latencyMs}ms），勾选后确认。`);
+      // 记下上游声明的上下文窗口：保存时一并提交，Codex 目录会用它，
+      // 否则只能回落 128k，1M 上下文的上游只用到约十分之一。
+      // 合并而不是覆盖：只更新这次拉到能力的模型，其余模型保留原值。
+      if (result.capabilities) {
+        const incoming = result.capabilities;
+        setCapabilities((prev) => ({ ...prev, ...incoming }));
+      }
+      const withCaps = result.capabilities
+        ? Object.keys(result.capabilities).length
+        : 0;
+      // 两段都是计数句：用 `_one` / `_other` 复数键，英文才会跟着单复数变。
+      setFetchHint(
+        t('providerForm.models.fetched', {
+          count: result.models.length,
+          latencyMs: result.latencyMs,
+        }) +
+          (withCaps > 0 ? t('providerForm.models.withCapabilities', { count: withCaps }) : ''),
+      );
     } catch (cause) {
-      setFetchError(cause instanceof ApiError ? cause.message : '获取模型列表失败');
+      setFetchError(cause instanceof ApiError ? cause.message : t('common.fetchModelsFailed'));
       setCandidates(null);
     } finally {
       setFetching(false);
@@ -144,15 +172,22 @@ export function ProviderForm({
       .map((item) => item.trim())
       .filter(Boolean);
     if (models.length === 0) {
-      setError('至少填写一个模型名');
+      setError(t('providerForm.models.requireOne'));
       setBusy(false);
       return;
     }
+    // 只提交仍在模型列表里的能力；服务端还会再裁一次（两处都做是因为
+    // 用户可能先拉列表再删模型，前端这次提交就已经带着过期条目了）。
+    const keptCapabilities = Object.fromEntries(
+      Object.entries(capabilities).filter(([model]) => models.includes(model)),
+    );
     const body = {
       name: values.name.trim(),
       apiType: values.apiType,
       baseUrl: values.baseUrl.trim(),
       apiKey: values.apiKey.trim() === '' ? undefined : values.apiKey.trim(),
+      modelCapabilities:
+        Object.keys(keptCapabilities).length > 0 ? keptCapabilities : undefined,
       models,
       notes: values.notes.trim() || undefined,
       websiteUrl: values.websiteUrl.trim() || undefined,
@@ -162,7 +197,7 @@ export function ProviderForm({
       else await api.createProvider(body);
       onSaved();
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : '保存失败');
+      setError(cause instanceof ApiError ? cause.message : t('common.saveFailed'));
     } finally {
       setBusy(false);
     }
@@ -173,35 +208,41 @@ export function ProviderForm({
       <div className="card-header">
         <div>
           <h2 className="text-sm font-semibold text-ink">
-            {provider ? '编辑供应商' : '新增供应商'}
+            {provider
+              ? t('providerForm.header.titleEdit')
+              : t('providerForm.header.titleCreate')}
           </h2>
           <p className="mt-0.5 text-xs leading-5 text-muted">
-            保存后立即参与模型聚合与网关选路。
+            {t('providerForm.header.desc')}
           </p>
         </div>
-        <IconButton icon="x" label="关闭表单" onClick={onCancel} />
+        <IconButton
+          icon="x"
+          label={t('providerForm.header.close')}
+          onClick={onCancel}
+        />
       </div>
 
       <div className="space-y-5 p-5">
         <section>
-          <SectionTitle title="基本信息" />
+          <SectionTitle title={t('providerForm.sections.basic')} />
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <label className="label">名称</label>
+              <label className="label">{t('providerForm.basic.name')}</label>
               <input
                 className="input"
                 value={values.name}
-                placeholder="例如 PackyCode"
+                placeholder={t('providerForm.basic.namePlaceholder')}
                 onChange={(event) => update('name', event.target.value)}
               />
               {provider && (
                 <p className="field-hint">
-                  别名前缀：lam-{provider.providerKey}/
+                  {t('providerForm.basic.aliasPrefix', { key: provider.providerKey })}
                 </p>
               )}
             </div>
             <div>
-              <label className="label">协议类型</label>
+              <label className="label">{t('providerForm.basic.apiType')}</label>
               <select
                 className="input"
                 value={values.apiType}
@@ -211,40 +252,44 @@ export function ProviderForm({
               >
                 {API_TYPE_META.map((meta) => (
                   <option key={meta.value} value={meta.value}>
-                    {meta.label}
+                    {t(meta.labelKey)}
                   </option>
                 ))}
               </select>
+              {/*
+                这里没有用 <Trans>：句中夹着 selectedMeta.path（协议路径，是动态值、
+                且包在 <code> 里）。拆成前后半句、把 <code> 留在 JSX，
+                既不用往字典里传 React 组件，也不会让路径被误当成可翻译文本。
+              */}
               <p className="field-hint">
-                该协议走 <code className="font-mono">{selectedMeta.path}</code>；
-                与上游真实支持的接口必须一致，不匹配时网关默认返回 501。
-                例外：Codex 只会发 Responses 请求，开启「跨协议转发」后网关会把
-                Responses 转成 Chat 发给「Chat Completions」供应商。
+                {t('providerForm.basic.protocolHintPrefix')}{' '}
+                <code className="font-mono">{selectedMeta.path}</code>
+                {t('providerForm.basic.protocolHintSuffix')}
               </p>
             </div>
           </div>
         </section>
 
         <section>
-          <SectionTitle title="连接信息" />
+          <SectionTitle title={t('providerForm.sections.connection')} />
           <div className="space-y-4">
             <div>
-              <label className="label">Base URL</label>
+              <label className="label">{t('providerForm.connection.baseUrl')}</label>
               <input
                 className="input font-mono"
                 value={values.baseUrl}
                 placeholder="https://api.example.com"
                 onChange={(event) => update('baseUrl', event.target.value)}
               />
-              <p className="field-hint">
-                不带 /v1 也可以，服务端会自动补全。若已包含 /v1 则原样使用。
-              </p>
+              <p className="field-hint">{t('providerForm.connection.baseUrlHint')}</p>
             </div>
             <div>
               <label className="label">
-                API Key{' '}
+                {t('providerForm.connection.apiKey')}{' '}
                 {provider?.hasApiKey && (
-                  <span className="font-normal text-muted">（留空则不修改）</span>
+                  <span className="font-normal text-muted">
+                    {t('providerForm.connection.apiKeyKeep')}
+                  </span>
                 )}
               </label>
               <input
@@ -254,20 +299,18 @@ export function ProviderForm({
                 placeholder={provider?.hasApiKey ? provider.apiKeyMasked : 'sk-…'}
                 onChange={(event) => update('apiKey', event.target.value)}
               />
-              <p className="field-hint">
-                凭据加密落盘，接口只返回首 3 位与尾 4 位的脱敏结果。
-              </p>
+              <p className="field-hint">{t('providerForm.connection.apiKeyHint')}</p>
             </div>
           </div>
         </section>
 
         <section>
-          <SectionTitle title="模型与备注" />
+          <SectionTitle title={t('providerForm.sections.models')} />
           <div className="space-y-4">
             <div>
               <div className="mb-1.5 flex items-end justify-between gap-2">
                 <label className="label mb-0" htmlFor={modelInputId}>
-                  模型列表
+                  {t('providerForm.models.label')}
                 </label>
                 <button
                   type="button"
@@ -275,12 +318,14 @@ export function ProviderForm({
                   disabled={fetching || values.baseUrl.trim() === ''}
                   title={
                     values.baseUrl.trim() === ''
-                      ? '先填写 Base URL'
-                      : '用当前填写的协议与地址向上游查询可用模型'
+                      ? t('providerForm.models.fetchTitleEmpty')
+                      : t('providerForm.models.fetchTitle')
                   }
                   onClick={() => void loadModels()}
                 >
-                  {fetching ? '获取中…' : '从上游获取模型'}
+                  {fetching
+                    ? t('providerForm.models.fetching')
+                    : t('providerForm.models.fetch')}
                 </button>
               </div>
 
@@ -303,7 +348,7 @@ export function ProviderForm({
                     <button
                       type="button"
                       className="shrink-0 rounded text-muted transition hover:text-danger"
-                      aria-label={`移除模型 ${model}`}
+                      aria-label={t('providerForm.models.remove', { model })}
                       onClick={(event) => {
                         event.stopPropagation();
                         writeModels(currentModels().filter((item) => item !== model));
@@ -319,7 +364,9 @@ export function ProviderForm({
                   className="min-w-[9rem] flex-1 border-0 bg-transparent p-0 font-mono text-xs text-ink outline-none placeholder:text-muted/70"
                   value={draft}
                   placeholder={
-                    currentModels().length === 0 ? '输入模型名后回车，如 gpt-5.1' : ''
+                    currentModels().length === 0
+                      ? t('providerForm.models.placeholder')
+                      : ''
                   }
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => {
@@ -349,9 +396,7 @@ export function ProviderForm({
                   }}
                 />
               </div>
-              <p className="field-hint">
-                回车或逗号添加，点片段上的 × 移除；也可直接粘贴多个（逗号或换行分隔）。
-              </p>
+              <p className="field-hint">{t('providerForm.models.hint')}</p>
 
               {fetchError && (
                 <div className="mt-2">
@@ -365,7 +410,7 @@ export function ProviderForm({
               {candidates && (
                 <div className="mt-2 rounded-lg border border-line bg-subtle p-3">
                   <p className="mb-2 text-[11px] leading-relaxed text-muted">
-                    点选要启用的模型（再点一次取消），已添加的以强调色显示。
+                    {t('providerForm.models.candidatesHint')}
                   </p>
                   <div className="max-h-48 overflow-y-auto pr-1">
                     <div className="flex flex-wrap gap-1.5">
@@ -404,7 +449,7 @@ export function ProviderForm({
                       className="btn-ghost text-xs"
                       onClick={() => writeModels([...currentModels(), ...candidates])}
                     >
-                      全选
+                      {t('providerForm.models.selectAll')}
                     </button>
                     <button
                       type="button"
@@ -415,7 +460,7 @@ export function ProviderForm({
                         )
                       }
                     >
-                      清空选择
+                      {t('providerForm.models.clearSelection')}
                     </button>
                     <button
                       type="button"
@@ -425,7 +470,7 @@ export function ProviderForm({
                         setFetchHint(null);
                       }}
                     >
-                      收起
+                      {t('providerForm.models.collapse')}
                     </button>
                   </div>
                 </div>
@@ -433,7 +478,7 @@ export function ProviderForm({
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className="label">官网（可选）</label>
+                <label className="label">{t('providerForm.models.website')}</label>
                 <input
                   className="input"
                   value={values.websiteUrl}
@@ -442,7 +487,7 @@ export function ProviderForm({
                 />
               </div>
               <div>
-                <label className="label">备注（可选）</label>
+                <label className="label">{t('providerForm.models.notes')}</label>
                 <input
                   className="input"
                   value={values.notes}
@@ -458,10 +503,10 @@ export function ProviderForm({
 
       <div className="flex items-center justify-end gap-2 border-t border-line bg-subtle/40 px-5 py-3">
         <button type="button" className="btn-ghost" onClick={onCancel}>
-          取消
+          {t('common.cancel')}
         </button>
         <button type="submit" className="btn-primary" disabled={busy}>
-          {busy ? '保存中…' : '保存'}
+          {busy ? t('common.saving') : t('common.save')}
         </button>
       </div>
     </form>
@@ -473,12 +518,14 @@ export function TestResultLine({
 }: {
   provider: Provider;
 }): JSX.Element | null {
+  // 与供应商列表的「最近测试」列共用同一对状态词，避免两处口径不一。
+  const { t } = useTranslation();
   const result = provider.lastTest;
   if (!result) return null;
   return (
     <span className="inline-flex items-center gap-1.5 text-[11px]">
       <Badge tone={result.ok ? 'ok' : 'danger'} dot>
-        {result.ok ? '连通' : '失败'}
+        {result.ok ? t('providers.test.ok') : t('providers.test.fail')}
       </Badge>
       <span className="text-muted">{result.latencyMs}ms</span>
       {result.error && (

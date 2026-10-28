@@ -6,7 +6,9 @@ export const AGENT_DEFINITIONS: Record<AgentId, AgentDefinition> = {
   codex: {
     id: 'codex',
     name: 'Codex CLI',
-    description: '写入 ~/.codex 下的 config.toml 与 auth.json，把请求指向本服务的网关。',
+    // 描述只存键：registry 是模块级静态数据，构造时没有请求语言。
+    // 渲染发生在路由层（见 routes/agents.ts 的 GET /api/agents）。
+    descriptionKey: 'agents.description.codex',
     homeDirName: '.codex',
     files: [
       { role: 'config', relativePath: 'config.toml', format: 'toml' },
@@ -20,7 +22,7 @@ export const AGENT_DEFINITIONS: Record<AgentId, AgentDefinition> = {
   'claude-code': {
     id: 'claude-code',
     name: 'Claude Code',
-    description: '写入 ~/.claude/settings.json 的 env 段，把 Anthropic 请求指向本服务。',
+    descriptionKey: 'agents.description.claudeCode',
     homeDirName: '.claude',
     files: [{ role: 'config', relativePath: 'settings.json', format: 'json' }],
   },
@@ -67,7 +69,7 @@ export class AgentPathResolver {
   resolve(agentId: AgentId, input: ResolveInput, role: AgentFileRole): string {
     const definition = AGENT_DEFINITIONS[agentId];
     const spec = definition.files.find((item) => item.role === role);
-    if (!spec) throw new Error(`Agent ${agentId} 未声明 ${role} 文件`);
+    if (!spec) throw new Error(`Agent ${agentId} does not declare a ${role} file`);
     return path.join(this.agentRoot(agentId, input), spec.relativePath);
   }
 }

@@ -4,6 +4,15 @@ import path from 'node:path';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
+/**
+ * 日志/CLI 输出语言。
+ *
+ * 只影响"给运维看"的文本：运行日志、启动横幅、`npm run` 的脚本输出。
+ * 接口响应不受它影响（那跟随请求语言）。
+ */
+export type LogLanguage = 'zh' | 'en';
+const LOG_LANGUAGES: LogLanguage[] = ['zh', 'en'];
+
 export interface AppConfig {
   host: string;
   port: number;
@@ -25,6 +34,14 @@ export interface AppConfig {
   sessionSecretGenerated: boolean;
   encryptionKey: string | undefined;
   logLevel: LogLevel;
+  /**
+   * 日志与 CLI 输出的语言（`LOG_LANGUAGE=zh|en`，默认 `zh`）。
+   *
+   * 与接口文案的语言**分开**：接口跟随请求语言（用户在控制台选的那项），
+   * 而日志的读者是部署者与运维，跟着某个客户端漂移会让 `grep` 失效——
+   * 同一故障在不同请求语言下会长得不一样。
+   */
+  logLanguage: LogLanguage;
   /**
    * 运行日志目录。为 undefined 时不落盘，只输出到控制台。
    * 默认是仓库根的 log/ —— 注意它刻意不放在 DATA_DIR 下：
@@ -209,6 +226,7 @@ export function loadConfig(): AppConfig {
   const { secret, generated } = resolveSessionSecret(dataDir);
 
   const level = (optionalEnv('LOG_LEVEL') ?? 'info') as LogLevel;
+  const logLanguage = (optionalEnv('LOG_LANGUAGE') ?? 'zh') as LogLanguage;
   const port = Number.parseInt(optionalEnv('PORT') ?? '8787', 10);
   const host = optionalEnv('HOST') ?? '127.0.0.1';
   const resolvedPort = Number.isFinite(port) ? port : 8787;
@@ -232,6 +250,7 @@ export function loadConfig(): AppConfig {
     sessionSecretGenerated: generated,
     encryptionKey: optionalEnv('DATA_ENCRYPTION_KEY'),
     logLevel: LOG_LEVELS.includes(level) ? level : 'info',
+    logLanguage: LOG_LANGUAGES.includes(logLanguage) ? logLanguage : 'zh',
     logDir: resolveLogDir(repoRoot),
     logMaxBytes: positiveInt(optionalEnv('LOG_MAX_BYTES'), 5 * 1024 * 1024),
     logMaxFiles: positiveInt(optionalEnv('LOG_MAX_FILES'), 5),

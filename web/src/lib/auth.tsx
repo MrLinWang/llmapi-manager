@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { api, setUnauthorizedHandler } from './api';
+import { applyLanguage } from '../i18n';
 import type { Me } from './types';
 
 interface AuthState {
@@ -22,6 +23,10 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     try {
       const result = await api.me();
       setMe(result);
+      // 语言以服务端设置为准：`null` 时 applyLanguage 会重新按浏览器探测。
+      // 放在这里而不是 App 的 effect 里，是为了"登录成功那一次"就切到位，
+      // 否则会先闪一下登录页语言、再跳成用户设置的语言。
+      applyLanguage(result.language ?? null);
     } catch {
       setMe(null);
     } finally {

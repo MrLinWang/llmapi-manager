@@ -1,15 +1,28 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { LogLevel } from './config';
+import type { LogLanguage, LogLevel } from './config';
+import { translate, type MessageKey, type MessageParams } from './i18n';
 
 export interface Logger {
-  debug(message: string, meta?: unknown): void;
-  info(message: string, meta?: unknown): void;
-  warn(message: string, meta?: unknown): void;
-  error(message: string, meta?: unknown): void;
+  /**
+   * 第一条参数既可以是成品文案，也可以是**文案键**。
+   *
+   * 键形如 `logs.gateway.fallbackAttempted`：logger 按 `logLanguage` 渲染它，
+   * 插值参数走 `meta`。这样调用点不用每处都 `translate(...)`，也避免
+   * "日志文案散落在 20 个地方、每处各自选语言"。
+   *
+   * 传成品文案也支持（含变量拼接的场景），此时不做翻译。
+   */
+  debug(message: MessageKey | string, meta?: LogMeta): void;
+  info(message: MessageKey | string, meta?: LogMeta): void;
+  warn(message: MessageKey | string, meta?: LogMeta): void;
+  error(message: MessageKey | string, meta?: LogMeta): void;
   /** 关闭文件句柄；仅在使用文件日志时需要（进程退出、测试清理）。 */
   close?(): void;
 }
+
+/** 日志的 meta：既是插值参数，也照常序列化进日志行。 */
+export type LogMeta = unknown;
 
 const ORDER: Record<LogLevel, number> = {
   debug: 10,
@@ -157,15 +170,39 @@ function createFileSink(options: FileLogOptions): FileSink {
 export interface LoggerOptions {
   /** 缺省时不落盘，只写控制台 */
   file?: FileLogOptions;
+  /**
+   * 日志语言，默认中文。由 `config.logLanguage`（`LOG_LANGUAGE`）决定：
+   * 日志的读者是部署者，跟随请求语言漂移会让 grep 失效。
+   */
+  language?: LogLanguage;
+}
+
+/**
+ * 键的样子：`logs.` 开头、且字典里确实有。
+ *
+ * 不用"是否全英文"判断——`logs.x` 与一条以英文开头的成品文案无法区分，
+ * 而误判会把成品文案当成键、渲染成键名。用前缀 + 字典命中两道判断。
+ */
+function looksLikeKey(message: string): boolean {
+  return (
+    message.startsWith('logs.') ||
+    message.startsWith('errors.') ||
+    message.startsWith('warnings.')
+  );
 }
 
 export function createLogger(level: LogLevel, options: LoggerOptions = {}): Logger {
   const threshold = ORDER[level];
   const sink = options.file ? createFileSink(options.file) : null;
+  const language = options.language ?? 'zh';
 
   const emit = (target: LogLevel, message: string, meta?: unknown): void => {
     if (ORDER[target] < threshold) return;
-    const line = `[${new Date().toISOString()}] ${target.toUpperCase()} ${redactText(message)}${format(meta)}`;
+    // 键 → 按日志语言渲染，meta 兼作插值参数；成品文案原样输出（仍做打码）
+    const text = looksLikeKey(message)
+      ? translate(language, message, meta as MessageParams | undefined)
+      : message;
+    const line = `[${new Date().toISOString()}] ${target.toUpperCase()} ${redactText(text)}${format(meta)}`;
     if (target === 'error') console.error(line);
     else if (target === 'warn') console.warn(line);
     else console.log(line);

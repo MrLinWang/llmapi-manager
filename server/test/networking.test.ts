@@ -58,11 +58,26 @@ describe('设备互联：原生模块不可用时的降级', () => {
     await expect(runtime.stop()).resolves.toBeUndefined();
   });
 
-  it('start 在参数不全时抛出可读错误', async () => {
+  it('start 在不满足前置条件时抛出可读错误', async () => {
     const runtime = makeRuntime();
     const config = defaultNetworkingConfig();
-    // 默认配置的密钥为空：知道网络名与密钥的节点都能加入，所以必须拒绝空密钥
-    await expect(runtime.start(config)).rejects.toThrow(/密钥/);
+
+    // 这个用例要覆盖两种环境，因为原生模块是可选的：
+    //
+    // - 未编译（CI/新克隆的仓库常见）：第一道拦截是"模块不可用"，错误里
+    //   必须说清怎么办，且要提到同步功能不受影响。
+    // - 已编译（本地开发机，`.node` 产物被 gitignore 所以只在本机存在）：
+    //   此时才会走到参数校验，空密钥必须被拒绝——知道网络名与密钥的节点
+    //   都能加入网络，所以空密钥是一条必须挡住的口子。
+    //
+    // 早先这里只断言 /密钥/，在编译过原生模块的机器上会稳定失败；
+    // 反过来只断言"模块不可用"又会在没编译的机器上失败。两种都要认。
+    const availability = runtime.availability();
+    if (availability.available) {
+      await expect(runtime.start(config)).rejects.toThrow(/密钥/);
+    } else {
+      await expect(runtime.start(config)).rejects.toThrow(/原生模块|easytier-node/);
+    }
   });
 
   it('多次调用 availability 不会反复尝试加载（结果被缓存）', () => {

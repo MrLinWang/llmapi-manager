@@ -4,6 +4,7 @@ import { resolveGatewayPrincipal } from '../gateway/auth';
 import { ProviderService } from '../services/providers';
 import { listAliases } from '../domain/aliases';
 import { badRequest, unauthorized } from '../http/errors';
+import { resolveRequestLanguage } from '../i18n/language';
 import {
   GATEWAY_PATHS as GATEWAY_PATHS_ALL,
   assertApiTypeMatch,
@@ -33,7 +34,7 @@ export function registerGatewayRoutes(
 ): void {
   const authGateway = (request: FastifyRequest): Principal => {
     const principal = resolveGatewayPrincipal(request, ctx);
-    if (!principal) throw unauthorized('网关令牌缺失或无效');
+    if (!principal) throw unauthorized('gateway.auth.invalidToken');
     return principal;
   };
 
@@ -64,6 +65,8 @@ export function registerGatewayRoutes(
     async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
       const principal = authGateway(request);
       const repos = ctx.store.forTenant(principal.tenantId);
+      // 网关响应直接写 reply.raw，不经过错误处理器，语言必须在这里解析一次
+      const language = resolveRequestLanguage(request, ctx);
       const logService = new RequestLogService(repos.requestLog, repos.tenantId);
       let settings = repos.settings.read();
       const records = providerService.listRecords();
@@ -81,7 +84,7 @@ export function registerGatewayRoutes(
       // 会自动写设置，所以要在响应头里标记出来，让调用方能发现行为被改变了。
       const body = (request.body ?? {}) as Record<string, unknown>;
       if (typeof body.model !== 'string' || body.model.trim() === '') {
-        throw badRequest('请求体必须包含 model 字段');
+        throw badRequest('gateway.request.modelRequired');
       }
       const requestedModel = body.model;
       const stream = body.stream === true;
@@ -106,9 +109,7 @@ export function registerGatewayRoutes(
           updatedAt: new Date().toISOString(),
         };
         repos.settings.write(settings);
-        ctx.logger.info(
-          `已自动开启跨协议转发：${path} 需要 responses 上游，但当前只有 openai 供应商`,
-        );
+        ctx.logger.info('logs.gateway.autoEnabledConversion', { path });
         // 让客户端能看出"这次请求被转换了，且设置被改动"。
         // 必须设在 raw 上：转发是直接写 reply.raw 的，Fastify 层的 header 不会发出去。
         reply.raw.setHeader('x-llmapi-auto-conversion', '1');
@@ -136,9 +137,10 @@ export function registerGatewayRoutes(
             fallback: false,
             error: selection.reason,
           },
-          (error) => ctx.logger.warn('写入请求日志失败', error),
+          (error) => ctx.logger.warn('logs.gateway.logWriteFailed', error),
         );
-        throw badRequest(selection.reason);
+        // 用键 + 参数：`reason` 是中文渲染结果（给日志看），回给客户端要按请求语言渲染
+        throw badRequest(selection.reasonKey, selection.reasonParams);
       }
 
       // 兜底再校验一次：别名模式是直接按 providerId 取供应商，不走上面的协议过滤，
@@ -169,10 +171,12 @@ export function registerGatewayRoutes(
           mode: selection.mode,
           fallback,
           deferErrorWrite: deferError,
+          // 网关直接写 reply，不经过错误处理器，所以语言要在这里传进去
+          language,
           loggerWarn: (message, meta) => ctx.logger.warn(message, meta),
           onLog: (record) =>
             logService.append(record, (error) =>
-              ctx.logger.warn('写入请求日志失败', error),
+              ctx.logger.warn('logs.gateway.logWriteFailed', error),
             ),
         });
 
@@ -185,14 +189,14 @@ export function registerGatewayRoutes(
       if (!mayFallback || primaryResult.status < 500) {
         // 主供应商那次是延迟写模式，错误尚未发给客户端，这里必须补写；
         // 否则客户端会收到 200 + 空 body（曾被真实 bug 踩过）。
-        writeDeferredError(reply.raw, primaryResult);
+        writeDeferredError(reply.raw, primaryResult, language);
         return;
       }
 
       if (reply.raw.headersSent) return;
 
       const fallbackCandidate = selection.fallbacks[0];
-      ctx.logger.warn('主供应商失败，尝试回退', {
+      ctx.logger.warn('logs.gateway.fallbackAttempted', {
         primary: selection.primary.provider.name,
         fallback: fallbackCandidate.provider.name,
         status: primaryResult.status,

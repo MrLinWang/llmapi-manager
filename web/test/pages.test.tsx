@@ -47,6 +47,9 @@ const routes: RouteMap = {
       'settings:write',
     ],
     allPermissions: ['providers:read', 'providers:write'],
+    // language 由下面的 serverLanguage 统一注入（初值 'zh'）：jsdom 的
+    // navigator.language 是 en-US，按浏览器语言初始化会让整页渲染成英文，
+    // 本文件里断言中文文案的用例会全部变红。
   },
   '/api/health': { ok: true, warnings: [], gatewayBaseUrl: 'http://127.0.0.1:8787/v1' },
   '/api/setup/status': {
@@ -130,19 +133,87 @@ const routes: RouteMap = {
  */
 let overrides: RouteMap = {};
 
+/**
+ * 记录发出的请求。
+ *
+ * 语言切换这类"点了之后还要落盘"的交互，只断言界面变了是不够的：
+ * 请求根本没发出去、或者发到了错的路径/方法，界面也会因为乐观更新而变化。
+ */
+let requests: Array<{
+  method: string;
+  path: string;
+  body: string | null;
+  headers: Record<string, string>;
+}> = [];
+
+/**
+ * 服务端当前的界面语言（模拟 settings.json 里那一个字段）。
+ *
+ * 语言是"服务端为真源"的状态：`/api/auth/me` 返回它，`PATCH /api/settings/language`
+ * 改写它。用可变状态而不是固定 mock，才能验证"改完之后刷新仍然是新值"这条
+ * ——固定 mock 会让测试在"刷新把语言又拉回旧值"时依然通过。
+ */
+let serverLanguage: 'zh' | 'en' | null = 'zh';
+
 function setOverrides(next: RouteMap): void {
   overrides = next;
 }
 
 function installFetch(): void {
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     const path = url.split('?')[0];
-    const body = path in overrides ? overrides[path] : routes[path];
+    const method = init?.method ?? 'GET';
+    const body = typeof init?.body === 'string' ? init.body : null;
+    requests.push({ method, path, body, headers: (init?.headers ?? {}) as Record<string, string> });
+
+    // 语言设置按真实行为模拟：写入后 `/api/auth/me` 也要跟着返回新值，
+    // 否则测不出"刷新之后语言又跳回旧值"这种真实故障。
+    if (path === '/api/settings/language' && method === 'PATCH') {
+      serverLanguage = (JSON.parse(body ?? '{}') as { language: 'zh' | 'en' | null }).language;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ language: serverLanguage }),
+      } as Response;
+    }
+    if (path === '/api/auth/me' && !(path in overrides)) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ...(routes[path] as object), language: serverLanguage }),
+      } as Response;
+    }
+
+    const payload = path in overrides ? overrides[path] : routes[path];
+    // 约定：`__ndjson` 是流式响应体（逐行事件，例如逐档实测）。
+    // 客户端在拿不到 response.body 时会退化为整段文本逐行解析。
+    const ndjson = (payload as { __ndjson?: unknown; __delayMs?: unknown } | undefined)
+      ?.__ndjson;
+    if (typeof ndjson === 'string') {
+      // __delayMs 让这条流式响应晚一点返回，便于在测试里观察到"探测中"的进度条；
+      // 默认 0，不影响其他用例。
+      const delayMs =
+        typeof (payload as { __delayMs?: unknown }).__delayMs === 'number'
+          ? ((payload as { __delayMs?: number }).__delayMs as number)
+          : 0;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => {
+          if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+          return ndjson;
+        },
+      } as Response;
+    }
+    // 约定：带 `error` 字段的 payload 视为错误响应，按其中的 statusCode 返回
+    const err = (payload as { error?: unknown; statusCode?: number } | undefined)?.error
+      ? (payload as { statusCode?: number })
+      : undefined;
     return {
-      ok: body !== undefined,
-      status: body === undefined ? 404 : 200,
-      text: async () => JSON.stringify(body ?? { error: { code: 'not_found' } }),
+      ok: payload !== undefined && err === undefined,
+      status: err ? (err.statusCode ?? 400) : payload === undefined ? 404 : 200,
+      text: async () => JSON.stringify(payload ?? { error: { code: 'not_found' } }),
     } as Response;
   }) as typeof fetch;
 }
@@ -191,6 +262,75 @@ describe('前端页面装配', () => {
     expect(screen.queryByText('gpt-x-mini')).toBeTruthy();
   });
 
+  it('供应商页可逐档实测：确认后调用接口并展示接受的档位', async () => {
+    // jsdom 没有实现 window.confirm（直接调用会抛 "Not implemented"），必须 stub。
+    // 用 try/finally 恢复：这条用例失败时也不能把 stub 泄漏给后续用例。
+    const originalConfirm = window.confirm;
+    window.confirm = () => true;
+    requests = [];
+    setOverrides({
+      '/api/providers/p_1/probe-efforts': {
+        // 与服务端一致：NDJSON 流，start → progress* → result
+        __delayMs: 300,
+        __ndjson:
+          [
+            {
+              type: 'start',
+              total: 6,
+              candidates: ['low', 'medium', 'high'],
+              models: ['gpt-x', 'gpt-x-mini'],
+            },
+            { type: 'progress', done: 1, total: 3, model: 'gpt-x', effort: 'low', accepted: true },
+            { type: 'progress', done: 2, total: 3, model: 'gpt-x', effort: 'medium', accepted: true },
+            { type: 'progress', done: 3, total: 3, model: 'gpt-x', effort: 'high', accepted: true },
+            {
+              type: 'result',
+              provider: providers[0],
+              candidates: ['low', 'medium', 'high'],
+              models: [
+                { model: 'gpt-x', accepted: ['low', 'medium', 'high'], rejected: ['none'] },
+              ],
+            },
+          ]
+            .map((event) => JSON.stringify(event))
+            .join('\n') + '\n',
+      },
+    });
+    try {
+      const { render, screen, fireEvent, waitFor } = await import('@testing-library/react');
+      const { AuthProvider } = await import('../src/lib/auth');
+      const ProvidersPage = (await import('../src/pages/ProvidersPage')).default;
+
+      render(
+        <AuthProvider>
+          <ProvidersPage />
+        </AuthProvider>,
+      );
+
+      await screen.findByText('Mock OpenAI');
+      // 图标按钮的 aria-label 就是动作文案，因此可以直接按名字点
+      fireEvent.click(screen.getByRole('button', { name: '逐档实测' }));
+
+      // 等待期间必须能看到进度条（这是本用例的核心回归点：不能只显示一句"请稍候"）
+      const bar = await waitFor(() => screen.getByRole('progressbar'));
+      // 初始分母 = 模型数（2）× 候选档位数（9）——此时服务端 start 事件还没到
+      expect(bar.getAttribute('aria-valuemax')).toBe('18');
+
+      await waitFor(() => expect(screen.getByText('low / medium / high')).toBeTruthy());
+
+      const posted = requests.find(
+        (item) =>
+          item.method === 'POST' && item.path === '/api/providers/p_1/probe-efforts',
+      );
+      expect(posted).toBeDefined();
+      // 无 body 的 POST 不能带 JSON 头：服务端会把空 body 判成 400
+      expect(posted?.headers['content-type']).toBeUndefined();
+    } finally {
+      window.confirm = originalConfirm;
+      setOverrides({});
+    }
+  });
+
   it('模型聚合页展示网关地址、脱敏令牌与别名', async () => {
     const { render, screen, waitFor } = await import('@testing-library/react');
     const { AuthProvider } = await import('../src/lib/auth');
@@ -229,6 +369,105 @@ describe('前端页面装配', () => {
     expect(screen.getByText('未接管')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: '预览' })).toHaveLength(2);
     expect(screen.getByRole('button', { name: '应用配置' })).toBeTruthy();
+  });
+
+  it('结束 Codex 进程后的提示包含手动清理命令', async () => {
+    // 自动结束是尽力而为：`codex app-server daemon stop` 在配置目录只读时会失败，
+    // 非标准位置启动的进程也可能匹配不到。提示里必须给出 `pkill -9 -f codex`，
+    // 否则用户看到"已结束"或一句失败原因后不知道下一步该做什么。
+    setOverrides({
+      '/api/agents/codex/stop-processes': {
+        actions: ['已结束 1 个 Codex 客户端进程'],
+        killed: 1,
+        warnings: [],
+        supported: true,
+      },
+    });
+    const { render, screen, waitFor, fireEvent } = await import('@testing-library/react');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const AgentsPage = (await import('../src/pages/AgentsPage')).default;
+
+    render(
+      <AuthProvider>
+        <AgentsPage />
+      </AuthProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: '退出 Codex 进程' }));
+
+    // 逐字断言整句，不做"包含 pkill 就算过"的宽松检查：
+    // 用户要的就是这句话，措辞与换行都不能漂。
+    await waitFor(() =>
+      expect(document.body.textContent ?? '').toContain(
+        '也可手动执行 pkill -9 -f codex 来清理相关进程',
+      ),
+    );
+    // 提示里也要保留"重开 Codex 才生效"这一层，不能只剩命令
+    expect(document.body.textContent ?? '').toContain('重新打开 Codex 即可加载最新配置');
+    setOverrides({});
+  });
+
+  it('守护进程 stop 失败、只剩警告时也给出手动清理命令', async () => {
+    // 这条响应是从真实后端抓下来的（真机 codex 装好、但 ~/.codex 所在 fs 只读）：
+    //   actions: ["本机没有正在运行的 Codex 进程"]
+    //   warnings: ["停止守护进程失败：... Read-only file system (os error 30)"]
+    // 同时非空时走的是 setMessage 分支，警告内容要能看见，手动命令也不能丢。
+    setOverrides({
+      '/api/agents/codex/stop-processes': {
+        actions: ['本机没有正在运行的 Codex 进程'],
+        killed: 0,
+        warnings: [
+          '停止守护进程失败：WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)',
+        ],
+        supported: true,
+      },
+    });
+    const { render, screen, waitFor, fireEvent } = await import('@testing-library/react');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const AgentsPage = (await import('../src/pages/AgentsPage')).default;
+
+    render(
+      <AuthProvider>
+        <AgentsPage />
+      </AuthProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: '退出 Codex 进程' }));
+
+    await waitFor(() =>
+      expect(document.body.textContent ?? '').toContain(
+        '停止守护进程失败：WARNING: proceeding',
+      ),
+    );
+    const text = document.body.textContent ?? '';
+    expect(text).toContain('也可手动执行 pkill -9 -f codex 来清理相关进程');
+    setOverrides({});
+  });
+
+  it('结束进程的请求失败时也提示手动清理命令', async () => {
+    // 请求本身失败（后端 500 / 路由 404 / 网络断）时用户最需要这条命令：
+    // 自动结束根本没跑起来，只剩手动清理这一条路。
+    setOverrides({
+      '/api/agents/codex/stop-processes': undefined,
+    });
+    const { render, screen, waitFor, fireEvent } = await import('@testing-library/react');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const AgentsPage = (await import('../src/pages/AgentsPage')).default;
+
+    render(
+      <AuthProvider>
+        <AgentsPage />
+      </AuthProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: '退出 Codex 进程' }));
+
+    await waitFor(() =>
+      expect(document.body.textContent ?? '').toContain(
+        '也可手动执行 pkill -9 -f codex 来清理相关进程',
+      ),
+    );
+    setOverrides({});
   });
 
   it('概览页展示统计与请求日志', async () => {
@@ -300,6 +539,8 @@ describe('前端页面装配', () => {
       '/api/providers': { providers },
       '/api/settings': {
         defaultProviderId: null, defaultModel: null, disableCodexWebSearch: true,
+        // 两个流式参数：默认值与服务端一致（实测得出的 10 次 / 10 分钟）
+        codexStreamMaxRetries: 10, codexStreamIdleTimeoutMs: 600000,
         approvalReviewModel: null, protocolConversion: false,
         agentTargets: { codex: { mode: 'gateway', directProviderId: null, directModel: null, autoReviewModel: null } },
         gatewayBaseUrl: 'http://127.0.0.1:8787/v1',
@@ -335,6 +576,15 @@ describe('前端页面装配', () => {
     expect(gptOption).toContain('wllapi');
     // 同名模型只出现一次（设置里只存模型名，重复行会让人以为能选供应商）
     expect(labels.filter((text) => text.startsWith('gpt-6-luna'))).toHaveLength(1);
+
+    // 两个流式参数要预填服务端已存的值，否则用户会以为没设置过
+    const retries = (await screen.findByLabelText('流式重连上限')) as HTMLInputElement;
+    const idle = (await screen.findByLabelText('流式空闲超时')) as HTMLInputElement;
+    expect(retries.value).toBe('10');
+    expect(idle.value).toBe('600000');
+    // 范围提示必须写在界面上，否则用户不知道该填多少（Codex 会静默截断超限值）
+    expect(document.body.textContent).toContain('允许 0–100');
+    expect(document.body.textContent).toContain('允许 1000–3600000');
     setOverrides({});
   });
 
@@ -466,12 +716,18 @@ describe('前端页面装配', () => {
 
   it('协议类型三个选项句式一致，且都能在表格里显示可读短名', async () => {
     const { API_TYPE_META } = await import('../src/lib/labels');
+    const i18n = (await import('../src/i18n')).default;
     expect(API_TYPE_META).toHaveLength(3);
     for (const meta of API_TYPE_META) {
-      // 统一句式：<厂商> 兼容（<API 形态>）
-      expect(meta.label).toMatch(/兼容（.+）$/);
+      // 文案现在来自字典，断言取 zh / en 两种语言下的实际渲染结果。
+      // 统一句式：<厂商> 兼容（<API 形态>）；英文侧用 "OpenAI-compatible (...)"
+      const zhLabel = i18n.t(meta.labelKey, { lng: 'zh' });
+      const enLabel = i18n.t(meta.labelKey, { lng: 'en' });
+      expect(zhLabel).toMatch(/兼容（.+）$/);
+      expect(enLabel).toMatch(/-compatible \(.+\)$/);
       // 短名不能是原始枚举值
-      expect(meta.short).not.toBe(meta.value);
+      expect(i18n.t(meta.shortKey, { lng: 'zh' })).not.toBe(meta.value);
+      expect(i18n.t(meta.shortKey, { lng: 'en' })).not.toBe(meta.value);
       expect(meta.path.startsWith('/v1/')).toBe(true);
     }
     expect(API_TYPE_META.map((item) => item.value)).toEqual([
@@ -533,5 +789,126 @@ describe('前端页面装配', () => {
     // 点 × 移除该片段
     fireEvent.click(view.getByLabelText('移除模型 gpt-brand-new'));
     expect(view.queryByLabelText('移除模型 gpt-brand-new')).toBeNull();
+  });
+
+  it('设置页切换界面语言会落盘并立即生效', async () => {
+    // 语言偏好存服务端（不是 localStorage）：换浏览器/清缓存后仍应保持。
+    // 这里同时钉住三件事：请求真的发出去了（PATCH + 正确 body）、界面立刻切换、
+    // 下拉框的值来自服务端设置而不是写死的默认值。
+    requests = [];
+    const { render, screen, fireEvent, waitFor } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const SettingsPage = (await import('../src/pages/SettingsPage')).default;
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <SettingsPage />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // 等服务端身份（含 language: 'zh'）到位，下拉框才会是受控可用状态
+    const select = (await screen.findByLabelText('界面语言')) as HTMLSelectElement;
+    // 下拉框的值来自服务端设置（mock 的 me.language = 'zh'），不是写死的默认值
+    expect(select.value).toBe('zh');
+
+    fireEvent.change(select, { target: { value: 'en' } });
+
+    // 界面立即切换（LanguageSelect 内部乐观 applyLanguage）
+    expect(await screen.findByText('Interface language')).toBeTruthy();
+
+    // 且真的落盘了：PATCH /api/settings/language，body 是 { language: 'en' }
+    await waitFor(() => {
+      const patched = requests.find(
+        (item) => item.method === 'PATCH' && item.path === '/api/settings/language',
+      );
+      expect(patched).toBeDefined();
+      expect(JSON.parse(patched!.body ?? '{}')).toEqual({ language: 'en' });
+    });
+
+    // 落盘后要重新拉一次身份：侧边栏那个选择器与这里共用服务端真源，
+    // 不刷新就会出现"这里 English、侧边栏中文"。
+    await waitFor(() => {
+      const meCalls = requests.filter((item) => item.path === '/api/auth/me');
+      expect(meCalls.length).toBeGreaterThan(1);
+    });
+    // 刷新后下拉框仍是新值（不能跳回旧值）
+    await waitFor(() => expect(select.value).toBe('en'));
+
+    setOverrides({});
+    serverLanguage = 'zh';
+  });
+
+  it('请求带上界面语言，且错误里能拿到 messageKey', async () => {
+    // 两件事一起钉：
+    // 1) 前端必须把当前界面语言放进 Accept-Language，否则登录失败这类
+    //    "还没读到租户设置"的报错会永远是中文，而界面已经是英文了；
+    // 2) 错误对象要带 messageKey —— 服务端 message 已经按语言渲染好可以直接显示，
+    //    但需要精确区分错误类型的代码不该去匹配会变的译文。
+    requests = [];
+    const { api, ApiError } = await import('../src/lib/api');
+    const i18n = (await import('../src/i18n')).default;
+    await i18n.changeLanguage('en');
+
+    // 让 /api/providers 返回一个带 messageKey 的错误
+    setOverrides({
+      '/api/providers': {
+        statusCode: 400,
+        error: {
+          code: 'bad_request',
+          message: 'name must be a string',
+          messageKey: 'providers.validation.nameType',
+        },
+      },
+    });
+    // 上面的 mock 只按路径返回，不区分 GET/POST；这里直接调一个会走该路径的写操作
+    let caught: unknown = null;
+    try {
+      await api.createProvider({ name: '', apiType: 'openai', baseUrl: '', models: [] } as never);
+    } catch (cause) {
+      caught = cause;
+    }
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as InstanceType<typeof ApiError>).messageKey).toBe(
+      'providers.validation.nameType',
+    );
+
+    const sent = requests.find((item) => item.path === '/api/providers');
+    expect(sent?.headers['accept-language']).toBe('en');
+
+    setOverrides({});
+    await i18n.changeLanguage('zh');
+  });
+
+  it('无 settings:write 时语言下拉只读', async () => {
+    // member 只有 gateway:read：能看界面语言是什么，但不能改（保存会 403）。
+    // 让它可点只会把 403 当成交互反馈。
+    setOverrides({
+      '/api/auth/me': {
+        user: { id: 'u_member', tenantId: 't_default', role: 'member', username: 'member' },
+        permissions: ['gateway:read'],
+        allPermissions: ['gateway:read'],
+        language: 'zh',
+      },
+      '/api/tokens': { tokens: [], availableScopes: ['gateway:read'] },
+    });
+    const { render, screen } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const SettingsPage = (await import('../src/pages/SettingsPage')).default;
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <SettingsPage />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const select = (await screen.findByLabelText('界面语言')) as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    setOverrides({});
   });
 });

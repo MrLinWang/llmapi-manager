@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { api, ApiError } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
 import {
@@ -14,6 +15,7 @@ import { CopyButton } from '../components/CopyButton';
 import { apiTypeShort } from '../lib/labels';
 
 export default function ModelsPage(): JSX.Element {
+  const { t } = useTranslation();
   const models = useAsync(() => api.models());
   const providers = useAsync(() => api.providers());
   const [providerId, setProviderId] = useState('');
@@ -38,19 +40,15 @@ export default function ModelsPage(): JSX.Element {
     setMessage(null);
     try {
       await api.setDefault(providerId || null, model || null);
-      setMessage('默认模型已保存');
+      setMessage(t('models.default.saved'));
       models.reload();
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : '保存失败');
+      setError(cause instanceof ApiError ? cause.message : t('common.saveFailed'));
     }
   };
 
   const resetToken = async (): Promise<void> => {
-    if (
-      !window.confirm(
-        '重置后旧令牌立即失效，已下发的 Agent 配置需要重新应用。确定继续？',
-      )
-    ) {
+    if (!window.confirm(t('models.gateway.resetConfirm'))) {
       return;
     }
     setError(null);
@@ -60,25 +58,30 @@ export default function ModelsPage(): JSX.Element {
       setNewToken(result.token);
       models.reload();
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : '重置失败');
+      // 服务端 message 已是面向用户的中文说明，非 ApiError 才用前端兜底句
+      setError(cause instanceof ApiError ? cause.message : t('common.actionFailed'));
     }
   };
 
   return (
     <div className="space-y-5">
       <PageHeader
-        eyebrow="网关"
-        title="模型聚合"
-        description="所有启用供应商的模型被聚合为 lam-<供应商>/<模型> 别名；不带别名的请求走下面的默认模型。"
+        eyebrow={t('models.header.eyebrow')}
+        title={t('app.nav.models')}
+        description={t('models.header.description')}
         actions={
-          current ? <Badge tone="accent">{current.aliases.length} 个可用别名</Badge> : undefined
+          current ? (
+            <Badge tone="accent">
+              {t('models.header.aliasCount', { count: current.aliases.length })}
+            </Badge>
+          ) : undefined
         }
       />
 
       {error && <Notice tone="error">{error}</Notice>}
       {message && <Notice tone="ok">{message}</Notice>}
 
-      <Card title="网关接入" desc="Agent 或任意 OpenAI / Anthropic 客户端指向这里。">
+      <Card title={t('models.gateway.title')} desc={t('models.gateway.desc')}>
         {models.loading && <Spinner />}
         {current && (
           <div className="space-y-2.5">
@@ -87,7 +90,7 @@ export default function ModelsPage(): JSX.Element {
                 <span className="flex size-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
                   <Icon name="link" className="size-4" />
                 </span>
-                网关地址
+                {t('models.gateway.baseUrl')}
               </div>
               <code className="min-w-0 flex-1 truncate font-mono text-xs text-ink">
                 {current.gateway.baseUrl}
@@ -100,23 +103,27 @@ export default function ModelsPage(): JSX.Element {
                 <span className="flex size-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
                   <Icon name="key" className="size-4" />
                 </span>
-                网关令牌
+                {t('models.gateway.token')}
               </div>
               <code className="min-w-0 flex-1 truncate font-mono text-xs text-ink">
-                {current.gateway.token.exists ? current.gateway.token.masked : '尚未生成令牌'}
+                {current.gateway.token.exists
+                  ? current.gateway.token.masked
+                  : t('models.gateway.tokenMissing')}
               </code>
               <button
                 type="button"
                 className="btn-outline btn-sm"
                 onClick={() => void resetToken()}
               >
-                {current.gateway.token.exists ? '重置令牌' : '生成令牌'}
+                {current.gateway.token.exists
+                  ? t('models.gateway.resetToken')
+                  : t('models.gateway.generateToken')}
               </button>
             </div>
 
             {newToken && (
               <Notice tone="warn">
-                <p className="mb-1.5 font-medium">这是唯一一次显示完整令牌，请立即复制：</p>
+                <p className="mb-1.5 font-medium">{t('models.gateway.newTokenNotice')}</p>
                 <div className="flex items-center gap-2">
                   <code className="min-w-0 flex-1 break-all rounded-md border border-line bg-elevated px-2 py-1 font-mono text-[11px]">
                     {newToken}
@@ -129,15 +136,15 @@ export default function ModelsPage(): JSX.Element {
         )}
       </Card>
 
-      <Card title="默认供应商与模型" desc="用于承接不带 lam- 别名的请求。">
+      <Card title={t('models.default.title')} desc={t('models.default.desc')}>
         {providers.loading && <Spinner />}
         {!providers.loading && providerList.length === 0 && (
-          <Empty icon="providers">还没有供应商，请先在「供应商」页添加。</Empty>
+          <Empty icon="providers">{t('models.default.noProviders')}</Empty>
         )}
         {providerList.length > 0 && (
           <div className="grid gap-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
             <div>
-              <label className="label">默认供应商</label>
+              <label className="label">{t('models.default.providerLabel')}</label>
               <select
                 className="input"
                 value={providerId}
@@ -147,17 +154,17 @@ export default function ModelsPage(): JSX.Element {
                   setModel(next?.models[0] ?? '');
                 }}
               >
-                <option value="">（不设置）</option>
+                <option value="">{t('common.none')}</option>
                 {providerList.map((item) => (
                   <option key={item.id} value={item.id}>
-                    {item.name} · {apiTypeShort(item.apiType)}
-                    {item.enabled ? '' : '（已停用）'}
+                    {item.name} · {apiTypeShort(t, item.apiType)}
+                    {item.enabled ? '' : t('models.default.disabledSuffix')}
                   </option>
                 ))}
               </select>
             </div>
             <div>
-              <label className="label">默认模型</label>
+              <label className="label">{t('models.default.modelLabel')}</label>
               {selected && selected.models.length > 0 ? (
                 <select
                   className="input font-mono"
@@ -174,38 +181,42 @@ export default function ModelsPage(): JSX.Element {
                 <input
                   className="input font-mono"
                   value={model}
-                  placeholder="选择供应商后填写"
+                  placeholder={t('models.default.modelPlaceholder')}
                   onChange={(event) => setModel(event.target.value)}
                 />
               )}
             </div>
             <button type="button" className="btn-primary" onClick={() => void saveDefault()}>
-              保存
+              {t('common.save')}
             </button>
           </div>
         )}
       </Card>
 
       <Card
-        title="聚合别名"
-        desc="只列出已启用供应商的模型，可直接复制给客户端使用。"
+        title={t('models.aliases.title')}
+        desc={t('models.aliases.desc')}
         flush
-        actions={<Badge tone="neutral">{current?.aliases.length ?? 0} 个</Badge>}
+        actions={
+          <Badge tone="neutral">
+            {t('models.aliases.count', { count: current?.aliases.length ?? 0 })}
+          </Badge>
+        }
       >
         {models.loading && <Spinner />}
         {current && current.aliases.length === 0 && (
-          <Empty icon="models">暂无可用别名，请先启用供应商并声明模型。</Empty>
+          <Empty icon="models">{t('models.aliases.empty')}</Empty>
         )}
         {current && current.aliases.length > 0 && (
           <div className="overflow-x-auto">
             <table className="table-base">
               <thead>
                 <tr>
-                  <th>别名</th>
-                  <th>供应商</th>
-                  <th>协议</th>
-                  <th>上游模型</th>
-                  <th className="text-right">操作</th>
+                  <th>{t('models.aliases.table.alias')}</th>
+                  <th>{t('models.aliases.table.provider')}</th>
+                  <th>{t('models.aliases.table.apiType')}</th>
+                  <th>{t('models.aliases.table.upstreamModel')}</th>
+                  <th className="text-right">{t('models.aliases.table.actions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -216,7 +227,7 @@ export default function ModelsPage(): JSX.Element {
                     </td>
                     <td className="text-xs text-ink">{alias.providerName}</td>
                     <td>
-                      <Badge tone="accent">{apiTypeShort(alias.apiType)}</Badge>
+                      <Badge tone="accent">{apiTypeShort(t, alias.apiType)}</Badge>
                     </td>
                     <td className="font-mono text-xs text-muted">{alias.upstreamModel}</td>
                     <td className="text-right">

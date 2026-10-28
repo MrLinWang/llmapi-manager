@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 
 export type IconName =
   | 'overview'
@@ -294,11 +295,14 @@ export function Notice({
   );
 }
 
-export function Spinner({ label = '加载中…' }: { label?: string }): JSX.Element {
+export function Spinner({ label }: { label?: string }): JSX.Element {
+  // 默认文案在组件内部取：默认参数是模块加载时求值的，语言切换后不会更新，
+  // 会出现"界面已切英文、转圈提示还是中文"。
+  const { t } = useTranslation();
   return (
     <div className="flex items-center justify-center gap-2.5 py-10 text-xs text-muted">
       <span className="size-4 animate-spin rounded-full border-2 border-line border-t-accent" />
-      {label}
+      {label ?? t('common.loading')}
     </div>
   );
 }

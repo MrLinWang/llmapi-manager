@@ -5,6 +5,8 @@
  * 代价是"服务已启动、账号还没建"这段时间是一扇开着的门，因此需要一次性 token 把门看住：
  * 启动时生成 setup token 并打印到控制台，只有能读到控制台的人（= 部署者本人）才能完成初始化。
  */
+import type { LocalizedText } from '../i18n';
+
 export interface SetupState {
   /**
    * 是否已完成初始化。以"管理员账号是否存在"为准（由 identity.json 推导），
@@ -42,23 +44,27 @@ export function defaultSetupState(): SetupState {
 /** 用户名规则：字母数字与 . _ -，避免与将来的路由/日志格式冲突。 */
 const USERNAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 
-export function validateAdminUsername(username: string): string | null {
+/**
+ * 校验失败时返回"键 + 参数"而不是成品文案：初始化报错会显示在首次初始化页上，
+ * 必须按请求语言渲染，而领域层不认识语言（见 `i18n/index.ts` 的分层约定）。
+ */
+export function validateAdminUsername(username: string): LocalizedText | null {
   const value = username.trim();
   if (value.length < MIN_USERNAME_LENGTH) {
-    return `用户名至少 ${MIN_USERNAME_LENGTH} 个字符`;
+    return { key: 'auth.setup.usernameMin', params: { min: MIN_USERNAME_LENGTH } };
   }
   if (value.length > MAX_USERNAME_LENGTH) {
-    return `用户名最多 ${MAX_USERNAME_LENGTH} 个字符`;
+    return { key: 'auth.setup.usernameMax', params: { max: MAX_USERNAME_LENGTH } };
   }
   if (!USERNAME_PATTERN.test(value)) {
-    return '用户名只能包含字母、数字、点、下划线与连字符';
+    return { key: 'auth.setup.usernamePattern' };
   }
   return null;
 }
 
-export function validateAdminPassword(password: string): string | null {
+export function validateAdminPassword(password: string): LocalizedText | null {
   if (password.length < MIN_PASSWORD_LENGTH) {
-    return `口令至少 ${MIN_PASSWORD_LENGTH} 位`;
+    return { key: 'auth.setup.passwordMin', params: { min: MIN_PASSWORD_LENGTH } };
   }
   // 不强制复杂度：这类自托管场景里，长度比"必须含大写+符号"更有效，
   // 且强制复杂度的规则反而会诱导用户写 Password1! 这种可猜的口令。

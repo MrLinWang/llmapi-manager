@@ -11,6 +11,9 @@
  * 那会把 Responses 请求发给只支持 Chat 的上游，客户端只会收到上游的参数错误，
  * 完全看不出是选错了供应商——这条被真实问题踩过。
  */
+import { translate } from '../i18n';
+import type { UiLanguage } from './settings';
+
 export type ApiType = 'openai' | 'anthropic' | 'responses';
 
 /**
@@ -24,10 +27,121 @@ export const API_TYPES: readonly ApiType[] = ['openai', 'anthropic', 'responses'
  * API 形态，只说"OpenAI 兼容"会让用户以为这家一定能走 /v1/chat/completions。
  * 与前端 web/src/lib/labels.ts 的 API_TYPE_META 口径一致，避免同一协议两处叫法不同。
  */
-export function apiTypeLabel(apiType: ApiType): string {
-  if (apiType === 'openai') return 'OpenAI 兼容（Chat Completions）';
-  if (apiType === 'anthropic') return 'Anthropic 兼容（Messages）';
-  return 'OpenAI 兼容（Responses）';
+export function apiTypeLabel(apiType: ApiType, language: UiLanguage = 'zh'): string {
+  if (apiType === 'openai') return translate(language, 'gateway.apiType.openai');
+  if (apiType === 'anthropic') return translate(language, 'gateway.apiType.anthropic');
+  return translate(language, 'gateway.apiType.responses');
+}
+
+/**
+ * Codex 的 `InputModality` 只认这三个值（已核 ref/codex 的 openai_models.rs）。
+ *
+ * **这是一条安全边界，不是文案选择。** 多写一个值（如 models.dev 里常见的 `pdf`、
+ * `video`）会让 Codex 在解析 `model_catalog_json` 时报
+ * `unknown variant ... expected one of text, image, audio`，然后**静默回退到内置的
+ * 官方模型列表** —— 用户的 /model 里会冒出 GPT-6.x，且终端里看不到任何提示
+ * （已做 A/B 实测：只差一个 pdf，目录就从"我们的 11 条"变成"官方内置列表"）。
+ */
+export const CODEX_INPUT_MODALITIES: readonly string[] = ['text', 'image', 'audio'];
+
+/**
+ * 过滤出 Codex 认识的输入模态。
+ *
+ * `text` 恒定保留：任何对话模型至少要能收文本，缺了它 Codex 的输入组装会异常。
+ * 未知值一律丢弃而不是透传 —— 见上面那条边界说明。
+ */
+export function filterInputModalities(raw: unknown): string[] {
+  const out: string[] = ['text'];
+  if (!Array.isArray(raw)) return out;
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const value = item.trim().toLowerCase();
+    if (CODEX_INPUT_MODALITIES.includes(value) && !out.includes(value)) {
+      out.push(value);
+    }
+  }
+  return out;
+}
+
+/**
+ * Codex 认识的推理档位，**按强度从弱到强排列**。
+ *
+ * 顺序很重要，不能随便换：Codex 在遇到"当前档位不在列表里"时会静默取
+ * `supported_reasoning_levels[len-1 / 2]`（见 core/src/session/turn_context.rs）。
+ * 若我们乱序写入，那个"中间档"就不再是 medium，用户配的 high 可能被悄悄降成 low。
+ * 按强度排序能让 fallback 落在语义上的中间位置。
+ *
+ * 与 `InputModality` 不同，这个列表**不是硬边界**：Codex 对未知 effort 值会解析成
+ * `ReasoningEffort::Custom(String)` 而不是报错（见 openai_models.rs 的 FromStr）。
+ * 但仍然只放行已知值——写 `Custom` 进去等于把一个拼错的档位展示给用户。
+ */
+export const CODEX_REASONING_EFFORTS: readonly string[] = [
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+  'ultra',
+  'persistent',
+];
+
+/**
+ * 过滤并排序推理档位：只保留 Codex 认识的值，按强度升序、去重。
+ *
+ * 空数组返回空数组（调用方据此区分"明确无档位"与"未知"）。
+ */
+export function filterReasoningEfforts(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const value = item.trim().toLowerCase();
+    if (CODEX_REASONING_EFFORTS.includes(value)) seen.add(value);
+  }
+  // 按白名单的定义顺序输出，而不是保留输入顺序
+  return CODEX_REASONING_EFFORTS.filter((effort) => seen.has(effort));
+}
+
+/**
+ * 单个模型的能力。
+ *
+ * 为什么需要它：Codex 的模型目录里 `context_window` 是**真正被读取**的字段，
+ * 它据此算可用上下文与自动压缩阈值。写死一个保守值（128k）虽然不会报错，
+ * 但会让 1M 上下文的上游只用到十分之一 —— 客户端在 ~121k token 就自动压缩，
+ * 用户会觉得"模型明明支持更长却总是失忆"。
+ *
+ * 数据来源有四级（优先级从高到低，见 `services/providers.ts` 的 mergeCapabilities）：
+ * 1. 上游 `/models` 的 `metadata`（最贴近这个中转的实际额度）
+ * 2. modelinfo.dev（权威直给档位，但覆盖不全）
+ * 3. models.dev（覆盖全，但档位要按 provider 投票）
+ * 4. 目录生成时的代码默认值
+ *
+ * 任何一级都取不到时**不写**该字段，而不是猜一个大数：猜大了 Codex 会把上下文
+ * 塞爆，上游直接报超限，比"用不满"更难排查。
+ */
+export interface ModelCapability {
+  /** 上下文窗口（token 数） */
+  contextWindow?: number;
+  /** 单次输出上限（token 数） */
+  maxOutputTokens?: number;
+  /** 是否支持推理档位；false 时目录里不写 supported_reasoning_levels */
+  supportsReasoning?: boolean;
+  /**
+   * 该模型可用的推理档位，已过白名单并按强度升序。
+   *
+   * **空数组与 undefined 语义不同，不能合并**：
+   * - `undefined`：不知道（没查过，或两个数据源都没给）→ 目录回落三档默认值
+   * - `[]`：查过但没有可用档位 → 目录写空数组（Codex 会隐藏推理菜单）
+   *
+   * 反过来说，"数据源返回空数组"不等于"模型没有档位"，而是"支持推理但没列出档位"
+   * （modelinfo.dev 有 221 条是这种）。这种情况在合并时要**继续问下一个来源**，
+   * 而不是直接当成 `[]` 落盘。
+   */
+  reasoningEfforts?: string[];
+  /** Codex 认得的输入模态（已过白名单，只会是 text/image/audio） */
+  inputModalities?: string[];
 }
 
 /** 落盘形态：apiKey 存的是 SecretCodec 编码后的字符串。 */
@@ -42,6 +156,13 @@ export interface ProviderRecord {
   baseUrl: string;
   apiKey: string;
   models: string[];
+  /**
+   * 按模型名记录的上游能力，键必须在 `models` 里。
+   *
+   * 可选且缺省为空：老数据没有这个字段，读出来当作"未知"，目录回落保守默认值。
+   * 只在向上游拉取模型列表时自动填充，也允许调用方显式传入覆盖。
+   */
+  modelCapabilities?: Record<string, ModelCapability>;
   enabled: boolean;
   /** 数值小的优先；相同优先级按创建顺序 */
   priority: number;

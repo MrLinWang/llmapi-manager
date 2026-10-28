@@ -1,6 +1,8 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { api } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
+import { formatTime } from '../i18n/format';
 import {
   Badge,
   Card,
@@ -13,6 +15,7 @@ import {
 } from '../components/ui';
 
 export default function OverviewPage(): JSX.Element {
+  const { t } = useTranslation();
   const stats = useAsync(() => api.stats());
   const providers = useAsync(() => api.providers());
   const [filter, setFilter] = useState('');
@@ -28,18 +31,18 @@ export default function OverviewPage(): JSX.Element {
   return (
     <div className="space-y-5">
       <PageHeader
-        eyebrow="运行概览"
-        title="概览"
-        description="今日网关调用情况与最近请求，快速判断聚合链路是否正常。"
+        eyebrow={t('overview.header.eyebrow')}
+        title={t('app.nav.overview')}
+        description={t('overview.header.description')}
         actions={
           <>
             <select
               className="input w-44"
               value={filter}
-              aria-label="按供应商筛选"
+              aria-label={t('overview.filter.label')}
               onChange={(event) => setFilter(event.target.value)}
             >
-              <option value="">全部供应商</option>
+              <option value="">{t('overview.filter.all')}</option>
               {providerList.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.name}
@@ -48,7 +51,7 @@ export default function OverviewPage(): JSX.Element {
             </select>
             <button type="button" className="btn-outline" onClick={refresh}>
               <Icon name="refresh" className="size-4" />
-              刷新
+              {t('common.refresh')}
             </button>
           </>
         }
@@ -57,33 +60,39 @@ export default function OverviewPage(): JSX.Element {
       <div className="stat-strip">
         <StatCard
           icon="activity"
-          label="今日请求"
+          label={t('overview.stats.today')}
           value={stats.data?.total ?? 0}
-          hint="按网关请求日志统计"
+          hint={t('overview.stats.todayHint')}
           loading={stats.loading}
         />
         <StatCard
           icon="check"
-          label="成功率"
+          label={t('overview.stats.successRate')}
           value={stats.data ? `${stats.data.successRate}%` : '-'}
-          hint={stats.data ? `成功 ${stats.data.success} 次` : undefined}
+          hint={
+            stats.data
+              ? t('overview.stats.successHint', { count: stats.data.success })
+              : undefined
+          }
           loading={stats.loading}
         />
         <StatCard
           icon="clock"
-          label="平均耗时"
+          label={t('overview.stats.avgLatency')}
           value={stats.data ? `${stats.data.avgLatencyMs}ms` : '-'}
-          hint="全部请求的平均上游耗时"
+          hint={t('overview.stats.avgLatencyHint')}
           loading={stats.loading}
         />
       </div>
 
       <Card
-        title="最近请求"
-        desc="今日网关调用的最近 50 条记录，回退请求会单独标记。"
+        title={t('overview.logs.title')}
+        desc={t('overview.logs.desc')}
         flush
         actions={
-          <Badge tone="neutral">{logs.data?.logs.length ?? 0} 条</Badge>
+          <Badge tone="neutral">
+            {t('overview.logs.count', { count: logs.data?.logs.length ?? 0 })}
+          </Badge>
         }
       >
         {logs.loading && <Spinner />}
@@ -93,29 +102,28 @@ export default function OverviewPage(): JSX.Element {
           </div>
         )}
         {!logs.loading && (logs.data?.logs.length ?? 0) === 0 && (
-          <Empty icon="activity">
-            还没有请求记录。把客户端指向网关地址后即可看到调用。
-          </Empty>
+          <Empty icon="activity">{t('overview.logs.empty')}</Empty>
         )}
         {(logs.data?.logs.length ?? 0) > 0 && (
           <div className="overflow-x-auto">
             <table className="table-base">
               <thead>
                 <tr>
-                  <th>时间</th>
-                  <th>接口</th>
-                  <th>模型</th>
-                  <th>供应商</th>
-                  <th>状态</th>
-                  <th>耗时</th>
-                  <th>类型</th>
+                  <th>{t('overview.logs.table.time')}</th>
+                  <th>{t('overview.logs.table.path')}</th>
+                  <th>{t('overview.logs.table.model')}</th>
+                  <th>{t('overview.logs.table.provider')}</th>
+                  <th>{t('overview.logs.table.status')}</th>
+                  <th>{t('overview.logs.table.latency')}</th>
+                  <th>{t('overview.logs.table.kind')}</th>
                 </tr>
               </thead>
               <tbody>
                 {logs.data?.logs.map((log, index) => (
                   <tr key={`${log.at}-${index}`}>
                     <td className="whitespace-nowrap text-xs text-muted">
-                      {new Date(log.at).toLocaleTimeString()}
+                      {/* 时间跟随控制台语言，不能用 toLocaleTimeString()（它跟浏览器语言） */}
+                      {formatTime(log.at)}
                     </td>
                     <td>
                       <code className="font-mono text-[11px] text-ink">{log.path}</code>
@@ -132,9 +140,15 @@ export default function OverviewPage(): JSX.Element {
                     </td>
                     <td>
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="text-xs text-ink">{log.providerName ?? '—'}</span>
-                        {log.mode === 'alias' && <Badge tone="accent">别名</Badge>}
-                        {log.fallback && <Badge tone="warn">回退</Badge>}
+                        <span className="text-xs text-ink">
+                          {log.providerName ?? t('overview.logs.noProvider')}
+                        </span>
+                        {log.mode === 'alias' && (
+                          <Badge tone="accent">{t('overview.logs.badgeAlias')}</Badge>
+                        )}
+                        {log.fallback && (
+                          <Badge tone="warn">{t('overview.logs.badgeFallback')}</Badge>
+                        )}
                       </div>
                     </td>
                     <td>
@@ -164,7 +178,7 @@ export default function OverviewPage(): JSX.Element {
                     <td className="whitespace-nowrap text-xs text-muted">{log.latencyMs}ms</td>
                     <td>
                       <Badge tone={log.stream ? 'accent' : 'neutral'}>
-                        {log.stream ? '流式' : '非流式'}
+                        {log.stream ? t('overview.logs.stream') : t('overview.logs.nonStream')}
                       </Badge>
                     </td>
                   </tr>

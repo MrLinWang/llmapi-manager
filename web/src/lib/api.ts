@@ -1,13 +1,18 @@
+import i18next, { currentLanguage } from '../i18n';
+import type { UiLanguage } from '../i18n/language';
 import type {
   AgentPreview,
   AgentConnectionMode,
   AgentTargetPreference,
   ApiTokenView,
+  EffortProbeProgress,
+  EffortProbeResult,
   GatewayOverview,
   StopProcessesResult,
   AgentSummary,
   Me,
   ModelsResponse,
+  ModelCapability,
   Provider,
   RequestLog,
   RequestStats,
@@ -27,11 +32,19 @@ export class ApiError extends Error {
     readonly code: string,
     message: string,
     /**
-     * 服务端附带的机读信息。与 message 分开：message 是给人读的中文句子，
+     * 服务端附带的机读信息。与 message 分开：message 是给人读的句子（会随语言变），
      * details 是给代码判断用的，不要靠匹配 message 里的字面量来分支。
      * 目前唯一的使用方是 501 时的 `{ canEnableConversion: true }`。
      */
     readonly details?: unknown,
+    /**
+     * 稳定的错误标识（如 `providers.validation.nameType`）。
+     *
+     * 比 `code` 细、比 `message` 稳：`code` 只区分 HTTP 语义（bad_request），
+     * 而同一类错误下有很多具体原因。需要精确区分时用它。
+     * 注意 `message` 已经由服务端按当前语言渲染好了，显示直接用 `message` 即可。
+     */
+    readonly messageKey?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -45,12 +58,122 @@ export function setUnauthorizedHandler(handler: (() => void) | null): void {
   onUnauthorized = handler;
 }
 
+/**
+ * 统一把非 2xx 响应的载荷转成 ApiError。
+ *
+ * 抽出来是因为「逐档实测」走流式响应，错误仍然可能是普通 JSON（400/404/401），
+ * 而它的读取路径不经过 request()。两处必须共用同一套错误解析与 401 处理。
+ */
+function toApiError(response: Response, payload: unknown): ApiError {
+  const body = payload as {
+    error?: { code?: string; message?: string; messageKey?: string; details?: unknown };
+  } | null;
+  const code = body?.error?.code ?? 'unknown';
+  // 服务端 message 已经按请求语言渲染（见上面 accept-language 与
+  // server/src/i18n/language.ts 的优先级），可以直接显示。
+  // 这里只兜"连 message 都没有"的情况——那是前端自己造的句子，走字典。
+  const message =
+    body?.error?.message ?? i18next.t('common.requestFailed', { status: response.status });
+  if (response.status === 401) onUnauthorized?.();
+  return new ApiError(
+    response.status,
+    code,
+    message,
+    body?.error?.details,
+    body?.error?.messageKey,
+  );
+}
+
+/**
+ * 读「逐档实测」的 NDJSON 流：每行一个事件。
+ *
+ * 事件类型：
+ * - start    : { total, candidates, models }，用于进度条分母
+ * - progress : { done, total, model, effort, accepted }，每完成一次上游请求一条
+ * - result   : 最终结果（写入后的供应商 + 逐模型 accepted/rejected）
+ * - error    : 流中途失败（响应头已发出，改不了状态码）
+ *
+ * 没有 `response.body` 时（测试桩或环境不支持流）退化为整段文本解析，
+ * 这样两种读取路径共用同一套事件处理。
+ */
+async function readProbeStream(
+  response: Response,
+  onProgress?: (progress: EffortProbeProgress) => void,
+): Promise<EffortProbeResult> {
+  const handle = (line: string): EffortProbeResult | undefined => {
+    const trimmed = line.trim();
+    if (trimmed === '') return undefined;
+    let event: { type?: string } & Record<string, unknown>;
+    try {
+      event = JSON.parse(trimmed) as { type?: string } & Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
+    if (event.type === 'progress') {
+      onProgress?.(event as unknown as EffortProbeProgress);
+      return undefined;
+    }
+    if (event.type === 'error') {
+      throw new ApiError(
+        502,
+        'probe_stream_error',
+        String(event.message ?? i18next.t('common.requestFailed', { status: 502 })),
+      );
+    }
+    if (event.type === 'result') {
+      return event as unknown as EffortProbeResult;
+    }
+    return undefined;
+  };
+
+  let result: EffortProbeResult | undefined;
+  const reader = response.body?.getReader();
+  if (!reader) {
+    for (const line of (await response.text()).split('\n')) {
+      result = handle(line) ?? result;
+    }
+  } else {
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      let index = buffer.indexOf('\n');
+      while (index >= 0) {
+        result = handle(buffer.slice(0, index)) ?? result;
+        buffer = buffer.slice(index + 1);
+        index = buffer.indexOf('\n');
+      }
+    }
+    // 最后一行可能没有换行符（服务端 end 前都会补，但不要依赖它）
+    result = handle(buffer) ?? result;
+  }
+
+  if (!result) {
+    throw new ApiError(
+      502,
+      'probe_stream_truncated',
+      i18next.t('common.requestFailed', { status: 502 }),
+    );
+  }
+  return result;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { ...(init?.headers as Record<string, string>) };
   // 只有真的有 body 时才声明 JSON：Fastify 对「Content-Type: application/json + 空 body」
   // 会直接返回 400，而预览/应用/还原/登出都是无 body 的 POST。
   if (init?.body !== undefined && headers['content-type'] === undefined) {
     headers['content-type'] = 'application/json';
+  }
+  // 带上界面语言：服务端据此渲染 error.message。
+  //
+  // 已登录时服务端会优先用租户设置，这个头只在两处真正起作用：未登录（登录页、
+  // 首次初始化）和租户还没选过语言。但不带它的后果很具体——英文界面上登录失败
+  // 会弹出一句中文，用户会以为是两个不同的系统。
+  if (headers['accept-language'] === undefined) {
+    headers['accept-language'] = currentLanguage();
   }
 
   const response = await fetch(path, {
@@ -69,15 +192,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
 
-  if (!response.ok) {
-    const body = payload as {
-      error?: { code?: string; message?: string; details?: unknown };
-    } | null;
-    const code = body?.error?.code ?? 'unknown';
-    const message = body?.error?.message ?? `请求失败（HTTP ${response.status}）`;
-    if (response.status === 401) onUnauthorized?.();
-    throw new ApiError(response.status, code, message, body?.error?.details);
-  }
+  if (!response.ok) throw toApiError(response, payload);
 
   return payload as T;
 }
@@ -123,6 +238,36 @@ export const api = {
   testProvider: (id: string) =>
     request<TestResult>(`/api/providers/${id}/test`, { method: 'POST' }),
   /**
+   * 逐档实测：服务端按档位逐个向上游发极小请求，把真正接受的档位写回
+   * `modelCapabilities`。响应是 NDJSON 流（进度事件 + 最终结果）。
+   *
+   * 无 body 的 POST —— 不要加 JSON 头，Fastify 会把「application/json + 空 body」
+   * 直接判 400。这里没有复用 request()，因为它要等整个响应体读完，会把进度丢掉。
+   */
+  probeProviderEfforts: async (
+    id: string,
+    onProgress?: (progress: EffortProbeProgress) => void,
+  ): Promise<EffortProbeResult> => {
+    const response = await fetch(`/api/providers/${id}/probe-efforts`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'accept-language': currentLanguage() },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      let payload: unknown = null;
+      if (text) {
+        try {
+          payload = JSON.parse(text);
+        } catch {
+          payload = null;
+        }
+      }
+      throw toApiError(response, payload);
+    }
+    return readProbeStream(response, onProgress);
+  },
+  /**
    * 按表单当前值拉取上游模型列表，不要求供应商已保存。
    * apiKey 留空时传 providerId，服务端沿用已保存的 Key。
    */
@@ -151,16 +296,30 @@ export const api = {
     ),
   settings: () =>
     request<{
+      language: UiLanguage | null;
       disableCodexWebSearch: boolean;
       approvalReviewModel: string | null;
       protocolConversion: boolean;
+      codexStreamMaxRetries: number | null;
+      codexStreamIdleTimeoutMs: number | null;
       agentTargets: Record<string, AgentTargetPreference>;
     }>('/api/settings'),
   /**
-   * 改 Codex 的三个行为开关。
+   * 改界面语言。`null` = 跟随浏览器。
    *
-   * 服务端一律返回 requiresReapply: true，但三个开关要不要真的重新 apply 并不相同：
-   * - disableCodexWebSearch：写进 config.toml，必须重新 apply 才生效；
+   * 与其它设置的差别：它不影响网关与下发文件，所以响应里没有 requiresReapply。
+   */
+  setLanguage: (language: UiLanguage | null) =>
+    request<{ language: UiLanguage | null }>('/api/settings/language', {
+      method: 'PATCH',
+      body: JSON.stringify({ language }),
+    }),
+  /**
+   * 改 Codex 的行为开关与下发数值。
+   *
+   * 服务端一律返回 requiresReapply: true，但要不要真的重新 apply 并不相同：
+   * - disableCodexWebSearch / codexStreamMaxRetries / codexStreamIdleTimeoutMs：
+   *   都写进 config.toml，必须重新 apply 才生效；
    * - approvalReviewModel / protocolConversion：纯网关侧运行时行为，不改下发文件，
    *   所以调用方**不要**跟着 apply（AgentsPage 就是按这个区别处理的）。
    */
@@ -168,11 +327,15 @@ export const api = {
     disableCodexWebSearch?: boolean;
     approvalReviewModel?: string | null;
     protocolConversion?: boolean;
+    codexStreamMaxRetries?: number | null;
+    codexStreamIdleTimeoutMs?: number | null;
   }) =>
     request<{
       disableCodexWebSearch: boolean;
       approvalReviewModel: string | null;
       protocolConversion: boolean;
+      codexStreamMaxRetries: number | null;
+      codexStreamIdleTimeoutMs: number | null;
       requiresReapply: boolean;
     }>('/api/settings/codex', { method: 'PATCH', body: JSON.stringify(input) }),
   /**
@@ -260,6 +423,11 @@ export interface ProviderInput {
   baseUrl: string;
   apiKey?: string;
   models: string[];
+  /**
+   * 按模型名记录的上游能力（上下文窗口等）。
+   * 不传表示保持已存值不变；传了则整体替换（服务端按 models 裁剪）。
+   */
+  modelCapabilities?: Record<string, ModelCapability>;
   enabled?: boolean;
   priority?: number;
   notes?: string;

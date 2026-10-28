@@ -19,6 +19,7 @@
 | `SESSION_SECRET` | 自动生成 | 会话签名密钥；未设置时生成并存入 `data/instance.json` |
 | `DATA_ENCRYPTION_KEY` | 无 | 凭据落盘加密密钥（任意字符串，内部派生 AES-256）；不设则明文并告警 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+| `LOG_LANGUAGE` | `zh` | `zh` / `en`：**运行日志、启动横幅与 CLI 输出**的语言。与接口文案的语言是两回事——接口跟随请求语言，日志跟随这个设置，否则同一故障在不同客户端下会长得不一样、没法 grep |
 | `LOG_DIR` | 仓库根 `log/` | 运行日志目录；设为 `off` 则只输出到控制台 |
 | `LOG_MAX_BYTES` | `5242880`（5MB） | 单个日志文件的滚动阈值 |
 | `LOG_MAX_FILES` | `5` | 保留的历史日志文件个数 |
@@ -27,6 +28,9 @@
 | `ENABLE_DIAGNOSTICS` | 无（关闭） | 设为 `1` 才开启 `/api/diagnostics/*`；未开启时这四个接口返回 404 |
 | `TRUST_PROXY` | 无（关闭） | 设为 `1` 才采信 `X-Forwarded-Proto` 等转发头，且只信任来自回环的代理。**部署在反向代理后必须开**，否则同步快照的 HTTPS 检查会把代理回源当成明文请求 |
 | `SYNC_ALLOW_INSECURE` | 无（关闭） | 设为 `1` 允许同步快照与 follower 拉取走明文 HTTP。仅用于可信内网（如 EasyTier 隧道内） |
+| `MODELS_DEV_URL` | `https://models.dev/models.json?type=all` | 模型公开规格库地址，供 `npm run registry:sync -w server` 校准上下文窗口与推理档位。内网部署可指向同构镜像；不可达时该命令报错退出，不影响服务运行 |
+| `MODELINFO_URL` | `https://modelinfo.dev/v1/models` | 另一个模型目录源，**推理档位优先取它**（直接给数组，不用按 provider 投票）。注意只有这一个路径可用，`api.json`/`models.json` 均 404 |
+
 
 `CODEX_HOME` 是 Codex 自己的约定变量，本服务只读不算：它决定 `codex app-server daemon stop`
 在哪个目录下执行。目录不存在时不会强行设置（codex 会对不存在的路径报错，而"本机还没配过 Codex"
@@ -94,7 +98,7 @@ data/                                # 默认即 server/data，见上表 DATA_DI
 ├── setup.json                        首次初始化状态（一次性令牌哈希，完成后清空）
 └── tenants/<tenantId>/
     ├── providers.json                供应商
-    ├── settings.json                 默认供应商/模型、网关令牌、Codex 行为开关
+    ├── settings.json                 默认供应商/模型、界面语言、网关令牌、Codex 行为开关
     ├── agents.json                   下发快照
     ├── api-tokens.json               程序化访问用的 API 令牌（只存 sha256）
     ├── sync-conflicts.json           待仲裁的同步冲突（凭据已打码）

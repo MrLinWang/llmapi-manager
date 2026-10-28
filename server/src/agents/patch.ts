@@ -1,8 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentDefinition, AgentId, AgentFileRole, PreviewEntry } from '../domain/agent';
+import type { UiLanguage } from '../domain/settings';
 import { AGENT_DEFINITIONS } from './registry';
 import { applyTomlEdits, readTableScalars, readTomlScalar, removeTomlKeyIfValue } from './toml';
+import { translate } from '../i18n';
 
 /** 我们写入某个 Agent 文件的目标键值集合。 */
 export interface DesiredWrites {
@@ -44,7 +46,7 @@ export function applyJsonWrites(content: string, writes: DesiredWrites[]): strin
   if (content.trim() !== '') {
     const candidate: unknown = JSON.parse(content);
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
-      throw new Error('目标 JSON 顶层不是对象，拒绝覆盖');
+      throw new Error('target JSON is not an object at the top level; refusing to overwrite');
     }
     parsed = candidate as Record<string, unknown>;
   }
@@ -63,7 +65,9 @@ export function applyJsonWrites(content: string, writes: DesiredWrites[]): strin
       }
       if (!next || typeof next !== 'object' || Array.isArray(next)) {
         // 已有同名的非对象值：不擅自覆盖用户结构，直接报错让用户处理
-        throw new Error(`字段 ${segments.slice(0, i + 1).join('.')} 不是对象，无法写入`);
+        throw new Error(
+          `field ${segments.slice(0, i + 1).join('.')} is not an object; cannot write into it`,
+        );
       }
       cursor = next as Record<string, unknown>;
     }
@@ -365,6 +369,9 @@ export function revertAgentWrites(
     values: Record<string, string>;
     created?: boolean;
   }>,
+  // 生成类文件的冲突说明会原样显示在界面上，按请求语言渲染。
+  // 缺省中文：未传语言的调用方（脚本、直接调用的测试）拿到稳定文案。
+  language: UiLanguage = 'zh',
 ): RevertResult {
   const restored: string[] = [];
   const conflicts: RevertConflict[] = [];
@@ -388,8 +395,8 @@ export function revertAgentWrites(
           fs.renameSync(tmp, file.path);
           conflicts.push({
             key: path.basename(file.path),
-            expected: '(由本服务生成)',
-            current: '文件原本存在，已重置为空对象',
+            expected: translate(language, 'agents.revert.generatedExpected'),
+            current: translate(language, 'agents.revert.generatedResetCurrent'),
           });
         }
         continue;

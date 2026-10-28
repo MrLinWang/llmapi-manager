@@ -1,3 +1,4 @@
+import { translate } from './i18n';
 import { loadConfig, type AppConfig } from './config';
 import { createLogger, logFilePath, type FileLogOptions, type Logger } from './logger';
 import { createContext } from './context';
@@ -17,7 +18,10 @@ function fileLogOptions(config: AppConfig): FileLogOptions | undefined {
 async function main(): Promise<void> {
   const config = loadConfig();
   const logOptions = fileLogOptions(config);
-  const logger = createLogger(config.logLevel, { file: logOptions });
+  const logger = createLogger(config.logLevel, {
+    file: logOptions,
+    language: config.logLanguage,
+  });
   const ctx = createContext(config, logger);
 
   const { needsSetup, setupToken } = await bootstrapIdentity(
@@ -32,49 +36,47 @@ async function main(): Promise<void> {
   await app.listen({ host: config.host, port: config.port });
 
   const address = `${config.publicBaseUrl}`;
-  logger.info('LLM API Manager 已启动', {
+  logger.info('logs.startup.banner', {
     console: `http://${config.host}:${config.port}`,
     gateway: `${address}/v1`,
     dataDir: config.dataDir,
-    logFile: logOptions ? logFilePath(logOptions) : '(仅控制台)',
+    logFile: logOptions ? logFilePath(logOptions) : '(console only)',
   });
 
   if (needsSetup && setupToken) {
     // 一次性初始化令牌：只在"首次生成"的那次启动打印，且不写进日志文件
     console.log('');
     console.log('============================================================');
-    console.log('  首次启动：请设置管理员账号');
-    console.log(`  打开 ${config.publicBaseUrl} 完成设置。`);
+    const banner = (key: string, params?: Record<string, string>): void =>
+      console.log(`  ${translate(config.logLanguage, `logs.startup.${key}`, params)}`);
+    banner('setupTokenTitle');
+    banner('setupTokenOpen', { url: config.publicBaseUrl });
     console.log('');
-    console.log('  初始化令牌（本次唯一一次显示，请勿外传）：');
+    banner('setupTokenLabel');
     console.log(`  ${setupToken}`);
     console.log('');
-    console.log('  令牌只用于认领管理员账号，设置完成后立即失效。');
-    console.log('  若没有看到本提示，说明已有账号或令牌已生成过；');
-    console.log('  忘记令牌可删除 data/setup.json 后重启重新生成。');
+    banner('setupTokenNote');
+    banner('setupTokenMissing');
+    banner('setupTokenReset');
     console.log('============================================================');
     console.log('');
   } else if (needsSetup) {
-    logger.warn(
-      '尚未设置管理员账号，但初始化令牌已在之前的启动中生成；如需重新获取请删除 data/setup.json 后重启。',
-    );
+    logger.warn('logs.startup.setupPending');
   }
 
   if (config.sessionSecretGenerated) {
-    logger.info(`已生成会话签名密钥并保存到 ${ctx.paths.instanceFile}`);
+    logger.info('logs.startup.sessionSecretGenerated', { file: ctx.paths.instanceFile });
   }
   if (!config.encryptionKey) {
-    logger.warn(
-      '未设置 DATA_ENCRYPTION_KEY：供应商 API Key 与网关令牌将以明文保存在 data 目录。',
-    );
+    logger.warn('logs.startup.noEncryptionKey');
   }
 
   for (const warning of getWarnings()) {
-    logger.warn(`启动告警 [${warning.code}] ${warning.message}`);
+    logger.warn('logs.startup.warningLine', { code: warning.code, message: warning.message });
   }
 
   const shutdown = async (signal: string): Promise<void> => {
-    logger.info(`收到 ${signal}，正在关闭服务`);
+    logger.info('logs.startup.shuttingDown', { signal });
     await app.close();
     logger.close?.();
     process.exit(0);
@@ -91,16 +93,16 @@ function reportFatal(error: unknown): void {
   let logger: Logger | undefined;
   try {
     const config = loadConfig();
-    logger = createLogger('error', { file: fileLogOptions(config) });
+    logger = createLogger('error', { file: fileLogOptions(config), language: config.logLanguage });
   } catch {
     logger = undefined;
   }
   if (logger) {
-    logger.error('启动失败', error);
+    logger.error('logs.startup.failed', error);
     logger.close?.();
     return;
   }
-  console.error('启动失败：', error);
+  console.error('startup failed:', error);
 }
 
 main().catch((error) => {

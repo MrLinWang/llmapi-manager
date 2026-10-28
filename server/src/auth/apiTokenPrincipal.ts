@@ -1,5 +1,6 @@
 import type { FastifyRequest } from 'fastify';
 import type { Principal } from '../domain/identity';
+import { translate } from '../i18n';
 import type { Store } from '../store/tenantScope';
 import type { Logger } from '../logger';
 import { DEFAULT_TENANT_ID } from '../domain/identity';
@@ -37,9 +38,15 @@ export function resolvePrincipalFromApiToken(
     // 从日志看出"令牌被吊销了"还是"根本找错地方了"。
     if (record) {
       logger.warn(
-        `API 令牌 ${record.prefix}…${record.tail} 已失效（${
-          record.revokedAt ? '已吊销' : '已过期'
-        }）`,
+        'logs.tokens.invalidated',
+        {
+          prefix: record.prefix,
+          tail: record.tail,
+          reason: translate(
+            'zh',
+            record.revokedAt ? 'logs.tokens.revoked' : 'logs.tokens.expired',
+          ),
+        },
       );
     }
     return null;
@@ -56,7 +63,7 @@ export function resolvePrincipalFromApiToken(
           ),
       );
     } catch (error) {
-      logger.warn('更新 API 令牌 lastUsedAt 失败', error);
+      logger.warn('logs.tokens.lastUsedUpdateFailed', error);
     }
   }
 

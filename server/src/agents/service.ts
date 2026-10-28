@@ -24,11 +24,13 @@ import {
   revertAgentWrites,
   type DesiredWrites,
 } from './patch';
-import { apiTypeLabel, type ProviderRecord } from '../domain/provider';
+import type { ProviderRecord } from '../domain/provider';
+import { readTomlScalar } from './toml';
 import { badRequest, notFound } from '../http/errors';
 import { revealGatewayToken } from '../gateway/token';
-import type { AgentConnectionMode, TenantSettings } from '../domain/settings';
+import type { AgentConnectionMode, TenantSettings, UiLanguage } from '../domain/settings';
 import type { ProviderService } from '../services/providers';
+import { translate, type MessageKey } from '../i18n';
 
 export interface AgentPlan {
   agentId: AgentId;
@@ -66,10 +68,17 @@ export class AgentService {
     this.resolver = resolver ?? new AgentPathResolver(this.ctx.config.agentHomeDir);
   }
 
+  /**
+   * 列出所有 Agent。
+   *
+   * 返回的是 `descriptionKey` 而不是成品描述：描述要按请求语言显示，而这一层
+   * 拿不到"这次请求是谁、用什么语言"。渲染在路由层做（见 routes/agents.ts），
+   * 响应里的字段名仍是 `description`，前端无需改动。
+   */
   list(): Array<{
     id: AgentId;
     name: string;
-    description: string;
+    descriptionKey: MessageKey;
     applied: boolean;
     appliedAt?: string;
     appliedBy?: string;
@@ -80,7 +89,7 @@ export class AgentService {
       return {
         id: definition.id,
         name: definition.name,
-        description: definition.description,
+        descriptionKey: definition.descriptionKey,
         applied: Boolean(binding),
         appliedAt: binding?.appliedAt,
         appliedBy: binding?.appliedBy,
@@ -88,11 +97,17 @@ export class AgentService {
     });
   }
 
-  preview(principal: Principal, agentId: string): AgentPreview {
+  preview(
+    principal: Principal,
+    agentId: string,
+    // 预览里的"整份生成"等说明会直接显示在界面上，按请求语言渲染；
+    // 目录内容（档位说明、来源说明）也在这一步按同一语言生成。
+    language: UiLanguage = 'zh',
+  ): AgentPreview {
     const definition = getAgentDefinition(agentId);
-    if (!definition) throw notFound(`未知 Agent: ${agentId}`);
+    if (!definition) throw notFound('agents.error.unknownAgent', { id: agentId });
 
-    const plan = this.buildPlan(principal, definition.id as AgentId);
+    const plan = this.buildPlan(principal, definition.id as AgentId, language);
     const binding = this.repos.agents.getBinding(plan.agentId);
 
     const files: AgentFilePreview[] = definition.files.map((spec) => {
@@ -113,9 +128,14 @@ export class AgentService {
             plan.catalogContent !== undefined
               ? [
                   {
-                    key: '（整份生成）',
-                    current: content !== null ? '（将被覆盖，已自动备份）' : null,
-                    next: `包含 ${modelCount} 个模型别名`,
+                    key: translate(language, 'agents.preview.generatedKey'),
+                    current:
+                      content !== null
+                        ? translate(language, 'agents.preview.generatedWillOverwrite')
+                        : null,
+                    next: translate(language, 'agents.preview.generatedModelCount', {
+                      count: modelCount,
+                    }),
                     differs: content !== plan.catalogContent,
                   },
                 ]
@@ -125,9 +145,9 @@ export class AgentService {
                 content !== null
                 ? [
                     {
-                      key: '（整份生成）',
-                      current: '（上一模式留下的目录，将被删除）',
-                      next: '（删除）',
+                      key: translate(language, 'agents.preview.generatedKey'),
+                      current: translate(language, 'agents.preview.generatedStale'),
+                      next: translate(language, 'agents.preview.removed'),
                       differs: true,
                     },
                   ]
@@ -156,11 +176,16 @@ export class AgentService {
     };
   }
 
-  apply(principal: Principal, agentId: string): AgentBindingState {
+  apply(
+    principal: Principal,
+    agentId: string,
+    // 目录内容按请求语言生成：它会被 Codex 的 /model 列表直接展示给用户。
+    language: UiLanguage = 'zh',
+  ): AgentBindingState {
     const definition = getAgentDefinition(agentId);
-    if (!definition) throw notFound(`未知 Agent: ${agentId}`);
+    if (!definition) throw notFound('agents.error.unknownAgent', { id: agentId });
 
-    const plan = this.buildPlan(principal, definition.id as AgentId);
+    const plan = this.buildPlan(principal, definition.id as AgentId, language);
     const results = applyAgentWrites({
       agentId: plan.agentId,
       definition,
@@ -218,17 +243,23 @@ export class AgentService {
     };
   }
 
-  revert(agentId: string): {
+  revert(
+    agentId: string,
+    language: UiLanguage = 'zh',
+  ): {
     restored: string[];
     conflicts: Array<{ key: string; expected: string; current: string | null }>;
   } {
     const definition = getAgentDefinition(agentId);
-    if (!definition) throw notFound(`未知 Agent: ${agentId}`);
+    if (!definition) throw notFound('agents.error.unknownAgent', { id: agentId });
 
     const binding = this.repos.agents.getBinding(definition.id as AgentId);
-    if (!binding) throw badRequest(`Agent ${definition.name} 当前没有被接管，无需还原`);
+    if (!binding) {
+      throw badRequest('agents.error.notBound', { name: definition.name });
+    }
 
-    const result = revertAgentWrites(definition, binding.files);
+    // 冲突说明会原样显示在界面上，按请求语言渲染
+    const result = revertAgentWrites(definition, binding.files, language);
     this.repos.agents.clearBinding(definition.id as AgentId);
     return result;
   }
@@ -243,26 +274,28 @@ export class AgentService {
     // 因此 principal 只用于统一的鉴权签名，不参与判断。
     _principal: Principal,
     agentId: string,
+    // actions/warnings 会原样显示给用户，按请求语言渲染
+    language: UiLanguage = 'zh',
   ): Promise<{ actions: string[]; killed: number; warnings: string[]; supported: boolean }> {
     const definition = getAgentDefinition(agentId);
-    if (!definition) throw notFound(`未知 Agent: ${agentId}`);
+    if (!definition) throw notFound('agents.error.unknownAgent', { id: agentId });
 
     // Claude Code 没有常驻守护进程，也不缓存模型列表，不做进程操作。
     if (definition.id !== 'codex') {
       return {
         actions: [],
         killed: 0,
-        warnings: [`${definition.name} 没有需要结束的常驻进程`],
+        warnings: [translate(language, 'agents.process.noneForAgent', { agent: definition.name })],
         supported: false,
       };
     }
 
-    const result = await stopCodexProcesses(this.ctx.config.agentHomeDir);
+    const result = await stopCodexProcesses(this.ctx.config.agentHomeDir, language);
     const actions = [...result.actions];
     // 一个进程都没探测到也要说清楚，否则前端只能靠 actions 是否为空去推断，
     // 用户看到"什么都没发生"会怀疑按钮坏了。
     if (result.found.length === 0 && result.killed.length === 0 && actions.length === 0) {
-      actions.push('本机没有正在运行的 Codex 进程');
+      actions.push(translate(language, 'agents.process.noneRunning'));
     }
     return {
       actions,
@@ -272,10 +305,27 @@ export class AgentService {
     };
   }
 
-  /** 构造某个 Agent 的目标写入内容。供应商与令牌缺失时给出可读错误。 */
-  private buildPlan(principal: Principal, agentId: AgentId): AgentPlan {
+  /**
+   * 构造某个 Agent 的目标写入内容。供应商与令牌缺失时给出可读错误。
+   *
+   * `language` 只用于**生成目录内容**（档位说明等会显示在 Codex 的 /model 里）；
+   * 错误文案本身不在这里渲染——那是 `AppError` 的职责，它只带键与参数，
+   * 由边界按请求语言渲染（见 http/errors.ts）。
+   */
+  private buildPlan(
+    principal: Principal,
+    agentId: AgentId,
+    language: UiLanguage = 'zh',
+  ): AgentPlan {
     const settings = this.repos.settings.read();
     const providers = this.providerService.listRecords();
+    // 上一次 apply 写进文件的值。**只为删除用**：像 stream_max_retries 这种
+    // 可配置数值，清空时要知道"上次写的是几"才能安全地把它删掉
+    // （removeTomlKeyIfValue 只在当前值仍等于 expected 时才删，
+    // 传空串会永远匹配不上，键就残留了）。
+    const previousBinding = this.repos.agents.getBinding(agentId);
+    const previousValue = (role: AgentFileRole, key: string): string =>
+      previousBinding?.files.find((file) => file.role === role)?.values[key] ?? '';
 
     // 模式按 Agent 各自读取：Codex 与 Claude Code 协议不同、用途也可能不同，
     // 一个全局开关会强迫两者同步切换，这是实际使用中不合理的。
@@ -297,10 +347,10 @@ export class AgentService {
     const token = revealGatewayToken(settings.gatewayToken, this.ctx.secrets) ?? '';
     // 直连不需要网关令牌（用的是上游自己的 Key），只在网关模式下强制要求。
     if (!direct && !token) {
-      throw badRequest('尚未生成网关令牌，请先在"模型聚合"页生成');
+      throw badRequest('agents.error.gatewayTokenMissing');
     }
     if (provider.models.length === 0) {
-      throw badRequest(`供应商 ${provider.name} 未声明任何模型，请先在供应商页补充模型`);
+      throw badRequest('agents.error.providerNoModels', { provider: provider.name });
     }
 
     // 直连时若用户指定了模型就用它；否则沿用默认模型 / 第一个模型。
@@ -325,12 +375,12 @@ export class AgentService {
     //   3. 模型用裸模型名，而不是 lam- 别名（别名只有网关认识）
     // 目录仍然要写，但条目是裸模型名——见下方 catalogContent 处「直连也必须生成」的说明。
     if (direct && provider.baseUrl.trim() === '') {
-      throw badRequest(`供应商 ${provider.name} 没有配置 Base URL，无法直连`);
+      throw badRequest('agents.error.providerNoBaseUrl', { provider: provider.name });
     }
     const upstreamBaseUrl = provider.baseUrl.trim().replace(/\/+$/, '');
     const plainKey = direct ? this.providerService.plainApiKey(provider) : '';
     if (direct && plainKey === '') {
-      throw badRequest(`供应商 ${provider.name} 没有配置 API Key，无法直连`);
+      throw badRequest('agents.error.providerNoApiKey', { provider: provider.name });
     }
     const effectiveModel = direct ? upstreamModel : clientModel;
     const resolveInput = { tenantId: principal.tenantId, userId: principal.userId };
@@ -360,11 +410,21 @@ export class AgentService {
     // 直连时不按协议过滤：裸模型名直接打给那一家上游，中间没有网关的协议匹配，
     // 所以没有"列出来也用不了"的问题。
     const catalogPath = paths.catalog;
+    // 用户在 Codex 里配的档位，用来决定目录条目的 default_reasoning_level。
+    // 不读它就会出现"config.toml 写 high、/model 里显示 medium"的错位。
+    // 读不到就返回 undefined，由目录回落中间档 —— 不能因为读配置失败就中断生成。
+    const configuredEffort = readConfiguredEffort(paths.config);
     const catalogContent =
       agentId === 'codex' && catalogPath
         ? direct
           ? buildDirectModelCatalog(provider.models, provider.name, {
               preferredClientModel: upstreamModel,
+              // 直连时 slug 就是上游裸名，能力表键与之一致。
+              capabilities: provider.modelCapabilities,
+              configuredEffort,
+              // 目录里的说明文字（来源、档位）按请求语言生成：Codex 的 /model
+              // 直接渲染它们，中文目录配英文界面会让用户看到两种语言。
+              language,
             })
           : buildModelCatalog(
               // 只列该 Agent 实际能用的协议。Codex 的 wire_api 固定是 responses，
@@ -380,6 +440,8 @@ export class AgentService {
               ),
               {
                 preferredClientModel: clientModel,
+                configuredEffort,
+                language,
                 // 仅网关模式：审批请求要经过网关才能被改写，直连时没有拦截点。
                 // 不把这个占位名放进目录，Codex 会找不到它并**静默回退到父模型**，
                 // 于是"配了审批模型却不生效"，且日志里看不到任何审批请求。
@@ -452,6 +514,55 @@ export class AgentService {
                 raw: true,
                 table: 'model_providers.llmapi',
               },
+              // 流式重连次数与空闲超时。这两项都是 ModelProviderInfo 里的 u64 字段，
+              // 同样是 raw（不加引号）——写成 "10" 在 TOML 里是字符串，Codex 判类型不符。
+              //
+              // 设置值为 null 时必须发**删除**指令而不是"不写"：这两个键很可能已经被
+              // 上一次 apply（或用户手工）写进文件，只"不写"会把它留在原地，
+              // 界面显示"未设置"但文件里仍生效，是最难排查的一类不一致。
+              // 删除只在当前值仍等于我们写入值时执行，用户手改过的值会保留。
+              ...(settings.codexStreamMaxRetries !== null
+                ? [
+                    {
+                      path: 'stream_max_retries',
+                      value: String(settings.codexStreamMaxRetries),
+                      raw: true,
+                      table: 'model_providers.llmapi',
+                    },
+                  ]
+                : [
+                    {
+                      path: 'stream_max_retries',
+                      // 删除时用**上次实际写入的值**作比对基准（取自绑定快照）。
+                      // 传空串会永远匹配不上，键就残留了——那正是"界面显示未设置、
+                      // 文件里仍生效"的来源。用户若手改过该值，比对不上会保留他的改动。
+                      value: previousValue('config', '[model_providers.llmapi] stream_max_retries'),
+                      raw: true,
+                      table: 'model_providers.llmapi',
+                      remove: true,
+                    },
+                  ]),
+              ...(settings.codexStreamIdleTimeoutMs !== null
+                ? [
+                    {
+                      path: 'stream_idle_timeout_ms',
+                      value: String(settings.codexStreamIdleTimeoutMs),
+                      raw: true,
+                      table: 'model_providers.llmapi',
+                    },
+                  ]
+                : [
+                    {
+                      path: 'stream_idle_timeout_ms',
+                      value: previousValue(
+                        'config',
+                        '[model_providers.llmapi] stream_idle_timeout_ms',
+                      ),
+                      raw: true,
+                      table: 'model_providers.llmapi',
+                      remove: true,
+                    },
+                  ]),
             ],
             // 直连写上游真实 Key；网关模式写网关令牌。
             auth: [{ path: 'OPENAI_API_KEY', value: direct ? plainKey : token }],
@@ -507,6 +618,28 @@ function withV1(baseUrl: string): string {
 }
 
 /**
+ * 协议标识符的规范写法（`ApiType` 的展示名）。
+ *
+ * 这几个词**不是可翻译文案**（AGENTS.md 第 16 条：协议名不翻译），所以放在这里
+ * 而不是字典里；真正的展示名（`OpenAI 兼容（Chat Completions）` 这类按语言的
+ * 完整叫法）由 `domain/provider.ts` 的 `apiTypeLabel` 统一负责。
+ *
+ * 这里之所以不直接调 `apiTypeLabel`：它在服务层深处被调用，而服务层拿不到、
+ * 也不该猜请求语言——用中文全称会让英文响应里混进中文。等 `apiTypeLabel` 提供
+ * 带 language 的重载后，这里可以整体替换（改动只在这一处）。
+ */
+const PROTOCOL_LABELS: Record<ProviderRecord['apiType'], string> = {
+  openai: 'OpenAI',
+  anthropic: 'Anthropic',
+  responses: 'Responses',
+};
+
+/** 把协议链渲染成可读的展示名列表，如 `anthropic`。 */
+function protocolLabels(apiTypes: readonly ProviderRecord['apiType'][]): string {
+  return apiTypes.map((item) => PROTOCOL_LABELS[item]).join(' / ');
+}
+
+/**
  * 直连模式下选定供应商。
  *
  * 与 pickProvider 的区别：这里**优先用户明确指定的那家**，而不是按优先级自动挑。
@@ -518,18 +651,19 @@ function pickDirectProvider(
   providerId: string | null | undefined,
   apiTypes: readonly ProviderRecord['apiType'][],
 ): ProviderRecord {
-  const labels = apiTypes.map((item) => apiTypeLabel(item)).join(' 或 ');
+  const labels = protocolLabels(apiTypes);
 
   if (providerId) {
     const chosen = providers.find((item) => item.id === providerId);
-    if (!chosen) throw badRequest('指定的直连供应商不存在，请重新选择');
+    if (!chosen) throw badRequest('agents.error.directProviderNotFound');
     if (!chosen.enabled) {
-      throw badRequest(`指定的直连供应商「${chosen.name}」已被停用，请重新选择或先启用它`);
+      throw badRequest('agents.error.directProviderDisabled', { provider: chosen.name });
     }
     if (!apiTypes.includes(chosen.apiType)) {
-      throw badRequest(
-        `供应商「${chosen.name}」的协议类型不适用于该 Agent，需要 ${labels}`,
-      );
+      throw badRequest('agents.error.directProviderWrongApiType', {
+        provider: chosen.name,
+        types: labels,
+      });
     }
     return chosen;
   }
@@ -540,11 +674,9 @@ function pickDirectProvider(
   const candidate = providers
     .filter((item) => item.enabled && apiTypes.includes(item.apiType))
     .sort((a, b) => a.priority - b.priority)[0];
-  if (!candidate) throw badRequest(`没有可用的 ${labels} 供应商，请先添加并启用`);
+  if (!candidate) throw badRequest('agents.error.noProvider', { types: labels });
 
-  throw badRequest(
-    `直连模式需要明确指定供应商：请在该 Agent 的配置里选择一家${labels}供应商`,
-  );
+  throw badRequest('agents.error.directProviderRequired', { types: labels });
 }
 
 /**
@@ -577,10 +709,31 @@ function pickProvider(
       .sort((a, b) => a.priority - b.priority)[0];
     if (candidate) return candidate;
   }
-  const labels = apiTypes.map((item) => apiTypeLabel(item)).join(' 或 ');
-  const hint =
-    apiTypes.length === 1 && apiTypes[0] === 'responses'
-      ? '。Codex CLI 只支持 Responses 协议：请把某个供应商的协议类型改为「OpenAI 兼容（Responses）」，或新增一个 responses 供应商'
-      : '';
-  throw badRequest(`没有可用的 ${labels} 供应商，请先添加并启用${hint}`);
+  // 协议名用不可翻译的规范写法（见 PROTOCOL_LABELS）：服务层不解析语言。
+  const labels = protocolLabels(apiTypes);
+  // Codex 只认 Responses 协议，只报"没有供应商"会让用户不知道该改哪一项，
+  // 因此单独一条含修复建议的键（整句进字典，避免在服务层拼接半个句子）。
+  const onlyResponses = apiTypes.length === 1 && apiTypes[0] === 'responses';
+  throw badRequest(
+    onlyResponses ? 'agents.error.noProviderCodex' : 'agents.error.noProvider',
+    { types: labels },
+  );
+}
+
+/**
+ * 读用户 Codex 配置里的推理档位（`model_reasoning_effort`）。
+ *
+ * 用途仅限目录条目的 `default_reasoning_level`：让 `/model` 里显示的初始档位与用户
+ * 实际配置一致。读不到（没有配置文件、文件损坏、没配这个键）时返回 undefined，
+ * 由目录回落中间档 —— 读配置失败绝不能中断配置生成。
+ *
+ * 用 `readTomlScalar` 而不是正则抠文本：它按表分段解析，不会把
+ * `[tui]` 段里同名的键误当成顶层键。
+ */
+function readConfiguredEffort(configPath: string | undefined): string | undefined {
+  if (!configPath) return undefined;
+  const content = readFileSafe(configPath);
+  if (content === null) return undefined;
+  const value = readTomlScalar(content, 'model_reasoning_effort');
+  return value === null || value.trim() === '' ? undefined : value.trim().toLowerCase();
 }
