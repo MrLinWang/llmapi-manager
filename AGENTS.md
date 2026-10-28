@@ -370,7 +370,8 @@ Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities
 - **时间用 `web/src/i18n/format.ts`**，不要用 `toLocaleString()`：后者跟随浏览器语言，
   会出现"界面英文、时间中文格式"。
 - **服务端有独立的同构字典**（`server/src/i18n/locales/{zh,en}/`，区域为
-  `errors` / `gateway` / `diagnostics` / `providers` / `agents` / `auth` / `tokens` / `settings`）。
+  `errors` / `gateway` / `diagnostics` / `providers` / `agents` / `auth` / `tokens` /
+  `settings` / `sync` / `networking`）。
   **不要复用前端字典**：两边受众不同（前端是"看界面的人"，服务端是"调 API 的脚本
   + 看报错的人"），合并会让前端改界面文案时顺带改掉 API 报错文本。
 - **语言只在边界解析**：`domain/` 与 `services/` 只产出"键 + 参数"（`LocalizedText`），
