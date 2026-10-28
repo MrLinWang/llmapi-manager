@@ -80,6 +80,16 @@ export interface DecodedField {
   wireType: number;
   /** VARINT 时是该数值；LENGTH_DELIMITED 时是内容字节 */
   value: number | Buffer;
+  /**
+   * VARINT 时的**精确值**（BigInt）。
+   *
+   * `value` 是 JS number（float64），只能精确表示到 2^53；而 int64 的
+   * transaction_id / session_id 常超出（实测 RPC 事务号 ≈ 3.1e17），
+   * 按 number 读回会偏差个位数——对端的 RPC 层按 transaction_id **精确匹配**
+   * 请求与响应，差 1 都会被当成"未知响应"丢弃且无任何日志。
+   * 需要 int64 字段时必须读这里。
+   */
+  valueBig?: bigint;
 }
 
 /**
@@ -100,9 +110,14 @@ export function decodeFields(buffer: Buffer): DecodedField[] {
     if (fieldNumber === 0) throw new Error('字段号为 0，数据不可能合法');
 
     if (wireType === WireType.VARINT) {
-      const varint = decodeVarint(buffer, offset);
-      offset += varint.bytes;
-      fields.push({ fieldNumber, wireType, value: varint.value });
+      const varintBig = decodeVarintBig(buffer, offset);
+      offset += varintBig.bytes;
+      fields.push({
+        fieldNumber,
+        wireType,
+        value: Number(varintBig.value),
+        valueBig: varintBig.value,
+      });
     } else if (wireType === WireType.LENGTH_DELIMITED) {
       const lengthResult = decodeVarint(buffer, offset);
       offset += lengthResult.bytes;
@@ -145,6 +160,59 @@ export function encodeStringField(fieldNumber: number, value: string): Buffer {
  */
 export function encodeVarintField(fieldNumber: number, value: number): Buffer {
   return Buffer.concat([encodeTag(fieldNumber, WireType.VARINT), encodeVarint(value)]);
+}
+
+/**
+ * 编码 64 位 varint（BigInt 精确）。
+ *
+ * 与 `encodeVarint(number)` 的区别：number 在 2^53 以上不精确，
+ * int64 字段（transaction_id / session_id）必须走这里。
+ * 负数按 64 位补码写 10 字节，与 prost 一致。
+ */
+export function encodeVarintBig(value: bigint): Buffer {
+  const bytes: number[] = [];
+  let big = value < 0n ? value + (1n << 64n) : value;
+  while (big > 0x7fn) {
+    bytes.push(Number((big & 0x7fn) | 0x80n));
+    big >>= 7n;
+  }
+  bytes.push(Number(big));
+  return Buffer.from(bytes);
+}
+
+/**
+ * 解码 varint 为**有符号 64 位** BigInt。
+ *
+ * 超过 2^63 的无符号值按补码解释为负数（prost 对 int64 的语义）。
+ */
+export function decodeVarintBig(buffer: Buffer, offset = 0): { value: bigint; bytes: number } {
+  let result = 0n;
+  let shift = 0n;
+  let index = offset;
+  while (index < buffer.length) {
+    const byte = buffer[index];
+    result |= BigInt(byte & 0x7f) << shift;
+    index += 1;
+    if ((byte & 0x80) === 0) break;
+    shift += 7n;
+    if (shift > 70n) throw new Error('varint 过长（超过 10 字节），数据可能已损坏');
+  }
+  if (result >= 1n << 63n) result -= 1n << 64n;
+  return { value: result, bytes: index - offset };
+}
+
+/** 编码 int64 字段（BigInt 精确）。 */
+export function encodeVarintField64(fieldNumber: number, value: bigint): Buffer {
+  return Buffer.concat([
+    encodeTag(fieldNumber, WireType.VARINT),
+    encodeVarintBig(value),
+  ]);
+}
+
+/** 从字段列表里取 int64 字段的精确值。 */
+export function getVarintBig(fields: DecodedField[], fieldNumber: number): bigint | null {
+  const hit = fields.find((f) => f.fieldNumber === fieldNumber && f.wireType === WireType.VARINT);
+  return hit ? (hit.valueBig ?? BigInt(hit.value as number)) : null;
 }
 
 /** 从字段列表里取第一个匹配字段的 varint 值。 */

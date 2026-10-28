@@ -340,3 +340,106 @@ export function decodeNoiseMsg2(buffer: Buffer): NoiseMsg2 {
     features: getAllBytes(fields, NoiseMsg2Field.features).map((b) => b.toString('utf8')),
   };
 }
+
+/** 解码 `PeerConnNoiseMsg1Pb`（接受方读发起方的第一条消息）。 */
+export interface DecodedNoiseMsg1 {
+  version: number;
+  aNetworkName: string;
+  aSessionGeneration: number | null;
+  aConnId: Uint8Array;
+  clientEncryptionAlgorithm: string;
+  features: string[];
+}
+
+export function decodeNoiseMsg1(buffer: Buffer): DecodedNoiseMsg1 {
+  const fields = decodeFields(buffer);
+  const connIdBytes = getBytes(fields, NoiseMsg1Field.aConnId);
+  const generation = getVarint(fields, NoiseMsg1Field.aSessionGeneration);
+  return {
+    version: getVarint(fields, NoiseMsg1Field.version) ?? 0,
+    aNetworkName: getBytes(fields, NoiseMsg1Field.aNetworkName)?.toString('utf8') ?? '',
+    aSessionGeneration: generation === undefined || generation === 0 ? null : generation,
+    aConnId: connIdBytes === null ? new Uint8Array(16) : decodeUuid(connIdBytes),
+    clientEncryptionAlgorithm:
+      getBytes(fields, NoiseMsg1Field.clientEncryptionAlgorithm)?.toString('utf8') ?? '',
+    features: getAllBytes(fields, NoiseMsg1Field.features).map((b) => b.toString('utf8')),
+  };
+}
+
+/** 解码 `PeerConnNoiseMsg3Pb`（接受方读发起方的确认消息）。 */
+export interface DecodedNoiseMsg3 {
+  aConnIdEcho: Uint8Array;
+  bConnIdEcho: Uint8Array | null;
+  secretProof: Buffer | null;
+  secretDigest: Buffer;
+}
+
+export function decodeNoiseMsg3(buffer: Buffer): DecodedNoiseMsg3 {
+  const fields = decodeFields(buffer);
+  const aEcho = getBytes(fields, NoiseMsg3Field.aConnIdEcho);
+  const bEcho = getBytes(fields, NoiseMsg3Field.bConnIdEcho);
+  return {
+    aConnIdEcho: aEcho === null ? new Uint8Array(16) : decodeUuid(aEcho),
+    bConnIdEcho: bEcho === null ? null : decodeUuid(bEcho),
+    secretProof: getBytes(fields, NoiseMsg3Field.secretProof32),
+    secretDigest: getBytes(fields, NoiseMsg3Field.secretDigest) ?? Buffer.alloc(0),
+  };
+}
+
+export interface EncodableNoiseMsg2 {
+  bNetworkName: string;
+  /** 1 = 网络名匹配（带 proof），2 = 不匹配 */
+  roleHint: number;
+  /** `SessionAction`：新会话是 Create(2) */
+  action: number;
+  bSessionGeneration: number | null;
+  /** 我们生成的新 root key；数据面密钥从它派生 */
+  rootKey32: Buffer;
+  initialEpoch: number;
+  bConnId: Uint8Array;
+  aConnIdEcho: Uint8Array;
+  /** 我们（服务端）的 secret proof，证明持有网络密钥 */
+  secretProof32: Buffer | null;
+  serverEncryptionAlgorithm: string;
+  features: string[];
+}
+
+/**
+ * 编码 `PeerConnNoiseMsg2Pb`（接受方发给发起方的第二条消息）。
+ *
+ * 字段号见 `NoiseMsg2Field`。注意 `initialEpoch` 为 0 时按 proto3 省略
+ * （官方 prost 也是这样），对端解码默认 0。
+ */
+export function encodeNoiseMsg2(msg: EncodableNoiseMsg2): Buffer {
+  const parts: Buffer[] = [];
+
+  if (msg.bNetworkName !== '') {
+    parts.push(encodeStringField(NoiseMsg2Field.bNetworkName, msg.bNetworkName));
+  }
+  if (msg.roleHint !== 0) parts.push(encodeVarintField(NoiseMsg2Field.roleHint, msg.roleHint));
+  if (msg.action !== 0) parts.push(encodeVarintField(NoiseMsg2Field.action, msg.action));
+  if (msg.bSessionGeneration !== null) {
+    parts.push(encodeVarintField(NoiseMsg2Field.bSessionGeneration, msg.bSessionGeneration));
+  }
+  if (msg.rootKey32.length > 0) {
+    parts.push(encodeBytesField(NoiseMsg2Field.rootKey32, msg.rootKey32));
+  }
+  if (msg.initialEpoch !== 0) {
+    parts.push(encodeVarintField(NoiseMsg2Field.initialEpoch, msg.initialEpoch));
+  }
+  parts.push(encodeBytesField(NoiseMsg2Field.bConnId, encodeUuid(msg.bConnId)));
+  parts.push(encodeBytesField(NoiseMsg2Field.aConnIdEcho, encodeUuid(msg.aConnIdEcho)));
+  if (msg.secretProof32 !== null) {
+    parts.push(encodeBytesField(NoiseMsg2Field.secretProof32, msg.secretProof32));
+  }
+  if (msg.serverEncryptionAlgorithm !== '') {
+    parts.push(
+      encodeStringField(NoiseMsg2Field.serverEncryptionAlgorithm, msg.serverEncryptionAlgorithm),
+    );
+  }
+  for (const feature of msg.features) {
+    parts.push(encodeStringField(NoiseMsg2Field.features, feature));
+  }
+
+  return Buffer.concat(parts);
+}

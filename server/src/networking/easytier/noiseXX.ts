@@ -369,3 +369,196 @@ export class NoiseXXInitiator {
     return encryptAndHash(this.state, payload);
   }
 }
+
+/**
+ * XX 模式的应答方（服务端/接受方）。
+ *
+ * 与 `NoiseXXInitiator` 镜像：对端先发 Msg1，我们回 Msg2，再收 Msg3。
+ *
+ * 为什么要实现这个方向：官方把连接分成发起方/接受方两个角色，
+ * **`RpcResp` 只由接受方回给发起方**（`peer_conn.rs:205` 的
+ * `after_received` 会按连接角色过滤）。此前 TS 只能当发起方，
+ * 导致 OSPF 的 `SyncRouteInfo` 请求永远无法应答成功——对端把我们的
+ * 响应在解密前就静默丢弃。实现接受方之后，TS 可以监听端口等官方节点
+ * 来连，从角色上站到"合法应答"的一侧。
+ *
+ * 用法：
+ * ```
+ * const server = new NoiseXXResponder(prologue, staticKeyPair);
+ * const msg1Payload = server.readMessage(msg1Ciphertext);  // 解出发起方的 protobuf
+ * // ……用 payload 里的信息构造 Msg2（root_key / conn_id / secret_proof）……
+ * const msg2 = server.writeMessage(msg2Payload);           // 发给对端
+ * const msg3Payload = server.readMessage(msg3Ciphertext);  // 解出发起方的确认
+ * const { sendKey, receiveKey } = server.finalize();
+ * ```
+ */
+export class NoiseXXResponder {
+  private readonly state: SymmetricState;
+  private readonly ephemeralPrivate: Buffer;
+  private readonly ephemeralPublic: Buffer;
+  private readonly staticPrivate: Buffer;
+  private readonly staticPublic: Buffer;
+  private remoteEphemeral: Buffer | null = null;
+  private remoteStatic: Buffer | null = null;
+  private step = 0;
+
+  constructor(
+    prologue: Buffer = NOISE_PROLOGUE,
+    staticKeyPair?: { privateKey: Buffer; publicKey: Buffer },
+  ) {
+    const kp = staticKeyPair ?? generateKeyPair();
+    this.staticPrivate = kp.privateKey;
+    this.staticPublic = kp.publicKey;
+
+    const eph = generateKeyPair();
+    this.ephemeralPrivate = eph.privateKey;
+    this.ephemeralPublic = eph.publicKey;
+
+    // 与发起方相同的初始化：h = HASH(protocol_name padded)，再混入 prologue
+    const protocolName = Buffer.from(NOISE_PROTOCOL_NAME, 'utf8');
+    const padded = Buffer.concat([protocolName, Buffer.alloc(Math.max(0, 32 - protocolName.length))]);
+    const initialHash = protocolName.length <= 32 ? padded : sha256(protocolName);
+
+    this.state = {
+      chainingKey: Buffer.from(initialHash),
+      hash: Buffer.from(initialHash),
+      cipherKey: null,
+      nonce: 0,
+    };
+    mixHash(this.state, prologue);
+  }
+
+  /** 当前握手哈希。发起方在 Msg3 里带的 `secret_proof` 用**写完 Msg2 之后**的这个值校验。 */
+  getHandshakeHash(): Buffer {
+    return this.state.hash;
+  }
+
+  /** 我方静态公钥（发起方会把它当作"服务端身份"）。 */
+  getLocalStaticPublicKey(): Buffer {
+    return this.staticPublic;
+  }
+
+  /** 对端（发起方）静态公钥，握手完成后可用于钉扎校验。 */
+  getRemoteStaticPublicKey(): Buffer | null {
+    return this.remoteStatic;
+  }
+
+  /**
+   * 处理发起方的 Msg1：`-> e`。
+   *
+   * XX 的第一条消息里临时公钥是明文，payload 也是明文（cipherKey 还没建立），
+   * 但两者都要混入哈希——后续消息的加密密钥依赖这段transcript。
+   */
+  readMessage(message: Buffer): Buffer {
+    if (this.step !== 0) {
+      throw new Error(`Noise XX 应答方在步骤 ${this.step} 不应接收消息`);
+    }
+    if (message.length < KEY_SIZE) {
+      throw new Error('Noise XX Msg1 太短，缺少临时公钥');
+    }
+
+    // e（发起方临时公钥）
+    this.remoteEphemeral = message.subarray(0, KEY_SIZE);
+    mixHash(this.state, this.remoteEphemeral);
+
+    // payload（明文，但 mixHash 会把它纳入 transcript）
+    const rest = message.subarray(KEY_SIZE);
+    const payload = this.decryptAndHashLocal(rest);
+
+    this.step = 1;
+    return payload;
+  }
+
+  /**
+   * 生成 Msg2：`<- e, ee, s, es`。
+   *
+   * 写完这条消息后的握手哈希，正是发起方 Msg3 里 `secret_proof` 的输入——
+   * 调用方应在 `writeMessage` 之后再取 `getHandshakeHash()` 用于校验。
+   */
+  writeMessage(payload: Buffer = Buffer.alloc(0)): Buffer {
+    if (this.step !== 1) {
+      throw new Error(`Noise XX 应答方在步骤 ${this.step} 不应发送消息`);
+    }
+    if (this.remoteEphemeral === null) {
+      throw new Error('Noise XX 应答方尚未读到发起方临时公钥');
+    }
+
+    const parts: Buffer[] = [this.ephemeralPublic];
+    mixHash(this.state, this.ephemeralPublic);
+
+    // ee：我方临时 × 发起方临时
+    const ee = dh(this.ephemeralPrivate, this.remoteEphemeral);
+    mixKey(this.state, ee);
+
+    // s：我方静态公钥（加密传输）
+    const encStatic = this.encryptAndHashLocal(this.staticPublic);
+    parts.push(encStatic);
+
+    // es：我方静态 × 发起方临时
+    const es = dh(this.staticPrivate, this.remoteEphemeral);
+    mixKey(this.state, es);
+
+    parts.push(this.encryptPayload(payload));
+    this.step = 2;
+    return Buffer.concat(parts);
+  }
+
+  /**
+   * 处理发起方的 Msg3：`-> s, se`。
+   *
+   * 解出发起方静态公钥（供钉扎校验），并完成最后一次 mixKey。
+   */
+  readMessageFinal(message: Buffer): Buffer {
+    if (this.step !== 2) {
+      throw new Error(`Noise XX 应答方在步骤 ${this.step} 不应接收消息`);
+    }
+    if (message.length < KEY_SIZE + TAG_SIZE) {
+      throw new Error('Noise XX Msg3 太短，缺少加密的静态公钥');
+    }
+
+    let offset = 0;
+
+    // s（发起方静态公钥，加密传输）
+    const encStatic = message.subarray(offset, offset + KEY_SIZE + TAG_SIZE);
+    offset += KEY_SIZE + TAG_SIZE;
+    this.remoteStatic = this.decryptAndHashLocal(encStatic);
+
+    // se：我方临时 × 发起方静态
+    const se = dh(this.ephemeralPrivate, this.remoteStatic);
+    mixKey(this.state, se);
+
+    // payload
+    const rest = message.subarray(offset);
+    const payload = rest.length > 0 ? this.decryptAndHashLocal(rest) : Buffer.alloc(0);
+
+    this.step = 3;
+    return payload;
+  }
+
+  /**
+   * 握手完成，导出双向密钥。
+   *
+   * Noise 的 `Split()`：k1 属于发起方→应答方方向，k2 属于应答方→发起方。
+   * 与 `NoiseXXInitiator.finalize()` 正好互补。
+   */
+  finalize(): { sendKey: Buffer; receiveKey: Buffer } {
+    if (this.step !== 3) {
+      throw new Error(`Noise XX 握手未完成（步骤 ${this.step}）`);
+    }
+    const [k1, k2] = hkdf(this.state.chainingKey, Buffer.alloc(0), 2);
+    // 应答方：k1 是发起方的发送方向（我们接收），k2 是我们的发送方向
+    return { sendKey: k2, receiveKey: k1 };
+  }
+
+  private encryptAndHashLocal(plaintext: Buffer): Buffer {
+    return encryptAndHash(this.state, plaintext);
+  }
+
+  private decryptAndHashLocal(ciphertext: Buffer): Buffer {
+    return decryptAndHash(this.state, ciphertext);
+  }
+
+  private encryptPayload(payload: Buffer): Buffer {
+    return encryptAndHash(this.state, payload);
+  }
+}

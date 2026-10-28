@@ -39,6 +39,8 @@ import {
   encodeVarintField,
   getBytes,
   getVarint,
+  getVarintBig,
+  encodeVarintField64,
 } from './protobuf';
 
 /** `RpcDescriptor` 字段号（`common.proto:95`）。 */
@@ -77,8 +79,12 @@ export const RpcPacketField = {
 export interface RpcPacket {
   fromPeer: number;
   toPeer: number;
-  /** 请求与响应靠它配对。**是 int64**，所以可能超过 32 位 */
-  transactionId: number;
+  /**
+   * 请求与响应靠它配对。**是 int64**，实测官方事务号约 ±3e17，
+   * 超出 JS number（2^53）精确范围——按 number 读会偏差个位数，
+   * 对端匹配不上就把响应静默丢弃。必须 bigint。
+   */
+  transactionId: bigint;
   /**
    * 服务定位信息。
    *
@@ -147,8 +153,8 @@ export function encodeRpcPacket(packet: RpcPacket): Buffer {
   if (packet.toPeer !== 0) {
     parts.push(encodeVarintField(RpcPacketField.toPeer, packet.toPeer));
   }
-  if (packet.transactionId !== 0) {
-    parts.push(encodeVarintField(RpcPacketField.transactionId, packet.transactionId));
+  if (packet.transactionId !== 0n) {
+    parts.push(encodeVarintField64(RpcPacketField.transactionId, packet.transactionId));
   }
   if (packet.descriptor !== null) {
     parts.push(encodeBytesField(RpcPacketField.descriptor, encodeRpcDescriptor(packet.descriptor)));
@@ -181,7 +187,7 @@ export function decodeRpcPacket(buffer: Buffer): RpcPacket {
   return {
     fromPeer: getVarint(fields, RpcPacketField.fromPeer) ?? 0,
     toPeer: getVarint(fields, RpcPacketField.toPeer) ?? 0,
-    transactionId: getVarint(fields, RpcPacketField.transactionId) ?? 0,
+    transactionId: getVarintBig(fields, RpcPacketField.transactionId) ?? 0n,
     descriptor: descriptorBytes === null ? null : decodeRpcDescriptor(descriptorBytes),
     body: getBytes(fields, RpcPacketField.body) ?? Buffer.alloc(0),
     isRequest: (getVarint(fields, RpcPacketField.isRequest) ?? 0) !== 0,
@@ -245,7 +251,14 @@ export const OSPF_SERVICE = {
 export function buildOspfSyncRouteRequest(options: {
   fromPeer: number;
   toPeer: number;
-  transactionId: number;
+  /**
+   * 事务号（int64）。
+   *
+   * **必须是 bigint**：实测官方的事务号约 ±3e17，超出 JS number（2^53）
+   * 的精确范围，按 number 读回会偏差个位数——对端按事务号精确匹配
+   * 请求与响应，差 1 就是"未知响应"，静默丢弃且无日志。
+   */
+  transactionId: bigint;
   body: Buffer;
 }): RpcPacket {
   return {
@@ -283,7 +296,8 @@ export const SyncRouteInfoResponseField = {
 
 export interface SyncRouteInfoResponse {
   isInitiator: boolean;
-  sessionId: number;
+  /** 回显请求里的会话号（int64，bigint 精确） */
+  sessionId: bigint;
   error: number | null;
   missingPeerIds: number[];
   missingConnPeerIds: number[];
@@ -292,7 +306,8 @@ export interface SyncRouteInfoResponse {
 /** 解码 `SyncRouteInfoRequest`（我们收到的那个）。 */
 export interface SyncRouteInfoRequest {
   myPeerId: number;
-  mySessionId: number;
+  /** int64，按 bigint 精确读（见 RpcPacket.transactionId 的说明） */
+  mySessionId: bigint;
   isInitiator: boolean;
   /** 对端看到的路由条目（原始字节，暂不逐条解析） */
   peerInfosRaw: Buffer | null;
@@ -310,7 +325,7 @@ export function decodeSyncRouteInfoRequest(buffer: Buffer): SyncRouteInfoRequest
   const fields = decodeFields(buffer);
   return {
     myPeerId: getVarint(fields, SyncRouteInfoRequestField.myPeerId) ?? 0,
-    mySessionId: getVarint(fields, SyncRouteInfoRequestField.mySessionId) ?? 0,
+    mySessionId: getVarintBig(fields, SyncRouteInfoRequestField.mySessionId) ?? 0n,
     isInitiator: (getVarint(fields, SyncRouteInfoRequestField.isInitiator) ?? 0) !== 0,
     peerInfosRaw: getBytes(fields, SyncRouteInfoRequestField.peerInfos),
   };
@@ -330,8 +345,8 @@ export function encodeSyncRouteInfoResponse(response: SyncRouteInfoResponse): Bu
   if (response.isInitiator) {
     parts.push(encodeVarintField(SyncRouteInfoResponseField.isInitiator, 1));
   }
-  if (response.sessionId !== 0) {
-    parts.push(encodeVarintField(SyncRouteInfoResponseField.sessionId, response.sessionId));
+  if (response.sessionId !== 0n) {
+    parts.push(encodeVarintField64(SyncRouteInfoResponseField.sessionId, response.sessionId));
   }
   if (response.error !== null) {
     parts.push(encodeVarintField(SyncRouteInfoResponseField.error, response.error));
@@ -566,4 +581,39 @@ export function buildWrappedRpcResponse(
   return {
     ...buildingRpcResponse(request, innerBytes),
   };
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 请求方向的包装层（RpcRequest）
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * `RpcRequest` 字段号（`common.proto:104`）。
+ *
+ * **请求方向的 body 也有包装**：`RpcPacket.body` 装的是 `RpcRequest`，
+ * 业务消息在它的 `request`（字段 2）里。与响应方向的 `RpcResponse`
+ * （见 `RpcResponseField`）完全对称——两层包装，缺一层对端就解出空值。
+ *
+ * 这个请求方向的包装是后发现的：响应方向先被修好（`buildWrappedRpcResponse`），
+ * 而发起 OSPF 广播时继续把业务消息直接放 body，官方解析整个失败但
+ * 不报任何错（prost 把不认识的 wire type 当未知字段跳过），表现为
+ * "广播发了但对端路由表里永远学不到本节点"。
+ */
+export const RpcRequestField = { descriptor: 1, request: 2, timeoutMs: 3 } as const;
+
+/** 把业务消息包进 `RpcRequest`（请求方向的 body）。 */
+export function encodeRpcRequestWrapper(businessPayload: Buffer, timeoutMs?: number): Buffer {
+  const parts: Buffer[] = [encodeBytesField(RpcRequestField.request, businessPayload)];
+  if (timeoutMs !== undefined && timeoutMs !== 0) {
+    parts.push(encodeVarintField(RpcRequestField.timeoutMs, timeoutMs));
+  }
+  return Buffer.concat(parts);
+}
+
+/** 解开 `RpcRequest` 包装，取出业务消息。 */
+export function decodeRpcRequestWrapper(body: Buffer): Buffer {
+  const fields = decodeFields(body);
+  const inner = getBytes(fields, RpcRequestField.request);
+  // 容错：没有包装层的旧格式原样返回，调用方行为不变
+  return inner === null ? body : inner;
 }

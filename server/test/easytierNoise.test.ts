@@ -7,6 +7,7 @@ import {
   NOISE_PROLOGUE,
   NOISE_PROTOCOL_NAME,
   NoiseXXInitiator,
+  NoiseXXResponder,
   encryptWithAd,
   decryptWithAd,
   generateKeyPair,
@@ -674,7 +675,7 @@ describe('RPC：compression_info 必须显式带 algo', () => {
     const request: RpcPacket = {
       fromPeer: 100,
       toPeer: 200,
-      transactionId: 42,
+      transactionId: 42n,
       descriptor: {
         domainName: 'net',
         protoName: 'OspfRouteRpc',
@@ -694,7 +695,7 @@ describe('RPC：compression_info 必须显式带 algo', () => {
     expect(response.fromPeer).toBe(200);
     expect(response.toPeer).toBe(100);
     // transaction_id 与 descriptor 保持
-    expect(response.transactionId).toBe(42);
+    expect(response.transactionId).toBe(42n);
     expect(response.descriptor?.serviceName).toBe('OspfRouteRpc');
     // 不是请求
     expect(response.isRequest).toBe(false);
@@ -706,7 +707,7 @@ describe('RPC：compression_info 必须显式带 algo', () => {
   it('编码后的响应里确实有 compression_info 字段（字段号 10）', () => {
     const response = buildingRpcResponse(
       {
-        fromPeer: 1, toPeer: 2, transactionId: 9,
+        fromPeer: 1, toPeer: 2, transactionId: 9n,
         descriptor: { domainName: '', protoName: 'OspfRouteRpc', serviceName: 'OspfRouteRpc', methodIndex: 1 },
         body: Buffer.alloc(0), isRequest: true, totalPieces: 0, pieceIdx: 0, traceId: 0,
         compressionInfo: null,
@@ -722,7 +723,7 @@ describe('RPC 响应的正确包装（业务消息要先包进 RpcResponse）', 
   const request: RpcPacket = {
     fromPeer: 100,
     toPeer: 200,
-    transactionId: 42,
+    transactionId: 42n,
     descriptor: {
       domainName: 'net',
       protoName: 'OspfRouteRpc',
@@ -781,7 +782,7 @@ describe('RPC 响应的正确包装（业务消息要先包进 RpcResponse）', 
     const packet = buildWrappedRpcResponse(request, Buffer.from('x'));
     expect(packet.fromPeer).toBe(200);
     expect(packet.toPeer).toBe(100);
-    expect(packet.transactionId).toBe(42);
+    expect(packet.transactionId).toBe(42n);
     expect(packet.isRequest).toBe(false);
     expect(packet.descriptor?.serviceName).toBe('OspfRouteRpc');
   });
@@ -793,5 +794,62 @@ describe('RPC 响应的正确包装（业务消息要先包进 RpcResponse）', 
     const unwrapped = decodeRpcResponse(packet.body);
     expect(unwrapped.response).toHaveLength(0);
     expect(unwrapped.error).toEqual({ kind: 'executeError', message: 'handler failed' });
+  });
+});
+
+describe('Noise XX 应答方（服务端）', () => {
+  it('与发起方在 TS 内部完成完整握手并导出互补密钥', () => {
+    const initiator = new NoiseXXInitiator();
+    const responder = new NoiseXXResponder();
+
+    // Msg1：发起方 -> 应答方
+    const msg1Payload = Buffer.from('msg1-protobuf');
+    const msg1 = initiator.writeMessage(msg1Payload);
+    expect(responder.readMessage(msg1).equals(msg1Payload)).toBe(true);
+
+    // Msg2：应答方 -> 发起方
+    const msg2Payload = Buffer.from('msg2-protobuf');
+    const msg2 = responder.writeMessage(msg2Payload);
+    expect(initiator.readMessage(msg2).equals(msg2Payload)).toBe(true);
+
+    // Msg3：发起方 -> 应答方
+    const msg3Payload = Buffer.from('msg3-protobuf');
+    const msg3 = initiator.writeMessage(msg3Payload);
+    expect(responder.readMessageFinal(msg3).equals(msg3Payload)).toBe(true);
+
+    // 双方看到同一份握手哈希
+    expect(initiator.getHandshakeHash().equals(responder.getHandshakeHash())).toBe(true);
+
+    // Split 密钥互补：发起方的发送方向 = 应答方的接收方向
+    const client = initiator.finalize();
+    const server = responder.finalize();
+    expect(client.sendKey.equals(server.receiveKey)).toBe(true);
+    expect(server.sendKey.equals(client.receiveKey)).toBe(true);
+
+    // 对端静态公钥可见（发起方能拿到服务端身份，反之亦然）
+    expect(initiator.getRemoteStaticPublicKey()).not.toBeNull();
+    expect(responder.getRemoteStaticPublicKey()).not.toBeNull();
+    expect(initiator.getRemoteStaticPublicKey()!.equals(responder.getLocalStaticPublicKey())).toBe(
+      true,
+    );
+  });
+
+  it('固定静态密钥时对端能拿到同一把公钥（钉扎前提）', () => {
+    const staticKey = generateKeyPair();
+    const responder = new NoiseXXResponder(undefined, staticKey);
+    const initiator = new NoiseXXInitiator();
+
+    responder.readMessage(initiator.writeMessage(Buffer.alloc(0)));
+    initiator.readMessage(responder.writeMessage(Buffer.alloc(0)));
+    responder.readMessageFinal(initiator.writeMessage(Buffer.alloc(0)));
+
+    expect(initiator.getRemoteStaticPublicKey()!.equals(staticKey.publicKey)).toBe(true);
+  });
+
+  it('步骤乱序会抛错（状态机不被跳步）', () => {
+    const responder = new NoiseXXResponder();
+    expect(() => responder.writeMessage()).toThrow(/不应发送/);
+    responder.readMessage(new NoiseXXInitiator().writeMessage(Buffer.alloc(0)));
+    expect(() => responder.readMessageFinal(Buffer.alloc(48))).toThrow(/不应接收/);
   });
 });

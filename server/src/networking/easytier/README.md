@@ -33,11 +33,13 @@
 
 | 能力 | 状态 | 依据 |
 | --- | --- | --- |
-| 明文握手（`HandshakeRequest`） | ✅ 可用 | 与真实节点握手成功 |
-| Noise XX 三段握手 | ✅ 可用 | 与真实节点完成握手 |
-| 解密对端加密 RPC | ✅ 可用 | 解出过真实的 `SyncRouteInfoRequest` 明文 |
-| 加密发送、seq/nonce 管理 | ✅ 可用 | 往返自洽，测试固定住 |
-| 回应 OSPF 同步请求 | ❌ **不可用** | 见下 |
+| 明文握手（`HandshakeRequest`，发起方） | ✅ 可用 | 与真实节点握手成功 |
+| Noise XX 握手（发起方） | ✅ 可用 | 与真实节点完成握手 |
+| Noise XX 握手（**接受方**，`acceptor.ts`） | ✅ 可用 | 官方节点作为发起方连入，`NetworkSecretConfirmed` |
+| 解密对端加密 RPC | ✅ 可用 | 正确解码官方 OSPF 请求（peer_id 等字段全对） |
+| 应答 OSPF 同步请求（**接受方角色**） | ✅ 可用 | 事务号精确匹配、无 inflight miss、无 sync 超时 |
+| Ping/Pong 保活 | ✅ 可用 | 连接长期稳定，不再每秒重连 |
+| OSPF 路由广播（peer_infos + conn_peer_list） | ⚠️ 已发出 | 对端图里有本节点，但路由表未列出 Route 条目（见下）|
 
 ### 为什么"回应 OSPF"不可用
 
@@ -65,6 +67,42 @@ if from_peer_id != peer_id { return Some(Ok(data)); }  // 不解密，直接放�
 生产路径走原生模块。
 
 **所以 `handleOspfRequest` 的返回值只表示"识别到并尝试回应了"，不代表对端接受。**
+
+## 接受方方向的实测记录（2026-10-29）
+
+`easytierAcceptor.test.ts` 让官方节点作为发起方连入 TS 监听端口：
+
+```
+[ts-acceptor] 握手完成，remote=... roleHint=1
+[ts-acceptor] OSPF 已应答，native my_peer_id=...
+STATUS {"peerCount":1,"hostnames":["peer-987654321"]}
+Tests: 2 passed（握手+OSPF 应答；无 sync 超时）
+```
+
+### 实现接受方时抓出的五个真实 bug
+
+1. **int64 精度**：官方事务号约 ±3e17，超出 JS number（2^53）精确范围，
+   按 number 读会偏差个位数——对端按事务号精确匹配请求与响应，差 1 就静默丢弃。
+   `transactionId`/`session_id` 已全部改为 bigint 通路
+   （`encodeVarintBig`/`decodeVarintBig`/`getVarintBig`）。
+2. **Pong 回显丢帧长前缀**：收帧循环返回的是去掉 4 字节长度前缀的 body，
+   原样写回会被对端当成"帧长 19 亿"，报 `body too long` 断连。
+3. **请求方向的包装层**：`RpcPacket.body` 里是 `RpcRequest{request}`，
+   与响应方向的 `RpcResponse` 对称。漏掉这层，官方解码整包失败但无日志。
+4. **OSPF 会话语义**：响应的 `session_id` 是**应答方自己的会话号**
+   （`peer_ospf_route.rs:4221`），不是回显；`is_initiator` 是应答方自己的视角。
+   回显会被判 "session id mismatch, clear saved info"。
+5. **conn_info 缺失**：路由表的下一跳图由各节点的 conn_info 拼成，
+   只发 peer_infos 图里没有边，路由装不上。
+
+### 仍待解：路由表条目
+
+官方能把 TS 学进 OSPF 图（"no peer in graph" 警告不再复现），但路由表
+未列出 TS 的 Route 条目，peer 列表主机名是 `peer-<id>` 兜底。广播字节
+（peer_infos + conn_peer_list）自解正确、与官方样本字段布局一致，native
+处理无任何错误日志。待查方向：`peer_ospf_route.rs:3697` 的原始字节交叉
+校验对编码的深层约束，或路由安装需要 ipv4_addr。对应测试已 `it.skip`
+并附完整诊断记录。
 
 ## 关键验证：真实建连
 

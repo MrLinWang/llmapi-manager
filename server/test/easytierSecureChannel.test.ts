@@ -71,7 +71,7 @@ function ospfRequest(overrides: Partial<RpcPacket> = {}): RpcPacket {
   return {
     fromPeer: REMOTE_PEER_ID,
     toPeer: MY_PEER_ID,
-    transactionId: 12345,
+    transactionId: 12345n,
     descriptor: {
       domainName: 'testnet',
       protoName: 'OspfRouteRpc',
