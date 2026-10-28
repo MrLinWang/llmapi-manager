@@ -62,7 +62,7 @@ npm start               # http://127.0.0.1:8787
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查与启动告警（免鉴权） |
 | POST | `/api/auth/login` / `/api/auth/logout` | 登录 / 退出 |
-| GET | `/api/auth/me` | 当前身份与权限 |
+| GET | `/api/auth/me` | 当前身份、权限与界面语言（`language`，`null` = 跟随浏览器） |
 | POST | `/api/auth/password` | 修改口令（会使旧会话失效） |
 | GET/POST | `/api/providers` | 供应商列表 / 新增 |
 | PUT/DELETE | `/api/providers/:id` | 更新 / 删除 |
@@ -72,7 +72,8 @@ npm start               # http://127.0.0.1:8787
 | PUT | `/api/providers/order` | 调整优先级顺序 |
 | GET | `/api/models` | 聚合别名、默认模型、网关地址与令牌（脱敏） |
 | PUT | `/api/settings/default` | 设置默认供应商与模型 |
-| GET | `/api/settings` | 读取租户设置（含 `disableCodexWebSearch`） |
+| GET | `/api/settings` | 读取租户设置（含 `language`、`disableCodexWebSearch`） |
+| PATCH | `/api/settings/language` | 设置界面语言：`zh` / `en` / `null`（跟随浏览器） |
 | PATCH | `/api/settings/codex` | Codex 行为开关：是否关闭联网搜索 |
 | POST | `/api/gateway/token` | 生成/重置网关令牌（明文只返回一次） |
 | GET | `/api/agents` | Agent 列表与接管状态 |
@@ -104,6 +105,11 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 `model` 用聚合别名时只路由到该供应商；不认识的 `lam-` 别名会返回 400，**不会**回落到默认供应商（避免用错额度、答错模型）。
 
+错误响应统一为 `{ "error": { "code", "message", "messageKey", "details"? } }`。
+`message` 按请求语言渲染（租户设置 > `Accept-Language` > 中文），
+要判断具体原因请用**不随语言变化**的 `messageKey`（如 `gateway.auth.invalidToken`），
+不要匹配译文。详见 [docs/api.md](./docs/api.md)。
+
 ## 环境变量
 
 见 [.env.example](.env.example)。常用的几个：
@@ -117,6 +123,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `ADMIN_USERNAME` | `admin` | 初始管理员用户名，仅首次创建账号时使用 |
 | `ADMIN_PASSWORD` | 无 | 应急通道：设置后跳过网页初始化，直接以此口令建号（适合 Docker/systemd） |
 | `DATA_ENCRYPTION_KEY` | 无 | 供应商 Key 与网关令牌的落盘加密密钥；不设则为明文并告警 |
+| `LOG_LANGUAGE` | `zh` | 运行日志、启动横幅与 CLI 输出的语言（`zh` / `en`）。与界面语言分开：接口跟随请求语言，日志跟随这个设置 |
 | `LOG_DIR` | 仓库根 `log/` | 运行日志目录；设为 `off` 只输出到控制台 |
 | `LOG_MAX_BYTES` / `LOG_MAX_FILES` | `5242880` / `5` | 单文件滚动阈值与保留的历史文件个数 |
 | `AGENT_HOME_DIR` | OS 家目录 | Agent 配置根目录（其下 `.codex` / `.claude`） |
@@ -177,6 +184,7 @@ server/
     app.ts                Fastify 装配、错误处理、SPA 托管
     index.ts              启动入口（bootstrap + listen）
     config.ts  logger.ts  resilience.ts  context.ts  bootstrap.ts
+    i18n/                 服务端文案：语言解析（租户设置 → Accept-Language → 中文）、translate、locales/{zh,en}/ 字典
     domain/               provider、aliases、identity、permissions、agent、settings、modelCatalog、requestLog
     store/                jsonFile（原子写/损坏隔离）、paths、tenantScope、identityRepo
     auth/                 password、session、principal、policy、guard
@@ -191,7 +199,7 @@ web/
   src/components/         ui、ProviderForm、CopyButton
   src/lib/                api、auth、useAsync、types、labels（枚举文案键）
   src/i18n/               i18next 初始化、语言探测、日期格式化、locales/{zh,en}/ 字典
-  test/                   页面装配测试（jsdom）
+  test/                   页面装配测试 + 字典契约 + 硬编码扫描（jsdom）
 ```
 
 ## 致谢

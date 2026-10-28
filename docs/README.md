@@ -3,12 +3,12 @@
 | 文档 | 内容 |
 | --- | --- |
 | [architecture.md](./architecture.md) | 进程结构、分层约定、租户与身份、两条数据流、存储布局、设计取舍 |
-| [api.md](./api.md) | 管理面与网关接口参考：路径、权限、请求/响应示例、错误码、三种 `apiType` |
+| [api.md](./api.md) | 管理面与网关接口参考：路径、权限、请求/响应示例、错误码、`messageKey` 与语言解析顺序、三种 `apiType` |
 | [gateway.md](./gateway.md) | 别名格式、选路规则、三条路径的协议匹配与鉴权头、地址拼接、流式转发、限制与调用示例 |
 | [agents.md](./agents.md) | Codex / Claude Code 的写入内容、Codex 模型目录与 `web_search` 开关、三条硬约束、快照、还原、结束进程、扩展方式、排错 |
-| [configuration.md](./configuration.md) | 环境变量、两个密钥的含义、数据目录、首次启动、生产部署、迁移 |
+| [configuration.md](./configuration.md) | 环境变量（含 `LOG_LANGUAGE`）、两个密钥的含义、数据目录、首次启动、生产部署、迁移 |
 | [security.md](./security.md) | 两类凭据、口令与会话、令牌、权限矩阵、上游凭据、文件系统边界、部署风险 |
-| [development.md](./development.md) | 本地开发、测试布局、如何加接口/供应商字段/Agent/网关路径、代码约定、技术债 |
+| [development.md](./development.md) | 本地开发、测试布局、如何加接口/供应商字段/Agent/网关路径、**如何加/改界面与接口文案**、代码约定、技术债 |
 
 ## 按问题找文档
 
@@ -18,6 +18,9 @@
 - 部署到服务器要注意什么 → [configuration.md](./configuration.md#生产部署)、[security.md](./security.md#部署风险清单)
 - 我要加一个供应商字段 / 一个新 Agent → [development.md](./development.md)
 - 我要理解某个接口返回什么 → [api.md](./api.md)
+- 我要加一条界面文案 / 报错文案 → [development.md](./development.md#加改一条界面文案)、[development.md](./development.md#改服务端文案)
+- 报错文案跟着什么语言走、脚本怎么判断错误类型 → [api.md](./api.md#message-跟随语言messagekey-不随语言变化)
+- 日志为什么是中文（或者怎么改成英文）→ [configuration.md](./configuration.md) 的 `LOG_LANGUAGE`
 - 三种协议分别接哪条路径、为什么不能直通 → [gateway.md](./gateway.md#协议匹配)、[api.md](./api.md#网关)
 - Codex 为什么只能选 `responses`、`wire_api` 为什么固定写 `responses` → [agents.md](./agents.md#选哪个供应商)
 - Codex 的 `/model` 列表来自哪个文件、`web_search` 为什么默认关闭 → [agents.md](./agents.md#模型目录model_catalog_json-与-model_catalog_url)
@@ -37,3 +40,5 @@
 | 环境变量或数据目录结构 | `configuration.md` |
 | 权限位、角色映射或权限的副作用（如结束进程） | `security.md`、`api.md` |
 | 测试基线数量 | `development.md`、`AGENTS.md` |
+| 新增/修改界面或接口文案 | `web/src/i18n/locales/`、`server/src/i18n/locales/`；口径说明见 `development.md` |
+| 语言相关行为（语言来源、`messageKey`、`LOG_LANGUAGE`） | `api.md`、`configuration.md`、`README.md`、`AGENTS.md` |
