@@ -1,6 +1,6 @@
 import net from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { TcpStack } from '../src/networking/easytier/tcpStack';
+import { TcpStack, selectPeerForPacket } from '../src/networking/easytier/tcpStack';
 import {
   IpProtocol,
   TcpFlags,
@@ -415,4 +415,36 @@ describe('用户态 TCP 栈：确认与重传', () => {
       `已确认的段被重传了 ${retransmitted.length} 次（ACK 未清理 unacked）`,
     ).toBe(0);
   }, 15_000);
+});
+
+describe('出站包选对端', () => {
+  it('目标 IP 精确匹配时选它（多对端也不会发错）', () => {
+    const peers = [{ ipv4: '10.0.0.2' }, { ipv4: '10.0.0.3' }];
+    const result = selectPeerForPacket(peers, '10.0.0.3');
+    expect(result.reason).toBe('matched');
+    expect(result.peer).toBe(peers[1]);
+  });
+
+  it('只有一条对端时发它（单对端组网的正常情况）', () => {
+    const peers = [{ ipv4: '10.0.0.2' }];
+    // 即使目标 IP 不匹配（对端还没广播 IP），单连接也发它
+    const result = selectPeerForPacket(peers, '10.0.0.99');
+    expect(result.reason).toBe('single');
+    expect(result.peer).toBe(peers[0]);
+  });
+
+  it('多条对端且都不匹配时丢弃，不猜', () => {
+    // 这条规则很重要：猜错会把数据发到别人的虚拟网里，
+    // 而"不通"至少是可排查的。丢包比串包安全。
+    const peers = [{ ipv4: '10.0.0.2' }, { ipv4: '10.0.0.3' }];
+    const result = selectPeerForPacket(peers, '10.0.0.99');
+    expect(result.reason).toBe('ambiguous');
+    expect(result.peer).toBeNull();
+  });
+
+  it('没有任何对端时返回 none', () => {
+    const result = selectPeerForPacket([], '10.0.0.2');
+    expect(result.reason).toBe('none');
+    expect(result.peer).toBeNull();
+  });
 });

@@ -577,3 +577,27 @@ export class TcpStack extends EventEmitter {
     return seqDiff(a, b);
   }
 }
+
+/**
+ * 为出站 IP 包选目标对端（纯函数，便于测试）。
+ *
+ * 依据包的**目标 IP** 与各对端声明的虚拟 IP 做精确匹配。规则见
+ * `acceptor.ts` 的 `pickConnectionFor`：精确匹配优先；只有一条对端时发它；
+ * 多条且都不匹配时返回 null（**不猜**——发错对端会让数据串到别人的虚拟网里，
+ * 静默丢弃至少是"不通"而非"串了"）。
+ */
+export function selectPeerForPacket<T extends { ipv4?: string }>(
+  peers: readonly T[],
+  dstIp: string | null,
+): { peer: T | null; reason: 'matched' | 'single' | 'ambiguous' | 'none' } {
+  if (dstIp !== null) {
+    for (const peer of peers) {
+      if (peer.ipv4 !== undefined && peer.ipv4 === dstIp) {
+        return { peer, reason: 'matched' };
+      }
+    }
+  }
+  if (peers.length === 1) return { peer: peers[0], reason: 'single' };
+  if (peers.length > 1) return { peer: null, reason: 'ambiguous' };
+  return { peer: null, reason: 'none' };
+}

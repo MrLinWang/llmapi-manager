@@ -48,7 +48,8 @@ import {
 import { extractFrame, framePacket } from './framing';
 import { PacketType, PeerManagerHeaderFlags, decodeHeader } from './protocol';
 import { deriveTrafficKey, directionForSender, decryptPayload, encryptPayload } from './dataPlane';
-import { TcpStack } from './tcpStack';
+import { TcpStack, selectPeerForPacket } from './tcpStack';
+import { decodeIpv4Header } from './ip';
 import {
   buildOspfSyncRouteRequest,
   buildWrappedRpcResponse,
@@ -750,10 +751,36 @@ export class EasyTierAcceptor {
    * 第一个已连上的对端。多对端时应该按 IP 查路由表——那是 OSPF 的职责，
    * README 里记为已知边界。
    */
+  /**
+   * 为出站 IP 包选一条连接。
+   *
+   * 依据是包的**目标 IP**：对端的虚拟 IPv4 从它的 OSPF 广播里采集（`conn.ipv4`），
+   * 用它做精确匹配。这样多对端场景下能发对人，而不是总是发给第一个。
+   *
+   * 三级回退（按"多确定"降序）：
+   * 1. 目标 IP 精确匹配某条连接的对端虚拟 IP
+   * 2. 都不匹配但**只有一条**连接 —— 单对端组网（两台机器），发它准没错
+   * 3. 多条连接且都不匹配 —— 丢弃并记日志。**不能猜**：发错对端会让
+   *    数据出现在别人的虚拟网里；而静默丢弃至少是"不通"而不是"串了"。
+   */
+  private pickConnectionFor(ipPacket: Buffer): Connection | null {
+    const header = decodeIpv4Header(ipPacket);
+    const { peer, reason } = selectPeerForPacket(
+      [...this.connections],
+      header?.dst ?? null,
+    );
+    if (reason === 'ambiguous') {
+      this.callbacks.onDataPlaneLog?.(
+        `多条连接但目标 IP ${header?.dst ?? '未知'} 无匹配，丢弃该包（不猜，避免发错对端）`,
+      );
+    }
+    return peer;
+  }
+
   private sendDataPacket(ipPacket: Buffer): void {
-    const conn = [...this.connections][0];
-    if (conn === undefined) {
-      this.callbacks.onDataPlaneLog?.('发送数据包时没有可用连接，丢弃');
+    const conn = this.pickConnectionFor(ipPacket);
+    if (conn === null) {
+      this.callbacks.onDataPlaneLog?.('发送数据包时没有匹配的连接，丢弃');
       return;
     }
 
