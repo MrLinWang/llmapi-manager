@@ -131,6 +131,16 @@ export interface AcceptorCallbacks {
   onError?(err: Error): void;
   /** 数据面的诊断日志（连接建立、桥接失败等） */
   onDataPlaneLog?(message: string): void;
+  /**
+   * 协议层诊断（收到的报文、应答结果等）。
+   *
+   * 为什么不用 `process.stdout.write`：那样会绕过日志系统——不受日志级别
+   * 控制、不落盘、不打码，生产环境里还会污染 stdout（可能被当成业务输出）。
+   * 这里统一走回调，由调用方决定记到哪。
+   *
+   * 注意内容可能包含报文十六进制，只在显式开启诊断时传。
+   */
+  onProtocolLog?(message: string): void;
 }
 
 interface Connection {
@@ -253,6 +263,28 @@ export class EasyTierAcceptor {
       this.server.close(() => resolve());
       this.server = null;
     });
+  }
+
+  /**
+   * 是否开启协议层诊断。
+   *
+   * 两个来源：显式环境变量（调试用），或调用方提供了回调（由它决定记在哪、
+   * 记不记）。后者让生产环境可以通过 logger 的级别控制，而不是走 stdout。
+   */
+  private debugEnabled(): boolean {
+    return (
+      process.env.EASYTIER_ACCEPTOR_DEBUG !== undefined ||
+      this.callbacks.onProtocolLog !== undefined
+    );
+  }
+
+  private debug(message: string): void {
+    if (process.env.EASYTIER_ACCEPTOR_DEBUG !== undefined) {
+      // 调试时直接打 stdout：为了让 `node -e` 那种一次性脚本能立刻看到，
+      // 不用先配日志。生产走下面的回调。
+      process.stdout.write(`[ts-acceptor] ${message}\n`);
+    }
+    this.callbacks.onProtocolLog?.(message);
   }
 
   /** 是否已成功应答过一次 OSPF 同步请求。 */
@@ -442,7 +474,7 @@ export class EasyTierAcceptor {
     // 对端对我们广播的响应（成功或 MalformatRpcPacket 错误）——
     // 这是判断"广播是否被接受"的唯一权威来源
     if (header.packetType === PacketType.RpcResp) {
-      if (process.env.EASYTIER_ACCEPTOR_DEBUG) {
+      if (this.debugEnabled()) {
         try {
           const respRpc = decodeRpcPacket(
             decryptPayload({
@@ -456,15 +488,13 @@ export class EasyTierAcceptor {
             }),
           );
           const unwrapped = decodeRpcResponse(respRpc.body);
-          process.stdout.write(
-            `[ts-acceptor] 广播响应: txn=${respRpc.transactionId} error=${JSON.stringify(
+          this.debug(
+            `广播响应: txn=${respRpc.transactionId} error=${JSON.stringify(
               unwrapped.error,
-            )} payload=${unwrapped.response.toString('hex').slice(0, 60)}\n`,
+            )} payload=${unwrapped.response.toString('hex').slice(0, 60)}`,
           );
         } catch (e) {
-          process.stdout.write(
-            `[ts-acceptor] 广播响应解码失败: ${(e as Error).message}\n`,
-          );
+          this.debug(`广播响应解码失败: ${(e as Error).message}`);
         }
       }
       return;
@@ -515,11 +545,7 @@ export class EasyTierAcceptor {
       return;
     }
 
-    if (process.env.EASYTIER_ACCEPTOR_DEBUG) {
-      process.stdout.write(
-        `[ts-acceptor] 收到 OSPF 请求 body=${rpc.body.toString('hex').slice(0, 120)}\n`,
-      );
-    }
+    this.debug(`收到 OSPF 请求 body=${rpc.body.toString('hex').slice(0, 120)}`);
     // body 是 RpcRequest 包装，业务消息在字段 2 里——直接解会得到全 0
     const innerBody = decodeRpcRequestWrapper(rpc.body);
     const request = decodeSyncRouteInfoRequest(innerBody);
@@ -540,14 +566,12 @@ export class EasyTierAcceptor {
       }
       if (selfInfo.ipv4Addr !== null) conn.ipv4 = selfInfo.ipv4Addr;
     }
-    if (process.env.EASYTIER_ACCEPTOR_DEBUG) {
-      // 对端广播的 peer_infos 里有没有我们？有 = 它的 OSPF 图已经学到本节点
-      process.stdout.write(
-        `[ts-acceptor] 对端 peer_infos: ${JSON.stringify(
-          learned.map((r) => ({ id: r.peerId, host: r.hostname })),
-        )}\n`,
-      );
-    }
+    // 对端广播的 peer_infos 里有没有我们？有 = 它的 OSPF 图已经学到本节点
+    this.debug(
+      `对端 peer_infos: ${JSON.stringify(
+        learned.map((r) => ({ id: r.peerId, host: r.hostname })),
+      )}`,
+    );
 
     // 应答：业务消息包进 RpcResponse 再进 body（对端按 RpcResponse 解 body）
     // 官方语义（peer_ospf_route.rs:4221-4223）：
@@ -645,19 +669,17 @@ export class EasyTierAcceptor {
       body: encodeRpcRequestWrapper(body),
       networkName: this.options.networkName,
     });
-    if (process.env.EASYTIER_ACCEPTOR_DEBUG) {
-      process.stdout.write(
-        `[ts-acceptor] descriptor=${JSON.stringify(packet.descriptor)}\n` +
-        `[ts-acceptor] 广播 body=${body.toString('hex')}\n` +
-          `[ts-acceptor] 自解 peer_infos=${JSON.stringify(
-            decodeRoutePeerInfos(innerInfos).map((r) => ({
-              id: r.peerId,
-              host: r.hostname,
-              ver: r.version,
-            })),
-          )} conn=${connPeerList.toString('hex')}\n`,
-      );
-    }
+    this.debug(
+      `descriptor=${JSON.stringify(packet.descriptor)} ` +
+        `body=${body.toString('hex')} ` +
+        `自解 peer_infos=${JSON.stringify(
+          decodeRoutePeerInfos(innerInfos).map((r) => ({
+            id: r.peerId,
+            host: r.hostname,
+            ver: r.version,
+          })),
+        )} conn=${connPeerList.toString('hex')}`,
+    );
     this.sendRpc(conn, packet, PacketType.RpcReq);
     this.callbacks.onRouteAdvertised?.();
   }

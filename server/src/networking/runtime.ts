@@ -465,6 +465,11 @@ export class NetworkingRuntime {
         onDataPlaneLog: (message) => {
           this.logger.info(`组网数据面：${message}`);
         },
+        // 协议层诊断走 debug 级别：内容是报文片段，正常运行时不该刷屏，
+        // 排查时把日志级别调低就能看到——比 stdout.write 可控。
+        onProtocolLog: (message) => {
+          this.logger.debug(`组网协议：${message}`);
+        },
       },
     );
 
