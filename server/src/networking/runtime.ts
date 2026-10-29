@@ -101,6 +101,15 @@ export class NetworkingRuntime {
   /** 本次启动是否发生过降级（请求的引擎不可用） */
   private degradedFrom: NetworkingEngine | null = null;
   /**
+   * 上次 `start()` 失败的原因（键 + 人类可读说明）。
+   *
+   * 为什么必须记住：`builtin` 引擎最常见的启动失败是**端口被占**——
+   * 而单进程内 `NetworkingRuntime` 不是单例，服务重启后新实例既不知道
+   * 端口还被上个进程占着、也看不到"上次为什么失败"。用户会看到
+   * "没启动 → 点启动 → 又失败"的循环，却没有任何线索。
+   */
+  private lastStartError: string | null = null;
+  /**
    * 本机在组网里的稳定身份（peer_id 与 Noise 静态私钥）。
    *
    * **必须持久化在进程级而不是每次启动随机生成**：对端会按
@@ -295,7 +304,9 @@ export class NetworkingRuntime {
         running && !functional
           ? '自研引擎已监听，但还没有节点连上。请确认对端填的是本机真实地址与端口，' +
             '并且网络名与密钥一致。'
-          : null,
+          : // 没跑起来时把上次的失败原因带上：否则用户只看到 running=false，
+            // 完全不知道是端口被占还是配置有问题
+            (this.lastStartError ?? null),
     };
   }
 
@@ -400,7 +411,18 @@ export class NetworkingRuntime {
 
     try {
       await acceptor.start();
+      this.lastStartError = null;
     } catch (cause) {
+      // 端口被占是最常见的失败：给出可操作的说明，而不是原始 EADDRINUSE
+      const err = cause as NodeJS.ErrnoException;
+      if (err.code === 'EADDRINUSE') {
+        this.lastStartError =
+          `自研引擎无法监听端口 ${config.listenPort}：端口已被占用。` +
+          `可能是上一个进程还没完全退出，或另一个 EasyTier 实例用了同一端口。` +
+          `改配置里的 listenPort 或释放该端口后重试。`;
+        throw new Error(this.lastStartError, { cause });
+      }
+      this.lastStartError = `自研引擎启动失败：${err.message}`;
       // 自研引擎启动失败时尝试原生兜底：端口被占是常见原因，
       // 而原生用随机端口，能绕开。
       const fallback = this.load();

@@ -257,3 +257,44 @@ describe.skipIf(!CAN_RUN)('自研引擎作为主引擎（走 NetworkingRuntime�
     expect(list[0].tunnel).toBe('tcp');
   }, 90_000);
 });
+
+/**
+ * 端口被占时的诊断质量。
+ *
+ * 这条**不依赖原生模块**，所以不跳过。它验的是"失败可被诊断"：
+ * 同一个 runtime 里第二次用同一端口启动，必须报出可操作的说明，
+ * 而不是让用户对着 `running: false` 猜。
+ */
+describe('自研引擎的启动失败必须可诊断', () => {
+  it('端口已占用时给出可操作的错误，状态里也带上原因', async () => {
+    const rt = new NetworkingRuntime(silentLogger());
+    const port = 15200 + Math.floor(Math.random() * 300);
+    const base = {
+      ...defaultNetworkingConfig(),
+      engine: 'builtin' as const,
+      enabled: true,
+      networkName: `conflict-${Date.now().toString(36)}`,
+      networkSecret: 'secret-x',
+      hostname: 'ts-conflict',
+      listenPort: port,
+    };
+
+    await rt.start(base);
+    // 第二个实例抢同一端口：必须失败且说明是端口问题
+    const rt2 = new NetworkingRuntime(silentLogger());
+    let message = '';
+    try {
+      await rt2.start(base);
+    } catch (cause) {
+      message = cause instanceof Error ? cause.message : String(cause);
+    }
+    expect(message).toContain(String(port));
+
+    // 失败后 status 不能只说 running:false，要带上原因
+    const status = await rt2.status(base);
+    expect(status.running).toBe(false);
+    expect(status.functionalReason).toContain(String(port));
+
+    await rt.stop();
+  }, 30_000);
+});
