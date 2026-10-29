@@ -298,3 +298,35 @@ describe('自研引擎的启动失败必须可诊断', () => {
     await rt.stop();
   }, 30_000);
 });
+
+/**
+ * 切引擎不能在状态里留下上一个引擎的残影。
+ *
+ * 修过的真缺陷：`start()` 走 native 路径时没有先 `stopBuiltin()`，
+ * `this.builtin` 残留下来，`peers()` 会继续返回一个已经不该在跑的
+ * 引擎的数据——切到 native 后还看到 builtin 时期的对端列表。
+ */
+describe('切引擎后的状态一致性', () => {
+  it('stop() 之后 activeEngine 与 builtin 实例都清空', async () => {
+    const rt = new NetworkingRuntime(silentLogger());
+    const port = 15600 + Math.floor(Math.random() * 300);
+    const config = {
+      ...defaultNetworkingConfig(),
+      engine: 'builtin' as const,
+      enabled: true,
+      networkName: `switch-${Date.now().toString(36)}`,
+      networkSecret: 'secret-x',
+      hostname: 'ts-switch',
+      listenPort: port,
+    };
+
+    await rt.start(config);
+    expect((await rt.status(config)).running).toBe(true);
+
+    await rt.stop();
+    const stopped = await rt.status(config);
+    expect(stopped.running).toBe(false);
+    // 停掉之后不该再有对端：残留实例会让这里返回旧数据
+    expect(await rt.peers()).toEqual([]);
+  }, 30_000);
+});

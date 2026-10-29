@@ -110,6 +110,14 @@ export class NetworkingRuntime {
    */
   private lastStartError: string | null = null;
   /**
+   * 当前**实际在跑**的引擎。
+   *
+   * 不能靠"`this.builtin !== null` 就说明 builtin 在跑"来推断——那是把
+   * 实现细节当契约。显式记录还有第二个必要原因：降级后实际引擎与
+   * `config.engine` 不一致，`peers()` 必须跟着**实际**引擎走。
+   */
+  private activeEngine: NetworkingEngine | null = null;
+  /**
    * 本机在组网里的稳定身份（peer_id 与 Noise 静态私钥）。
    *
    * **必须持久化在进程级而不是每次启动随机生成**：对端会按
@@ -311,9 +319,12 @@ export class NetworkingRuntime {
   }
 
   async peers(): Promise<NetworkingPeer[]> {
-    const nativeOk = this.load() !== null;
-    // 引擎按配置决定；status 里已解析过一次，这里按同一规则再取
-    if (this.builtin !== null) {
+    // 按**实际在跑**的引擎取，不是按配置：降级后两者可能不一致。
+    // 还没启动过时（activeEngine === null）才回退到"谁能用就用谁"，
+    // 这样页面在启动前也能展示已有信息。
+    const engine = this.activeEngine ?? (this.load() !== null ? 'native' : 'builtin');
+    if (engine === 'builtin') {
+      if (this.builtin === null) return [];
       return this.builtin.acceptor.connectedPeers().map((peer) => ({
         hostname: peer.hostname ?? `peer-${peer.peerId}`,
         ipv4: peer.ipv4,
@@ -321,7 +332,7 @@ export class NetworkingRuntime {
         tunnel: 'tcp',
       }));
     }
-    if (!nativeOk) return [];
+    if (this.load() === null) return [];
     try {
       const list = await this.load()!.listPeers();
       return list.map((item) => ({
@@ -366,6 +377,9 @@ export class NetworkingRuntime {
     );
 
     if (resolved.engine === 'native') {
+      // 必须先把自研实例停掉：否则 `this.builtin` 残留，`peers()` 会优先
+      // 返回一个已经不该在跑的引擎的数据（切引擎后看到旧对端列表，极易误判）。
+      await this.stopBuiltin();
       await this.load()!.startNode({
         networkName: config.networkName,
         networkSecret: config.networkSecret,
@@ -375,6 +389,7 @@ export class NetworkingRuntime {
         // 配置层用 null 表示"让 EasyTier 自动分配"，而 napi 只接受省略。
         ...(config.ipv4 === null ? {} : { ipv4: config.ipv4 }),
       });
+      this.activeEngine = 'native';
       return;
     }
 
@@ -436,6 +451,7 @@ export class NetworkingRuntime {
           hostname: config.hostname,
           ...(config.ipv4 === null ? {} : { ipv4: config.ipv4 }),
         });
+        this.activeEngine = 'native';
         return;
       }
       throw cause;
@@ -447,6 +463,7 @@ export class NetworkingRuntime {
       ipv4: config.ipv4,
       startedAt: Date.now(),
     };
+    this.activeEngine = 'builtin';
   }
 
   private async stopBuiltin(): Promise<void> {
@@ -467,6 +484,8 @@ export class NetworkingRuntime {
       await this.load()!.stopNode();
     }
     this.degradedFrom = null;
+    this.activeEngine = null;
+    this.lastStartError = null;
   }
 
   /** 本次运行是否发生过引擎降级。 */
