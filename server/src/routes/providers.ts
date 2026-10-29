@@ -30,6 +30,13 @@ function asProviderInput(body: unknown): ProviderInput {
   if (raw.models && raw.models.some((item) => typeof item !== 'string')) {
     throw badRequest('providers.validation.modelsItems');
   }
+  // 生图模型列表与对话模型列表同形，校验也用同一套规则
+  if (raw.imageModels !== undefined && !Array.isArray(raw.imageModels)) {
+    throw badRequest('providers.validation.imageModelsType');
+  }
+  if (raw.imageModels && raw.imageModels.some((item) => typeof item !== 'string')) {
+    throw badRequest('providers.validation.imageModelsItems');
+  }
   // 能力表只做形状校验，取值合法性（正整数、模型仍在列表里）交给
   // ProviderService.normalizeCapabilities —— 一条规则一处实现，避免两套标准。
   if (
@@ -44,6 +51,7 @@ function asProviderInput(body: unknown): ProviderInput {
     baseUrl: raw.baseUrl,
     apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : undefined,
     models: raw.models as string[] | undefined,
+    imageModels: raw.imageModels as string[] | undefined,
     modelCapabilities: raw.modelCapabilities as ProviderInput['modelCapabilities'],
     enabled: typeof raw.enabled === 'boolean' ? raw.enabled : undefined,
     priority: typeof raw.priority === 'number' ? raw.priority : undefined,
@@ -213,10 +221,16 @@ export function registerProviderRoutes(
             ? service.update(record.id, {
                 // update() 是**全量更新**：notes / websiteUrl / enabled / priority
                 // 传掉就会按缺省值覆盖，所以这里逐项带上原值，只替换能力表。
+                //
+                // `imageModels` 必须一起带上：漏掉它会让用户配好的生图模型
+                // 在点一次「逐档实测」后凭空消失（真实踩过）。
+                // 服务层也有兜底（不传=沿用），但这里显式传是为了让"这个接口改了什么"
+                // 在代码里一眼可读，而不是依赖别处的默认行为。
                 name: record.name,
                 apiType: record.apiType,
                 baseUrl: record.baseUrl,
                 models: record.models,
+                imageModels: record.imageModels,
                 modelCapabilities: nextCapabilities,
                 enabled: record.enabled,
                 priority: record.priority,

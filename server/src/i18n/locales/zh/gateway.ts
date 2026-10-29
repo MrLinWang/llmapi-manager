@@ -20,6 +20,9 @@ export const zhGateway = {
     unknownProvider: '未知供应商 key: {{key}}',
     providerDisabled: '供应商 {{name}} 已禁用',
     modelNotDeclared: '供应商 {{name}} 未声明模型 {{model}}',
+    /** 模型在对话列表里、但没登记到生图列表：提示怎么改，而不是笼统说"未声明" */
+    modelIsNotImageModel:
+      '模型 {{model}} 在供应商 {{name}} 的对话模型列表里，但生图接口只认生图模型列表——请把它从「对话模型」移到「生图模型」',
   },
   selection: {
     /** 供应商被停用（不是删除） */
@@ -30,6 +33,9 @@ export const zhGateway = {
       '协议不匹配：需要 {{required}}，它是 {{apiType}}（转换只支持 responses→chat，当前开关未开或方向不适用）',
     noEnabledProviderOfType: '没有启用的 {{required}} 供应商，请先在控制台添加并启用',
     noEnabledProvider: '没有启用的供应商，请先在控制台添加并启用',
+    /** 生图路径没有可用的上游：openai 与 responses 都算可用，anthropic 不算 */
+    noEnabledImageProvider:
+      '没有可用的生图供应商，请先添加并启用一家 OpenAI 兼容（Chat）或（Responses）供应商',
     /** 审批模型落在需要转换的供应商上 */
     approvalNeedsConversionOff:
       '审批模型 {{model}} 属于 {{apiType}} 供应商 {{name}}，但本次请求走 {{path}}（需要 {{required}}），当前未开启跨协议转发',
@@ -58,6 +64,15 @@ export const zhGateway = {
     /** 没开转换开关，且打开就能解决 */
     conversionDisabled:
       '未开启协议转换：{{path}} 需要 {{required}} 上游，而供应商 {{name}} 是 {{apiType}}。可在设置页开启"跨协议转发"让网关把 Responses 请求转成 Chat 发送',
+
+    /**
+     * 生图路径打到了不支持的供应商。
+     * 刻意不提"开启协议转换"：Images 没有转换器，提示那个开关只会把用户引向错误的方向。
+     */
+    imageNeedsSupportedProvider:
+      '生图接口 {{path}} 需要 {{accepted}} 供应商，而 {{name}} 是 {{apiType}}。请添加或启用一家支持 Images API 的供应商',
+    /** 上游只返回了图片链接，网关下载失败 */
+    imageInlineFailed: '上游返回的是图片链接，网关下载失败（{{detail}}）',
   },
   convert: {
     /** 请求体不是对象 / input 类型不对等结构性错误 */

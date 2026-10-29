@@ -7,6 +7,8 @@ export const enProviders: typeof zhProviders = {
     baseUrlType: 'baseUrl must be a string',
     modelsType: 'models must be an array of strings',
     modelsItems: 'models may only contain strings',
+    imageModelsType: 'imageModels must be an array of strings',
+    imageModelsItems: 'imageModels may only contain strings',
     modelCapabilitiesType: 'modelCapabilities must be an object',
     idsType: 'ids must be an array of strings',
     enabledType: 'enabled must be a boolean',

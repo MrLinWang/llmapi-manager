@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Server } from 'node:http';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app';
 import { createContext } from '../src/context';
@@ -12,6 +12,8 @@ import { loadConfig, type AppConfig } from '../src/config';
 import { resetWarnings } from '../src/resilience';
 import {
   portOf,
+  resetImageStats,
+  imageStats,
   startClientErrorUpstream,
   startFailingUpstream,
   startMockUpstream,
@@ -240,6 +242,33 @@ describe('冒烟：供应商与聚合', () => {
     });
   });
 
+  it('按输出模态把生图模型单独分出来', async () => {
+    // 上游 /models 的 architecture.output_modalities 是唯一可靠的分类信号：
+    // 实测 OpenDesign 的 44 个模型里恰好 5 个是 ["image"]（gpt-image-2、nano-banana-2 等）。
+    const response = await call(
+      'POST',
+      '/api/providers/models',
+      {
+        apiType: 'openai',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-modal',
+      },
+      { cookie },
+    );
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    // 只输出图像的进 imageModels
+    expect(body.imageModels).toEqual(['img-only-model']);
+    // 且**不能**同时出现在对话模型里：两个框各自只列自己的候选
+    expect(body.models).not.toContain('img-only-model');
+    // 多模态（text + image）仍属于对话模型：挪进生图列表会让用户在 Codex 里看不到它
+    expect(body.models).toContain('omni-chat-model');
+    expect(body.imageModels).not.toContain('omni-chat-model');
+    // 没声明 architecture 的不做假设，留在对话模型里
+    expect(body.models).toContain('undeclared-modal-model');
+    expect(body.imageModels).not.toContain('undeclared-modal-model');
+  });
+
   it('anthropic 协议用 x-api-key 拉取，拿到的是它自己的模型', async () => {
     const response = await call(
       'POST',
@@ -354,6 +383,9 @@ describe('冒烟：逐档实测', () => {
         baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
         apiKey: 'sk-probe',
         models: ['gpt-x'],
+        // 生图模型必须活过逐档实测：update() 是全量更新，漏带 imageModels
+        // 会让它凭空消失（真实缺陷：点一次逐档实测，生图模型不见了）。
+        imageModels: ['gpt-image-2'],
         modelCapabilities: { 'gpt-x': { contextWindow: 400_000 } },
         notes: '探测备注',
         websiteUrl: 'https://example.com/provider',
@@ -394,6 +426,7 @@ describe('冒烟：逐档实测', () => {
       models: Array<{ model: string; accepted: string[]; rejected: string[]; error?: string }>;
       provider: {
         modelCapabilities: Record<string, { contextWindow?: number; reasoningEfforts?: string[] }>;
+        imageModels?: string[];
         notes?: string;
         websiteUrl?: string;
         priority?: number;
@@ -420,19 +453,81 @@ describe('冒烟：逐档实测', () => {
       priority: 7,
       enabled: true,
     });
+    // 生图模型同样不能被抹掉：它和对话模型是两份数据，
+    // 写能力表时漏传就会静默清空（曾经的缺陷）。
+    expect(body.provider.imageModels).toEqual(['gpt-image-2']);
 
     // 落盘验证：重新读供应商列表也能看到
     const listed = (await call('GET', '/api/providers', undefined, { cookie })).json()
       .providers as Array<{
         id: string;
+        imageModels?: string[];
         modelCapabilities?: Record<string, { reasoningEfforts?: string[] }>;
       }>;
     expect(
       listed.find((item) => item.id === providerId)?.modelCapabilities?.['gpt-x']
         ?.reasoningEfforts,
     ).toEqual(body.candidates);
+    // 落盘验证：不只是响应里带着，磁盘上也不能丢
+    expect(listed.find((item) => item.id === providerId)?.imageModels).toEqual([
+      'gpt-image-2',
+    ]);
 
     await call('DELETE', `/api/providers/${providerId}`, undefined, { cookie });
+  });
+
+  it('PUT 未带 imageModels 时保留原值，显式传空数组才清空', async () => {
+    // 两个语义必须分开：
+    // - 不传 = 不改（逐档实测/同步脚本这类"只改部分字段"的调用方依赖它）
+    // - 传 [] = 明确清空（用户真的想删掉生图模型）
+    // 合并成一个语义就没法表达"清空"，而分开才不会出现"改个能力表顺手清空配置"。
+    const created = await call(
+      'POST', '/api/providers',
+      {
+        name: '部分更新语义',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-partial',
+        models: ['chat-m'],
+        imageModels: ['gpt-image-2'],
+      },
+      { cookie },
+    );
+    expect(created.statusCode).toBe(201);
+    const id = created.json().provider.id as string;
+
+    // 只改 notes，不传 imageModels → 生图模型必须还在
+    const partial = await call(
+      'PUT', `/api/providers/${id}`,
+      {
+        name: '部分更新语义',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        models: ['chat-m'],
+        notes: '只改了备注',
+      },
+      { cookie },
+    );
+    expect(partial.statusCode).toBe(200);
+    expect(partial.json().provider.imageModels).toEqual(['gpt-image-2']);
+    expect(partial.json().provider.notes).toBe('只改了备注');
+
+    // 显式传空数组 → 清空
+    const cleared = await call(
+      'PUT', `/api/providers/${id}`,
+      {
+        name: '部分更新语义',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        models: ['chat-m'],
+        imageModels: [],
+      },
+      { cookie },
+    );
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().provider.imageModels).toBeUndefined();
+
+    await call('DELETE', `/api/providers/${id}`, undefined, { cookie });
   });
 
   it('anthropic 协议没有 effort 概念，明确返回 400', async () => {
@@ -817,6 +912,491 @@ describe('冒烟：网关', () => {
 
     const stats = await call('GET', '/api/stats', undefined, { cookie });
     expect(stats.json().total).toBeGreaterThan(0);
+  });
+});
+
+describe('冒烟：生图直通（/v1/images/*）', () => {
+  /**
+   * 这一组钉住三条**实测结论**，任何一条被改回去都会立刻红：
+   *
+   * 1. 上游可能只返回 `data[].url`，而 Codex 的 `ImageData.b64_json` 是必填字段
+   *    （`codex-api/src/images.rs`）。网关必须下载并内联，否则 Codex 侧解码失败。
+   * 2. `apiType` 描述对话协议，不描述"有没有 Images 端点"：实测 `responses` 类型的
+   *    OpenDesign 能生图、`openai` 类型的另一家不能。不能按 `openai` 过滤。
+   * 3. 生图没有协议转换器，被拒时的文案不能说"开启跨协议转发就能解决"。
+   *
+   * 本组用例自建自删供应商，不依赖也不污染其它用例对默认供应商的假设。
+   */
+  const createdIds: string[] = [];
+
+  async function createImageProvider(
+    name: string,
+    apiType: 'openai' | 'responses' | 'anthropic',
+    imageModels: string[],
+  ): Promise<{ id: string; providerKey: string }> {
+    const response = await call(
+      'POST',
+      '/api/providers',
+      {
+        name,
+        apiType,
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-image',
+        // 生图模型单独配置：不进 models，因此不会出现在 Codex 的 /model 列表里
+        models: [],
+        imageModels,
+      },
+      { cookie },
+    );
+    expect(response.statusCode).toBe(201);
+    const body = response.json().provider;
+    createdIds.push(body.id);
+    return { id: body.id, providerKey: body.providerKey };
+  }
+
+  /** 起一个隔离实例：用于构造"只有某类供应商"这类主实例里不存在的状态。 */
+  async function withIsolated(
+    run: (tool: {
+      inject: (options: Parameters<FastifyInstance['inject']>[0]) => Promise<{
+        statusCode: number;
+        headers: Record<string, unknown>;
+        json: () => any;
+      }>;
+      cookie: { cookie: string };
+      gatewayToken: string;
+    }) => Promise<void>,
+  ): Promise<void> {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llmapi-img-'));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'llmapi-imgh-'));
+    const config = testConfig(dir, home);
+    const logger = createLogger('error');
+    const ctx = createContext(config, logger);
+    await bootstrapIdentity(config, ctx.paths, ctx.identity, logger, ctx.setup);
+    const isolated = await buildApp({ ctx });
+    await isolated.ready();
+    try {
+      const login = await isolated.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        payload: { username: 'admin', password: PASSWORD },
+      });
+      const sessionCookie = { cookie: String(login.headers['set-cookie']).split(';')[0] };
+      const tokenResponse = await isolated.inject({
+        method: 'POST',
+        url: '/api/gateway/token',
+        headers: sessionCookie,
+      });
+      await run({
+        inject: (options) => isolated.inject(options) as never,
+        cookie: sessionCookie,
+        gatewayToken: tokenResponse.json().token as string,
+      });
+    } finally {
+      await isolated.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  async function isolatedProvider(
+    inject: (options: never) => Promise<{ json: () => any }>,
+    cookie: { cookie: string },
+    payload: Record<string, unknown>,
+  ): Promise<{ id: string; providerKey: string }> {
+    const response = (await inject({
+      method: 'POST',
+      url: '/api/providers',
+      headers: cookie,
+      payload,
+    } as never)) as { statusCode: number; json: () => any };
+    expect(response.statusCode).toBe(201);
+    return response.json().provider;
+  }
+
+  afterEach(async () => {
+    // 共享同一个服务实例：留下的供应商会污染后续用例（默认供应商、别名列表断言）
+    for (const id of createdIds.splice(0)) {
+      await call('DELETE', `/api/providers/${id}`, undefined, { cookie });
+    }
+  });
+
+  it('别名生图：上游只给 url，网关内联成 b64_json', async () => {
+    resetImageStats();
+    const provider = await createImageProvider('Image Mock', 'openai', ['gpt-image-2']);
+
+    const response = await call(
+      'POST',
+      '/v1/images/generations',
+      {
+        model: `lam-${provider.providerKey}/gpt-image-2`,
+        prompt: 'a red fox',
+        size: '1024x1024',
+      },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    // 这就是 Codex 需要的字段：没有它整块响应解码失败
+    expect(typeof body.data[0].b64_json).toBe('string');
+    expect(body.data[0].b64_json.length).toBeGreaterThan(0);
+    // 原始 url 保留下来，便于对照上游真实响应排查
+    expect(typeof body.data[0].url).toBe('string');
+    // 生成 1 次 + 网关自己下载 1 次
+    expect(imageStats.generationRequests).toBe(1);
+    expect(imageStats.assetDownloads).toBe(1);
+    // 请求体透传未被改写
+    expect(body.data[0].echo_model).toBe('gpt-image-2');
+    expect(body.data[0].echo_prompt).toBe('a red fox');
+  });
+
+  it('上游本来就返 b64_json 时不做下载', async () => {
+    resetImageStats();
+    const provider = await createImageProvider('Image Inline', 'responses', ['inline-gpt-image-2']);
+
+    const response = await call(
+      'POST',
+      '/v1/images/generations',
+      { model: `lam-${provider.providerKey}/inline-gpt-image-2`, prompt: 'x' },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data[0].b64_json.length).toBeGreaterThan(0);
+    // 关键：零额外开销。为了"统一形状"白下载一次是没必要的
+    expect(imageStats.assetDownloads).toBe(0);
+  });
+
+  it('responses 类型的供应商也能生图（apiType 不等于能否生图）', async () => {
+    // 实测：本机 opendesign 是 responses 类型却真的能生图；按 openai 过滤会漏掉它。
+    await withIsolated(async ({ inject, cookie, gatewayToken: token }) => {
+      const provider = await isolatedProvider(
+        inject as never,
+        cookie,
+        {
+          name: 'Resp Only',
+          apiType: 'responses',
+          baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+          apiKey: 'sk-r',
+          models: [],
+          imageModels: ['gpt-image-2'],
+        },
+      );
+      const response = (await inject({
+        method: 'POST',
+        url: '/v1/images/generations',
+        headers: { authorization: `Bearer ${token}` },
+        payload: { model: `lam-${provider.providerKey}/gpt-image-2`, prompt: 'a fox' },
+      } as never)) as { statusCode: number; json: () => any };
+      expect(response.statusCode).toBe(200);
+      expect(response.json().data[0].b64_json.length).toBeGreaterThan(0);
+    });
+  });
+
+  it('/images/edits 透传 images 数组与 prompt', async () => {
+    const provider = await createImageProvider('Image Edits', 'openai', ['gpt-image-2']);
+    const images = [{ image_url: 'data:image/png;base64,Zm9v' }];
+
+    const response = await call(
+      'POST',
+      '/v1/images/edits',
+      { model: `lam-${provider.providerKey}/gpt-image-2`, prompt: 'add a hat', images },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.data[0].echo_prompt).toBe('add a hat');
+    // 数组原样透传，网关不解析图片内容
+    expect(body.data[0].echo_images).toEqual(images);
+    expect(typeof body.data[0].b64_json).toBe('string');
+  });
+
+  it('anthropic 供应商接到生图请求返回 501，且文案不提协议转换', async () => {
+    const provider = await createImageProvider('Image Anthropic', 'anthropic', ['claude-x']);
+    const response = await call(
+      'POST',
+      '/v1/images/generations',
+      { model: `lam-${provider.providerKey}/claude-x`, prompt: 'x' },
+      { authorization: `Bearer ${gatewayToken}` },
+    );
+    expect(response.statusCode).toBe(501);
+    const body = response.json();
+    expect(body.error.messageKey).toBe('gateway.forward.imageNeedsSupportedProvider');
+    // 生图没有转换器：提示"开启跨协议转发"只会把用户引向错误的方向
+    expect(body.error.message).not.toContain('协议转换');
+    expect(body.error.details?.canEnableConversion).toBeUndefined();
+  });
+
+  it('只有 anthropic 供应商时：裸名 400、别名 501', async () => {
+    await withIsolated(async ({ inject, cookie, gatewayToken: token }) => {
+      const provider = await isolatedProvider(
+        inject as never,
+        cookie,
+        {
+          name: 'Only Claude',
+          apiType: 'anthropic',
+          baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+          apiKey: 'sk-c',
+          models: ['claude-x'],
+          imageModels: ['claude-x'],
+        },
+      );
+      // 裸模型名：选路阶段就没有可用供应商 → 400
+      const bare = (await inject({
+        method: 'POST',
+        url: '/v1/images/generations',
+        headers: { authorization: `Bearer ${token}` },
+        payload: { model: 'gpt-image-2', prompt: 'x' },
+      } as never)) as { statusCode: number; json: () => any };
+      expect(bare.statusCode).toBe(400);
+      expect(bare.json().error.messageKey).toBe('gateway.selection.noEnabledImageProvider');
+
+      // 别名明确指向 anthropic：选路成功，由发请求前的协议校验拒绝 → 501
+      const viaAlias = (await inject({
+        method: 'POST',
+        url: '/v1/images/generations',
+        headers: { authorization: `Bearer ${token}` },
+        payload: { model: `lam-${provider.providerKey}/claude-x`, prompt: 'x' },
+      } as never)) as { statusCode: number; json: () => any };
+      expect(viaAlias.statusCode).toBe(501);
+      expect(viaAlias.json().error.messageKey).toBe(
+        'gateway.forward.imageNeedsSupportedProvider',
+      );
+    });
+  });
+
+  it('图片链接拿到的不是图片时返回 502，而不是把坏数据交给客户端', async () => {
+    // 预签名链接过期时的常见形态：状态 200 + HTML 错误页。
+    // 原样透传的话 Codex 只会报"缺 b64_json"，排查方向完全跑偏。
+    await withIsolated(async ({ inject, cookie, gatewayToken: token }) => {
+      const provider = await isolatedProvider(
+        inject as never,
+        cookie,
+        {
+          name: 'Broken Asset',
+          apiType: 'openai',
+          baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+          apiKey: 'sk-b',
+          models: [],
+          imageModels: ['broken-asset-model'],
+        },
+      );
+      const response = (await inject({
+        method: 'POST',
+        url: '/v1/images/generations',
+        headers: { authorization: `Bearer ${token}` },
+        payload: { model: `lam-${provider.providerKey}/broken-asset-model`, prompt: 'x' },
+      } as never)) as { statusCode: number; json: () => any };
+      expect(response.statusCode).toBe(502);
+      expect(response.json().error.code).toBe('image_inline_failed');
+    });
+  });
+
+  it('生图路径未带网关令牌返回 401', async () => {
+    const response = await call('POST', '/v1/images/generations', {
+      model: 'gpt-image-2',
+      prompt: 'x',
+    });
+    expect(response.statusCode).toBe(401);
+  });
+
+  it('生图 5xx 时回退到下一家（复刻实测的 503 → 成功场景）', async () => {
+    // 默认供应商指向永远 500 的上游，另一家正常 → 应回退成功。
+    // 实测里这正是"默认供应商没有生图渠道（503）→ 退到 opendesign 成功"的路径。
+    await withIsolated(async ({ inject, cookie, gatewayToken: token }) => {
+      const good = await isolatedProvider(inject as never, cookie, {
+        name: 'Good Images',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-g',
+        models: [],
+        imageModels: ['gpt-image-2'],
+      });
+      const bad = await isolatedProvider(inject as never, cookie, {
+        name: 'Bad Images',
+        apiType: 'openai',
+        baseUrl: `http://127.0.0.1:${FAIL_PORT}`,
+        apiKey: 'sk-b',
+        models: [],
+        imageModels: ['gpt-image-2'],
+      });
+      // 让失败那家排最前并成为默认供应商
+      await inject({
+        method: 'PUT',
+        url: '/api/providers/order',
+        headers: cookie,
+        payload: { ids: [bad.id, good.id] },
+      } as never);
+      await inject({
+        method: 'PUT',
+        url: '/api/settings/default',
+        headers: cookie,
+        payload: { providerId: bad.id, model: 'gpt-image-2' },
+      } as never);
+
+      const response = (await inject({
+        method: 'POST',
+        url: '/v1/images/generations',
+        headers: { authorization: `Bearer ${token}` },
+        payload: { model: 'gpt-image-2', prompt: 'x' },
+      } as never)) as {
+        statusCode: number;
+        headers: Record<string, unknown>;
+        json: () => any;
+      };
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['x-llmapi-fallback']).toBe('1');
+      expect(typeof response.json().data[0].b64_json).toBe('string');
+    });
+  });
+
+  it('声明了该模型的供应商优先于默认供应商', async () => {
+    // 隔离实例：默认供应商是另一家 openai（priority 更小），
+    // 但只有新建的这家把 gpt-image-2 登记进了 imageModels → 应选它。
+    await withIsolated(async ({ inject, cookie, gatewayToken: token }) => {
+      const def = await isolatedProvider(inject as never, cookie, {
+        name: 'Default Chat',
+        apiType: 'openai',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-d',
+        models: ['chat-only'],
+      });
+      const declaring = await isolatedProvider(inject as never, cookie, {
+        name: 'Image Declaring',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-i',
+        models: [],
+        imageModels: ['gpt-image-2'],
+      });
+      await inject({
+        method: 'PUT',
+        url: '/api/settings/default',
+        headers: cookie,
+        payload: { providerId: def.id, model: 'chat-only' },
+      } as never);
+
+      const response = (await inject({
+        method: 'POST',
+        url: '/v1/images/generations',
+        headers: { authorization: `Bearer ${token}` },
+        payload: { model: 'gpt-image-2', prompt: 'x' },
+      } as never)) as { statusCode: number };
+      expect(response.statusCode).toBe(200);
+
+      // 用请求日志里的 providerName 判断真的打到了哪家
+      const logs = (await inject({
+        method: 'GET',
+        url: '/api/logs?limit=10',
+        headers: cookie,
+      } as never)) as { json: () => any };
+      const imageLog = (logs.json().logs as Array<{ path: string; providerName: string }>).find(
+        (item) => item.path === '/v1/images/generations',
+      );
+      expect(imageLog?.providerName).toBe('Image Declaring');
+      expect(declaring.id).toBeTruthy();
+    });
+  });
+
+  it('生图模型不进别名列表，因此不会出现在 Codex 的模型目录里', async () => {
+    // 这是本次拆分的**核心目的**：把 gpt-image-2 配进 imageModels 后，
+    // 它不能出现在 /api/models 的别名里，也不能出现在生成的 Codex 目录里。
+    // 否则用户能在 Codex 的 /model 里选中它去聊天，那个请求必然被上游拒绝。
+    await withIsolated(async ({ inject, cookie }) => {
+      await isolatedProvider(inject as never, cookie, {
+        name: 'Split Models',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-s',
+        models: ['chat-model'],
+        imageModels: ['gpt-image-2'],
+      });
+
+      const models = (await inject({
+        method: 'GET',
+        url: '/api/models',
+        headers: cookie,
+      } as never)) as { json: () => any };
+      const aliasNames = (models.json().aliases as Array<{ alias: string }>).map((a) => a.alias);
+      expect(aliasNames).toContain('lam-split-models/chat-model');
+      // 生图模型没有别名
+      expect(aliasNames.some((alias) => alias.includes('gpt-image-2'))).toBe(false);
+
+      // 目录里也不能有它。apply 需要网关令牌，先建一个。
+      await inject({ method: 'POST', url: '/api/gateway/token', headers: cookie } as never);
+      const apply = (await inject({
+        method: 'POST',
+        url: '/api/agents/codex/apply',
+        headers: cookie,
+      } as never)) as { statusCode: number; json: () => any };
+      expect(apply.statusCode).toBe(200);
+      // apply 的 `files[].values` 是按 key 记的写入值，不含生成文件的整体内容；
+      // 目录内容要读磁盘上真正写给 Codex 的那份。
+      const catalogFile = (apply.json().binding.files as Array<{ role: string; path: string }>).find(
+        (file) => file.role === 'catalog',
+      );
+      expect(catalogFile?.path).toBeTruthy();
+      const catalogText = fs.readFileSync(catalogFile!.path, 'utf8');
+      expect(catalogText).not.toContain('gpt-image-2');
+      expect(catalogText).toContain('chat-model');
+    });
+  });
+
+  it('生图模型填进 models 时会被移出（不会污染 Codex 目录）', async () => {
+    // 接口是公开的、也允许脚本提交，所以约束必须在服务端：
+    // 同一个模型同时出现在两个框里时，按生图处理——用户意图明确，且不丢数据。
+    await withIsolated(async ({ inject, cookie }) => {
+      const response = (await inject({
+        method: 'POST',
+        url: '/api/providers',
+        headers: cookie,
+        payload: {
+          name: 'Mixed',
+          apiType: 'responses',
+          baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+          apiKey: 'sk-m',
+          models: ['chat-model', 'gpt-image-2'],
+          imageModels: ['gpt-image-2'],
+        },
+      } as never)) as { statusCode: number; json: () => any };
+      expect(response.statusCode).toBe(201);
+      const provider = response.json().provider;
+      // 从对话列表里被剔除
+      expect(provider.models).toEqual(['chat-model']);
+      expect(provider.imageModels).toEqual(['gpt-image-2']);
+    });
+  });
+
+  it('生图模型只登记在 imageModels 时，对话路径的别名会报"未声明模型"', async () => {
+    // 两份清单是分开的：imageModels 里的模型不发布别名。
+    // 用 lam- 别名走生图路径可用；走对话路径必须 400（而不是被误当成对话模型）。
+    await withIsolated(async ({ inject, cookie, gatewayToken: token }) => {
+      const provider = await isolatedProvider(inject as never, cookie, {
+        name: 'Image Only',
+        apiType: 'responses',
+        baseUrl: `http://127.0.0.1:${MOCK_PORT}`,
+        apiKey: 'sk-o',
+        models: ['chat-model'],
+        imageModels: ['gpt-image-2'],
+      });
+
+      // 生图路径下同一个别名可用
+      const imageOk = (await inject({
+        method: 'POST',
+        url: '/v1/images/generations',
+        headers: { authorization: `Bearer ${token}` },
+        payload: { model: `lam-${provider.providerKey}/gpt-image-2`, prompt: 'x' },
+      } as never)) as { statusCode: number };
+      expect(imageOk.statusCode).toBe(200);
+
+      // 对话路径下找不到它（models 里没有）
+      const chatFail = (await inject({
+        method: 'POST',
+        url: '/v1/responses',
+        headers: { authorization: `Bearer ${token}` },
+        payload: { model: `lam-${provider.providerKey}/gpt-image-2`, input: 'hi' },
+      } as never)) as { statusCode: number; json: () => any };
+      expect(chatFail.statusCode).toBe(400);
+      expect(chatFail.json().error.messageKey).toBe('gateway.alias.modelNotDeclared');
+    });
   });
 });
 

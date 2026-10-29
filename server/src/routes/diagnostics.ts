@@ -10,6 +10,8 @@ import { ProviderService } from '../services/providers';
 import { listAliases } from '../domain/aliases';
 import {
   GATEWAY_PATHS,
+  acceptedApiTypes,
+  acceptsApiType,
   requiredApiType,
   upstreamPathFor,
   upstreamUrl,
@@ -144,6 +146,10 @@ export function registerDiagnosticsRoutes(
       }
 
       const required = requiredApiType(path);
+      // "能不能承接"一律走与网关同一个函数。生图路径接受的协议集合是 openai ∪ responses，
+      // 若这里图省事写成 `apiType === required`，就会把能生图的 responses 供应商
+      // 误报成"将被拒绝"——诊断与实际行为不一致比没有诊断更糟。
+      const accepted = acceptedApiTypes(path);
       const describe = (item: { provider: typeof records[number]; upstreamModel: string; modelRewritten: boolean; convertResponsesToChat: boolean; reason?: string }) => ({
         providerId: item.provider.id,
         providerName: item.provider.name,
@@ -159,8 +165,7 @@ export function registerDiagnosticsRoutes(
         authHeaderKind:
           item.provider.apiType === 'anthropic' ? 'x-api-key' : 'authorization: Bearer',
         // 让调用方能直接看出"这次请求会不会因为协议不匹配被拒"
-        apiTypeMatchesPath:
-          required === null || item.provider.apiType === required,
+        apiTypeMatchesPath: acceptsApiType(path, item.provider.apiType),
       });
 
       if (selection.mode === 'invalid') {
@@ -168,6 +173,7 @@ export function registerDiagnosticsRoutes(
           ok: false,
           path,
           requiredApiType: required,
+          acceptedApiTypes: accepted,
           protocolConversion: settings.protocolConversion,
           reason: selection.reason,
           // 被排除的供应商：这是"明明有几家供应商却说没有"的唯一解释来源
@@ -182,7 +188,7 @@ export function registerDiagnosticsRoutes(
 
       // 真实网关会在发请求前再做一次协议兜底校验，不匹配就 501。
       // 诊断必须复现这个结论，否则用户会以为"诊断说能走"就一定能走。
-      const primaryMatches = required === null || selection.primary.provider.apiType === required;
+      const primaryMatches = acceptsApiType(path, selection.primary.provider.apiType);
       const allowedByConversion =
         selection.primary.convertResponsesToChat ||
         // 自动开启后网关会按"开关已打开"重新校验，这里用同一个口径
@@ -192,6 +198,8 @@ export function registerDiagnosticsRoutes(
         ok: primaryMatches || allowedByConversion,
         path,
         requiredApiType: required,
+        // 生图路径会接受多家协议，单独给出集合，避免调用方误以为"不等于 required 就是被拒"
+        acceptedApiTypes: accepted,
         protocolConversion: settings.protocolConversion,
         // 让调用方知道"这次请求会改动你的设置"
         wouldAutoEnableConversion: wouldAutoEnable,

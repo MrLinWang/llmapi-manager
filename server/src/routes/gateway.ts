@@ -147,6 +147,9 @@ export function registerGatewayRoutes(
       // 所以必须在发请求前拒绝，否则 Responses 请求会被发到 Chat 上游。
       // 第三个参数传的是用户开关而不是 candidate 的转换标记：这里判断的是"这种组合
       // 是否允许"，转换与否由每个候选自己的 convertResponsesToChat 决定。
+      //
+      // 生图路径在 assertApiTypeMatch 内部走另一套判据（openai 或 responses 都收），
+      // 因为"能不能生图"取决于上游有没有 Images 端点，与它的对话 apiType 不是一回事。
       assertApiTypeMatch(selection.primary.provider, path, settings.protocolConversion);
 
       const attempt = async (

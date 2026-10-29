@@ -1,5 +1,5 @@
 import { resolveModel } from '../domain/aliases';
-import { requiredApiType, type GatewayPath } from './forward';
+import { acceptsApiType, acceptedApiTypes, isImagePath, requiredApiType, type GatewayPath } from './forward';
 import { APPROVAL_REVIEW_MODEL_NAME, type TenantSettings } from '../domain/settings';
 import type { ProviderRecord } from '../domain/provider';
 import { translate, type MessageKey, type MessageParams } from '../i18n';
@@ -33,6 +33,7 @@ export type CandidateReason =
   | 'alias' // 别名明确指向（`lam-provider/model`）
   | 'default-provider' // 租户设置的默认供应商
   | 'approval-placeholder' // Codex 审批占位名被改写成用户配置的模型
+  | 'image-model' // 生图：该供应商在自己的模型列表里声明了这个模型名
   | 'priority'; // 按协议匹配优先、再按 priority 排序取第一
 
 export type Selection =
@@ -92,7 +93,8 @@ export function selectCandidates(
   path: GatewayPath,
   approvalReview: boolean,
 ): Selection {
-  const resolution = resolveModel(requested, providers);
+  // 生图路径要查 imageModels 而不是 models，别名解析也一样（两者的模型清单是分开的两份）
+  const resolution = resolveModel(requested, providers, { imagePath: isImagePath(path) });
   if (resolution.kind === 'invalid') {
     return {
       mode: 'invalid',
@@ -123,6 +125,14 @@ export function selectCandidates(
       // 别名是明确指向，不做故障转移
       fallbacks: [],
     };
+  }
+
+  // 生图路径有自己的一套选路（见 selectImageCandidate）。
+  // 必须在别名分支**之后**、审批映射分支**之前**：
+  // - 之后：别名是明确指向，语义优先，交给上面的分支返回；
+  // - 之前：审批占位名映射只对对话请求有意义，生图请求不该被它改写模型名。
+  if (isImagePath(path)) {
+    return selectImageCandidate(requested, providers, settings, path);
   }
 
   // 「Approve for me」的模型映射必须**先于**协议过滤。
@@ -303,6 +313,103 @@ export function selectCandidates(
       convertResponsesToChat: needsConversion(item, path, settings),
     })),
     excluded,
+  };
+}
+
+/**
+ * 生图路径的选路。
+ *
+ * 与对话路径最大的区别：**不按 `apiType` 选**。`apiType` 描述的是这家上游的对话协议，
+ * 而"能不能生图"取决于它有没有 Images 端点——这两件事实测会分离：
+ * 本机 `opendesign` 是 `responses` 类型却能生图（200），`wllapi` 是 `openai` 类型却
+ * 生不了（503 无可用渠道）。按 `apiType === 'openai'` 过滤恰好会选中错的那家。
+ * 所以可用集合是 openai ∪ responses（见 `acceptedApiTypes`），谁能真正承接由上游决定。
+ *
+ * 三档优先级（档内按 priority）：
+ * 1. `imageModels` 里声明了这个模型名的（最明确的信号：这家自己承认能生这个图）；
+ * 2. 租户的默认供应商（用户已经表达过"默认走它"）；
+ * 3. 其余按 priority。
+ *
+ * 注意这里看的是 `imageModels` 而**不是** `models`：生图模型单独配置，
+ * 不进 `models` 就不会出现在 Codex 的 `/model` 列表里（见 `ProviderRecord.imageModels`）。
+ * 第三档存在的理由：很多上游没把生图模型登记进自己的模型列表，
+ * 只要它实现了 Images 端点、路径能走通就应当可用——由上游决定成败。
+ *
+ * 生图**永不转换**：Images 协议没有 Chat 等价物。
+ */
+function selectImageCandidate(
+  requested: string,
+  providers: ProviderRecord[],
+  settings: TenantSettings,
+  path: GatewayPath,
+): Selection {
+  const usable = providers
+    .filter((item) => item.enabled && acceptsApiType(path, item.apiType))
+    .sort((a, b) => a.priority - b.priority);
+
+  if (usable.length === 0) {
+    return {
+      mode: 'invalid',
+      reason: translate('zh', 'gateway.selection.noEnabledImageProvider'),
+      reasonKey: 'gateway.selection.noEnabledImageProvider',
+      // 被排除的供应商必须列出来：否则用户看到"没有可用的生图供应商"，
+      // 而界面上明明有几家（只是都是 anthropic）。
+      excluded: providers
+        .filter((item) => !item.enabled || !acceptsApiType(path, item.apiType))
+        .map((item) => ({
+          providerId: item.id,
+          providerName: item.name,
+          reason: !item.enabled
+            ? translate('zh', 'gateway.selection.providerDisabled')
+            : translate('zh', 'gateway.selection.protocolMismatch', {
+                required: acceptedApiTypes(path).join(' / '),
+                apiType: item.apiType,
+              }),
+        })),
+    };
+  }
+
+  const declaring = usable.filter((item) => (item.imageModels ?? []).includes(requested));
+  const defaultProvider = usable.find((item) => item.id === settings.defaultProviderId);
+
+  let primaryProvider: ProviderRecord;
+  let reason: CandidateReason;
+  if (declaring.length > 0) {
+    // 声明了该模型的多家之间仍优先默认供应商——用户的选择不该被 priority 覆盖
+    primaryProvider =
+      declaring.find((item) => item.id === settings.defaultProviderId) ?? declaring[0];
+    // "它声明了这个模型"才是这次选路真正起作用的条件，即使它同时是默认供应商
+    //（默认供应商可能根本没声明）。用户要排查看的是前者。
+    reason = 'image-model';
+  } else if (defaultProvider) {
+    primaryProvider = defaultProvider;
+    reason = 'default-provider';
+  } else {
+    primaryProvider = usable[0];
+    reason = 'priority';
+  }
+
+  return {
+    mode: 'default',
+    primary: {
+      provider: primaryProvider,
+      // 裸名即上游模型名，网关不改写；Codex 硬编码的就是 `gpt-image-2`
+      upstreamModel: requested,
+      modelRewritten: false,
+      convertResponsesToChat: false,
+      reason,
+    },
+    // 与默认模式一致：主供应商 5xx 时按顺序换一家再试一次。
+    // 实测里这条回退就是"默认供应商建了但没有生图渠道（503）→ 退到另一家成功"的路径。
+    fallbacks: usable
+      .filter((item) => item.id !== primaryProvider.id)
+      .map((item) => ({
+        provider: item,
+        upstreamModel: requested,
+        modelRewritten: false,
+        convertResponsesToChat: false,
+        reason,
+      })),
   };
 }
 

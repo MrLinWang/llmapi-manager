@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { resolveModel } from '../src/domain/aliases';
-import { GATEWAY_PATHS, requiredApiType, upstreamUrl } from '../src/gateway/forward';
+import { GATEWAY_PATHS, acceptedApiTypes, acceptsApiType, requiredApiType, upstreamUrl } from '../src/gateway/forward';
 import { API_TYPES, apiTypeLabel } from '../src/domain/provider';
 import { hashGatewayToken, tokenMatches } from '../src/gateway/token';
 import type { ProviderRecord } from '../src/domain/provider';
@@ -66,6 +66,33 @@ describe('协议匹配', () => {
       expect(requiredApiType(path)).not.toBeUndefined();
     }
     expect(GATEWAY_PATHS).toContain('/responses');
+  });
+
+  it('生图路径也在清单里，且声明为 OpenAI 体系', () => {
+    expect(GATEWAY_PATHS).toContain('/images/generations');
+    expect(GATEWAY_PATHS).toContain('/images/edits');
+    expect(requiredApiType('/images/generations')).toBe('openai');
+    expect(requiredApiType('/images/edits')).toBe('openai');
+  });
+
+  it('生图路径接受 openai 与 responses，anthropic 不接受', () => {
+    // 这条钉住一个**实测结论**：apiType 描述对话协议，不描述"有没有 Images 端点"。
+    // 本机 opendesign 是 responses 类型却能生图（200），wllapi 是 openai 类型却生不了（503）。
+    // 若这里退化成 `[requiredApiType(path)]`，网关就会把唯一能用的那家排除掉。
+    for (const path of ['/images/generations', '/images/edits'] as const) {
+      expect(acceptedApiTypes(path)).toEqual(['openai', 'responses']);
+      expect(acceptsApiType(path, 'openai')).toBe(true);
+      expect(acceptsApiType(path, 'responses')).toBe(true);
+      expect(acceptsApiType(path, 'anthropic')).toBe(false);
+    }
+  });
+
+  it('对话路径仍然只接受自己那一种协议', () => {
+    for (const path of ['/chat/completions', '/messages', '/responses'] as const) {
+      expect(acceptedApiTypes(path)).toEqual([requiredApiType(path)]);
+    }
+    expect(acceptsApiType('/messages', 'openai')).toBe(false);
+    expect(acceptsApiType('/responses', 'openai')).toBe(false);
   });
 });
 

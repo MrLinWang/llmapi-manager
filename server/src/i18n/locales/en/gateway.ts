@@ -16,6 +16,8 @@ export const enGateway: typeof zhGateway = {
     unknownProvider: 'Unknown provider key: {{key}}',
     providerDisabled: 'Provider {{name}} is disabled',
     modelNotDeclared: 'Provider {{name}} does not declare model {{model}}',
+    modelIsNotImageModel:
+      'Model {{model}} is in the chat model list of provider {{name}}, but image endpoints only accept image models — move it from "chat models" to "image models"',
   },
   selection: {
     providerDisabled: 'Disabled',
@@ -24,6 +26,8 @@ export const enGateway: typeof zhGateway = {
       'Protocol mismatch: needs {{required}}, this one is {{apiType}} (conversion only supports responses→chat, and the switch is off or the direction does not apply)',
     noEnabledProviderOfType: 'No enabled {{required}} provider; add and enable one in the console first',
     noEnabledProvider: 'No enabled provider; add and enable one in the console first',
+    noEnabledImageProvider:
+      'No usable image provider; add and enable an OpenAI-compatible (Chat) or (Responses) provider first',
     approvalNeedsConversionOff:
       'Review model {{model}} belongs to provider {{name}} ({{apiType}}), but this request goes to {{path}} (needs {{required}}) and cross-protocol forwarding is off',
     approvalModelMissing:
@@ -44,6 +48,11 @@ export const enGateway: typeof zhGateway = {
       'Cannot convert {{path}} → {{apiType}}: only Responses → Chat is supported, and provider {{name}} is {{apiType}}',
     conversionDisabled:
       'Protocol conversion is off: {{path}} needs an {{required}} upstream, but provider {{name}} is {{apiType}}. Enable "cross-protocol forwarding" in Settings to let the gateway convert the Responses request into a Chat request',
+
+    imageNeedsSupportedProvider:
+      'Image endpoint {{path}} needs a {{accepted}} provider, but {{name}} is {{apiType}}. Add or enable a provider that implements the Images API',
+    imageInlineFailed:
+      'The upstream returned image URLs and the gateway could not download them ({{detail}})',
   },
   convert: {
     inputElementInvalid: 'Every element in the input array must be an object or a string',

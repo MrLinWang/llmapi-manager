@@ -174,6 +174,9 @@ async function main(): Promise<void> {
         apiType: record.apiType,
         baseUrl: record.baseUrl,
         models: record.models,
+        // 全量更新必须带上生图模型，否则同步一次能力表就把生图配置清空。
+        // 服务层对未传有兜底，这里显式带上是为了让意图可读。
+        imageModels: record.imageModels,
         modelCapabilities: next,
       });
     }

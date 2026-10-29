@@ -11,7 +11,12 @@ import {
 import type { RequestLogRecord } from '../domain/requestLog';
 import { AppError } from '../http/errors';
 
-export type GatewayPath = '/chat/completions' | '/messages' | '/responses';
+export type GatewayPath =
+  | '/chat/completions'
+  | '/messages'
+  | '/responses'
+  | '/images/generations'
+  | '/images/edits';
 
 export interface ForwardTarget {
   /**
@@ -38,26 +43,76 @@ export const GATEWAY_PATHS: GatewayPath[] = [
   '/chat/completions',
   '/messages',
   '/responses',
+  '/images/generations',
+  '/images/edits',
 ];
+
+/**
+ * 生图路径（OpenAI Images 协议）。
+ *
+ * 与三条对话路径的关键区别：**它没有"协议族"意义上的对应关系**。
+ * `apiType` 描述的是这家上游的对话协议（Chat / Responses / Messages），
+ * 而不是"它有没有实现 Images 端点"——这两件事已经被实测证明会分离：
+ * 本机 `opendesign` 是 `responses` 类型却能生图（200），
+ * `wllapi` 是 `openai` 类型却生不了（503 无可用渠道）。
+ *
+ * 所以 image 路径不能用 `requiredApiType` + 严格相等来选路/放行，
+ * 否则恰好会把唯一能用的那家排除掉。可接受协议见 `acceptedApiTypes`。
+ */
+export const IMAGE_GATEWAY_PATHS: readonly GatewayPath[] = [
+  '/images/generations',
+  '/images/edits',
+];
+
+export function isImagePath(path: GatewayPath): boolean {
+  return IMAGE_GATEWAY_PATHS.includes(path);
+}
+
+/**
+ * 该路径能接受哪些上游 `apiType`。
+ *
+ * 对话路径是严格一一对应（`/v1/messages` 只收 anthropic 等），生图路径则收
+ * `openai` 与 `responses` 两家：它们同属 OpenAI 体系、都用 `Authorization: Bearer`，
+ * 且都可能有 Images 端点。`anthropic` 用 `x-api-key`、没有 Images 端点，不接受。
+ *
+ * 这是"能否承接"的**唯一**判据：选路过滤、发请求前的兜底校验、诊断结论都走它，
+ * 不要在别处再写一份 `apiType === 'openai'` 的判断。
+ */
+export function acceptedApiTypes(path: GatewayPath): readonly ProviderRecord['apiType'][] {
+  if (isImagePath(path)) return ['openai', 'responses'];
+  const required = requiredApiType(path);
+  return required === null ? [] : [required];
+}
+
+export function acceptsApiType(
+  path: GatewayPath,
+  apiType: ProviderRecord['apiType'],
+): boolean {
+  return acceptedApiTypes(path).includes(apiType);
+}
 
 /**
  * 每条网关路径要求的上游协议：
  * - /v1/chat/completions → openai
  * - /v1/messages          → anthropic
  * - /v1/responses         → responses（OpenAI Responses API）
+ * - /v1/images/*          → openai（Images 协议属于 OpenAI 体系）
  *
- * 这是**默认**要求，不匹配一律 501。唯一的放宽是 `protocolConversion` 打开后
+ * 对话路径是**默认**要求，不匹配一律 501。唯一的放宽是 `protocolConversion` 打开后
  * `/v1/responses → openai`（见 assertApiTypeMatch），因为只有这一个方向有转换器；
  * 其余组合即便开关打开也仍然拒绝，别把这里当成"任意协议互转"的入口。
  *
- * 返回 null 只表示"该路径不限制协议"，现在没有任何路径用它；
- * 之所以保留，是因为 /v1/responses 曾经就是靠 null 走直通，结果把 Responses 请求
- * 发给了只支持 Chat 的上游。将来真要为某条路径放宽，必须能说清为什么不会踩同一个坑。
+ * **生图路径不要用本函数的返回值做放行判断。** 它只表达"这条路径属于哪个协议族"，
+ * 而生图能不能跑取决于上游有没有 Images 端点，与它的对话 `apiType` 无关：
+ * 实测 `responses` 类型的 OpenDesign 能生图、`openai` 类型的另一家不能。
+ * 放行与选路一律走 `acceptsApiType` / `acceptedApiTypes`。
  */
 export function requiredApiType(path: GatewayPath): ProviderRecord['apiType'] | null {
   if (path === '/chat/completions') return 'openai';
   if (path === '/messages') return 'anthropic';
   if (path === '/responses') return 'responses';
+  // Images 属于 OpenAI 体系（Bearer 鉴权），但见上面的警告：别拿它做放行判断
+  if (isImagePath(path)) return 'openai';
   return null;
 }
 
@@ -414,6 +469,40 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
       }
     }
 
+    // 生图响应归一化：上游可能只给 `data[].url`，而 Codex 的 ImageData.b64_json 是必填字段
+    // （codex-api/src/images.rs 的 ImageData），缺了它整块响应解码失败、工具直接报错。
+    // 下载失败不吞掉：返回 502 并说清原因，比把一条 url 交给 Codex 让它报"缺字段"更好排查。
+    if (isImagePath(path) && !convertRequest) {
+      const normalized = await inlineImageUrls(text, controller.signal);
+      if (!normalized.ok) {
+        const latencyMs2 = Date.now() - startedAt;
+        writeLog(options, {
+          status: 502,
+          latencyMs: latencyMs2,
+          stream: false,
+          error: normalized.error,
+        });
+        if (!options.deferErrorWrite) {
+          reply.statusCode = 502;
+          reply.setHeader('content-type', 'application/json');
+          reply.end(
+            JSON.stringify({
+              error: {
+                code: 'image_inline_failed',
+                message: translate(
+                  options.language ?? 'zh',
+                  'gateway.forward.imageInlineFailed',
+                  { detail: normalized.error },
+                ),
+              },
+            }),
+          );
+        }
+        return { status: 502, stream: false, latencyMs: latencyMs2, error: normalized.error };
+      }
+      text = normalized.text;
+    }
+
     reply.statusCode = 200;
     reply.setHeader('content-type', 'application/json');
     if (options.fallback) reply.setHeader('x-llmapi-fallback', '1');
@@ -450,6 +539,93 @@ export async function forwardOnce(options: ForwardOptions): Promise<ForwardOutco
 }
 
 /**
+ * 单张内联图片的大小上限，与 Codex 的 `MAX_EXECUTOR_GENERATED_IMAGE_BYTES` 对齐
+ * （`codex-rs/ext/image-generation/src/tool.rs`）。超过这个字节数的图片 Codex 自己也会拒，
+ * 网关先拒能给出更清楚的原因，也避免一个大响应把进程内存顶爆。
+ */
+export const IMAGE_INLINE_MAX_BYTES = 32 * 1024 * 1024;
+
+type InlineResult = { ok: true; text: string } | { ok: false; error: string };
+
+/**
+ * 把 OpenAI Images 响应里的 `data[].url` 下载下来，内联成 `b64_json`。
+ *
+ * **为什么需要这一步（实测结论）**：Codex 只认 `data[].b64_json`（`ImageData.b64_json`
+ * 是必填字段），而不少 OpenAI 兼容上游对 `gpt-image-*` 默认返回的就是 `url`
+ * （本机 OpenDesign 实测：原样请求体 → `data[0].keys = ["url","index"]`）。
+ *
+ * **为什么不改成往请求里注入 `response_format: "b64_json"`**：
+ * - 官方 `gpt-image-1` 明确**不认**这个参数，会 400 `unknown_parameter`
+ *   （Azure SDK issue #49965 等），注入会把本来能用的官方上游打死；
+ * - 而实测本机上游又需要它才给 b64。两种上游行为相反，且"注入 → 400 → 降级重试"
+ *   会平白多打一次（生图一次 40 秒以上），时序还不稳定。
+ * 只做响应侧归一化对两类上游都安全：上游本来就返 b64 时**零额外开销**，不下载。
+ *
+ * 解析失败（不是 JSON / 结构不符）不算错误：原样透传，让上游的真实响应到客户端。
+ * 只有在"上游给了 url 但我们取不到图片"时才失败——那是网关新增的中间环节出的问题。
+ */
+async function inlineImageUrls(text: string, signal: AbortSignal): Promise<InlineResult> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: true, text };
+  }
+  if (typeof parsed !== 'object' || parsed === null) return { ok: true, text };
+  const data = (parsed as { data?: unknown }).data;
+  if (!Array.isArray(data)) return { ok: true, text };
+
+  const pending: Array<{ index: number; url: string }> = [];
+  data.forEach((item, index) => {
+    if (typeof item !== 'object' || item === null) return;
+    const entry = item as { url?: unknown; b64_json?: unknown };
+    // 已有 b64 时不动它：上游自己给了我们要的东西，没必要多下一次
+    if (typeof entry.b64_json === 'string' && entry.b64_json !== '') return;
+    if (typeof entry.url === 'string' && entry.url !== '') {
+      pending.push({ index, url: entry.url });
+    }
+  });
+  if (pending.length === 0) return { ok: true, text };
+
+  for (const { index, url } of pending) {
+    let response: Response;
+    try {
+      response = await fetch(url, { signal, redirect: 'follow' });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      return { ok: false, error: `image[${index}] download failed: ${message}` };
+    }
+    if (!response.ok) {
+      return { ok: false, error: `image[${index}] download returned ${response.status}` };
+    }
+    const contentType = response.headers.get('content-type') ?? '';
+    // 预签名链接有时会返回一段 HTML 错误页且状态 200，必须校验类型
+    if (!contentType.toLowerCase().startsWith('image/')) {
+      return {
+        ok: false,
+        error: `image[${index}] download is not an image (content-type: ${contentType || 'unknown'})`,
+      };
+    }
+    let buffer: Buffer;
+    try {
+      buffer = Buffer.from(await response.arrayBuffer());
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      return { ok: false, error: `image[${index}] download failed: ${message}` };
+    }
+    if (buffer.byteLength > IMAGE_INLINE_MAX_BYTES) {
+      return {
+        ok: false,
+        error: `image[${index}] is ${buffer.byteLength} bytes, over the ${IMAGE_INLINE_MAX_BYTES} byte limit`,
+      };
+    }
+    // 保留原 url 字段：Codex 会忽略未知字段，保留它便于用户对照上游原始响应排查
+    (data[index] as { b64_json?: string }).b64_json = buffer.toString('base64');
+  }
+  return { ok: true, text: JSON.stringify(parsed) };
+}
+
+/**
  * 补写被延迟的上游错误响应。
  *
  * `deferErrorWrite` 让 `forwardOnce` 在失败时不碰 reply，好让调用方先判断能否回退；
@@ -483,12 +659,29 @@ export function writeDeferredError(
  *
  * `allowConversion` 是用户开关（不是一个"要不要严格"的权限位）。即便为真也只放过
  * Responses→Chat 这一种组合——别处没有转换器，放过就是把非法请求交给上游。
+ *
+ * 生图路径走 `acceptsApiType`：它接受 openai 与 responses 两家（见那个函数的注释），
+ * 被拒时用**生图专属**文案且不带 `canEnableConversion`——Images 没有转换器，
+ * 提示"开启跨协议转发就能解决"只会把用户引到错误的方向。
  */
 export function assertApiTypeMatch(
   provider: ProviderRecord,
   path: GatewayPath,
   allowConversion = false,
 ): void {
+  if (isImagePath(path)) {
+    if (acceptsApiType(path, provider.apiType)) return;
+    throw new AppError('not_implemented', {
+      key: 'gateway.forward.imageNeedsSupportedProvider',
+      params: {
+        path,
+        apiType: provider.apiType,
+        accepted: acceptedApiTypes(path).join(' / '),
+        name: provider.name,
+      },
+    });
+  }
+
   const required = requiredApiType(path);
   if (required && provider.apiType !== required) {
     // 只有 Responses→Chat 这一个方向有转换器；其余组合仍然拒绝。
