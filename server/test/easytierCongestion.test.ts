@@ -120,6 +120,9 @@ describe('TCP 拥塞控制', () => {
     const stack = new TcpStack({
       localIp: LOCAL_IP, bridgeHost: '127.0.0.1',
       sendIpPacket: sink.fn, retransmitBaseMs: 5_000,
+      // 这组测试验的是 **Reno** 语义（慢启动/拥塞避免/砍半）。
+      // 必须显式指定：默认已改成 BBR，而 BBR 不因丢包砍窗口。
+      congestionControl: 'reno',
     });
     stacks.push(stack);
     stack.listen(8787, bridgePort);
@@ -141,6 +144,9 @@ describe('TCP 拥塞控制', () => {
     const stack = new TcpStack({
       localIp: LOCAL_IP, bridgeHost: '127.0.0.1',
       sendIpPacket: sink.fn, retransmitBaseMs: 5_000,
+      // 这组测试验的是 **Reno** 语义（慢启动/拥塞避免/砍半）。
+      // 必须显式指定：默认已改成 BBR，而 BBR 不因丢包砍窗口。
+      congestionControl: 'reno',
     });
     stacks.push(stack);
     stack.listen(8787, bridgePort);
@@ -180,6 +186,7 @@ describe('TCP 拥塞控制', () => {
       sendIpPacket: sink.fn,
       // RTO 设得很长：如果实现靠超时重传，这条测试会超时失败
       retransmitBaseMs: 60_000,
+      congestionControl: 'reno',
       log: (m) => logs.push(m),
     });
     stacks.push(stack);
@@ -212,8 +219,8 @@ describe('TCP 拥塞控制', () => {
 
     // 快速重传必须发生：日志里出现"快速重传"
     expect(logs.join('')).toContain('快速重传');
-    // 且窗口收缩了
-    expect(logs.join('')).toContain('拥塞');
+    // 且窗口收缩了（Reno 的措辞是"拥塞：cwnd → ..."，BBR 不会砍窗口）
+    expect(logs.join('')).toContain('cwnd →');
   }, 20_000);
 
   it('窗口按 MSS 切段，不会发出超长段', async () => {
@@ -222,6 +229,9 @@ describe('TCP 拥塞控制', () => {
     const stack = new TcpStack({
       localIp: LOCAL_IP, bridgeHost: '127.0.0.1',
       sendIpPacket: sink.fn, retransmitBaseMs: 5_000,
+      // 这组测试验的是 **Reno** 语义（慢启动/拥塞避免/砍半）。
+      // 必须显式指定：默认已改成 BBR，而 BBR 不因丢包砍窗口。
+      congestionControl: 'reno',
     });
     stacks.push(stack);
     stack.listen(8787, bridgePort);

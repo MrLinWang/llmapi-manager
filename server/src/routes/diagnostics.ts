@@ -694,10 +694,16 @@ export function registerDiagnosticsRoutes(
       ipFragmentReassembly: true,
       congestionControl: true,
       multiHopRelay: true,
-      // 仍未实现的：UDP 分片、广播/组播、SACK/BBR 等高级拥塞控制
-      udpFragmentation: false,
-      broadcast: false,
-      advancedCongestionControl: false,
+      // 发送侧 IP 分片（超 MTU 的 UDP 数据报会被切开）
+      ipFragmentationOnSend: true,
+      broadcast: true,
+      multicast: true,
+      // SACK（选择性确认）与 BBR（模型驱动拥塞控制）
+      sack: true,
+      congestionAlgorithms: ['reno', 'bbr'],
+      // 仍未实现：TCP 时间戳选项、完整 BBR 状态机（Startup/ProbeBW/ProbeRTT）
+      tcpTimestamps: false,
+      fullBbrStateMachine: false,
     },
     native: { tcp: true, udp: true, icmp: true },
   } as const;

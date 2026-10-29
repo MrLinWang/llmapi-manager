@@ -2439,8 +2439,15 @@ describe('冒烟：诊断接口', () => {
       expect(body.engines.dataPlane.builtin.icmp).toBe(true);
       expect(body.engines.dataPlane.builtin.ipFragmentReassembly).toBe(true);
       expect(body.engines.dataPlane.builtin.multiHopRelay).toBe(true);
-      expect(body.engines.dataPlane.builtin.udpFragmentation).toBe(false);
-      expect(body.engines.dataPlane.builtin.broadcast).toBe(false);
+      // 本轮补齐的能力
+      expect(body.engines.dataPlane.builtin.broadcast).toBe(true);
+      expect(body.engines.dataPlane.builtin.multicast).toBe(true);
+      expect(body.engines.dataPlane.builtin.sack).toBe(true);
+      expect(body.engines.dataPlane.builtin.ipFragmentationOnSend).toBe(true);
+      expect(body.engines.dataPlane.builtin.congestionAlgorithms).toEqual(['reno', 'bbr']);
+      // 仍未实现的必须仍然报 false
+      expect(body.engines.dataPlane.builtin.tcpTimestamps).toBe(false);
+      expect(body.engines.dataPlane.builtin.fullBbrStateMachine).toBe(false);
       // 原生引擎复用官方实现，这些能力都有
       expect(body.engines.dataPlane.native.udp).toBe(true);
       // 默认引擎必须是自研，与配置默认值一致

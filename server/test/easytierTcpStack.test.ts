@@ -290,8 +290,11 @@ describe('用户态 TCP 栈：边界', () => {
     expect(stack.connectionCount()).toBe(0);
   });
 
-  it('UDP 包被显式丢弃并给出可读原因（不是静默忽略）', () => {
-    // DNS 走 UDP。若静默丢弃，用户会去查 DNS 配置而真正原因在这里。
+  it('非 TCP 包不由本栈处理，也不在这里记日志（职责分离）', () => {
+    // UDP 现在由 Acceptor 的分发器交给 `UdpStack` 处理（DNS 真的能用），
+    // ICMP 由 `buildIcmpEchoReply` 应答。所以 tcpStack 遇到它们应该
+    // **安静地返回 false**——如果它在这里打"丢弃 UDP"，反而会误导：
+    // 那条日志会出现在每条正常 DNS 查询上。
     const logs: string[] = [];
     const sink = makeSink();
     const stack = new TcpStack({
@@ -308,9 +311,7 @@ describe('用户态 TCP 栈：边界', () => {
       }),
     );
     expect(handled).toBe(false);
-    // 日志必须指出目标端口，才能一眼看出是 DNS
-    expect(logs.join('')).toContain('UDP');
-    expect(logs.join('')).toContain('53');
+    expect(logs.join('')).toBe('');
   });
 
   it('非 TCP 协议不由本栈处理', () => {

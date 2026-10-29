@@ -51,9 +51,9 @@ import { deriveTrafficKey, directionForSender, decryptPayload, encryptPayload } 
 import { TcpStack, selectPeerForPacket } from './tcpStack';
 import { UdpStack } from './udpStack';
 import { buildIcmpEchoReply } from './icmp';
-import { IpReassembler } from './ipReassembly';
+import { IpReassembler, fragmentIpPacket } from './ipReassembly';
 import { PeerTopology, decodeConnPeerList, decodeConnBitmap } from './topology';
-import { IpProtocol, decodeIpv4Header } from './ip';
+import { IpProtocol, decodeIpv4Header, isBroadcastOrMulticast } from './ip';
 import {
   buildOspfSyncRouteRequest,
   buildWrappedRpcResponse,
@@ -127,6 +127,13 @@ export interface AcceptorOptions {
   advertiseRoute?: boolean;
   /** 数据面加密算法，与官方默认一致 */
   algorithm?: string;
+  /**
+   * 链路 MTU。超过它的 IP 包发送时会被分片。
+   *
+   * 默认 1380：与官方 EasyTier 的默认值一致（留出隧道封装的余量）。
+   * 设得比真实链路 MTU 大会导致包在底层被丢或分片，症状是"大包不通"。
+   */
+  mtu?: number;
 }
 
 export interface AcceptorCallbacks {
@@ -254,6 +261,7 @@ export class EasyTierAcceptor {
     // 否则广播出去的 noise_static_pubkey 与握手实际使用的私钥不匹配，
     // 对端钉扎校验会失败（或更糟：对端接受的公钥永远无法再复现）。
     this.topology = new PeerTopology(options.myPeerId);
+    this.mtu = options.mtu ?? 1380;
     this.staticKeyPair = options.staticPrivateKey
       ? {
           privateKey: options.staticPrivateKey,
@@ -984,6 +992,8 @@ export class EasyTierAcceptor {
    * 症状是"先连上的对端永远学不到后连上的节点"，非常有误导性。
    */
   private topologyVersion = 1;
+  /** 链路 MTU（超过就分片）。 */
+  private readonly mtu: number;
 
   /**
    * 启用数据面：把虚拟 IP 上的端口桥接到本机端口。
@@ -1131,37 +1141,97 @@ export class EasyTierAcceptor {
     return null;
   }
 
-  private sendDataPacket(ipPacket: Buffer, relay?: { toPeerId: number; forwardCounter: number }): void {
-    let conn: Connection | null;
-    let toPeerId: number;
-    let forwardCounter = 0;
+  private sendDataPacket(
+    ipPacket: Buffer,
+    relay?: { toPeerId: number; forwardCounter: number },
+  ): void {
+    // ── ① 决定发往哪些连接 ──
+    //
+    // 广播/组播必须发**所有**对端：点对点虚拟网络里没有链路层广播，
+    // 只能逐个转发（mDNS、SSDP、服务发现都依赖这个）。
+    const targets: Array<{
+      conn: Connection;
+      toPeerId: number;
+      forwardCounter: number;
+    }> = [];
 
     if (relay !== undefined) {
-      // 中继：目标由包头指定，我们只负责找"到该目标的下一跳"
-      toPeerId = relay.toPeerId;
-      forwardCounter = relay.forwardCounter;
-      const hop = this.topology.nextHop(toPeerId);
-      conn =
+      // 中继：目标由包头指定，只发给下一跳一条
+      const hop = this.topology.nextHop(relay.toPeerId);
+      const conn =
         hop === null || hop === this.options.myPeerId
           ? null
           : this.connectionFor(hop);
       if (conn === null) {
         this.callbacks.onDataPlaneLog?.(
-          `中继失败：目标 ${toPeerId} 无可用下一跳，丢弃`,
+          `中继失败：目标 ${relay.toPeerId} 无可用下一跳，丢弃`,
         );
         return;
       }
+      targets.push({
+        conn,
+        toPeerId: relay.toPeerId,
+        forwardCounter: relay.forwardCounter,
+      });
     } else {
-      const picked = this.pickConnectionFor(ipPacket);
-      conn = picked.conn;
-      toPeerId = picked.toPeerId;
+      const header = decodeIpv4Header(ipPacket);
+      const dstIp = header?.dst ?? null;
+      if (dstIp !== null && isBroadcastOrMulticast(dstIp)) {
+        // 广播/组播：发给每个已连接对端。`to_peer_id` 填 0 表示
+        // "按目标 IP 路由"，由各对端自行决定是否自己消费。
+        for (const conn of this.connections) {
+          targets.push({ conn, toPeerId: 0, forwardCounter: 0 });
+        }
+        this.callbacks.onDataPlaneLog?.(
+          `广播/组播 ${dstIp} → ${targets.length} 个对端`,
+        );
+        if (targets.length === 0) return;
+      } else {
+        const picked = this.pickConnectionFor(ipPacket);
+        if (picked.conn === null) {
+          this.callbacks.onDataPlaneLog?.('发送数据包时没有匹配的连接，丢弃');
+          return;
+        }
+        targets.push({
+          conn: picked.conn,
+          toPeerId: picked.toPeerId,
+          forwardCounter: 0,
+        });
+      }
     }
 
-    if (conn === null) {
-      this.callbacks.onDataPlaneLog?.('发送数据包时没有匹配的连接，丢弃');
-      return;
+    // ── ② 超过 MTU 就在 IP 层分片 ──
+    //
+    // 不分片的话，超长包会被对端当"总长超限"丢弃，且**没有任何日志**——
+    // 症状是"大 UDP 包发不出去"。分片后每片独立成帧，对端按标识符重组。
+    const fragments =
+      ipPacket.length > this.mtu ? fragmentIpPacket(ipPacket, this.mtu) : [ipPacket];
+    if (fragments.length > 1) {
+      this.callbacks.onDataPlaneLog?.(
+        `包 ${ipPacket.length}B 超过 MTU ${this.mtu}，切成 ${fragments.length} 片`,
+      );
     }
 
+    // ── ③ 逐目标、逐片发送 ──
+    for (const target of targets) {
+      for (const fragment of fragments) {
+        this.transmitTo(
+          target.conn,
+          target.toPeerId,
+          target.forwardCounter,
+          fragment,
+        );
+      }
+    }
+  }
+
+  /** 把一帧 IP 包加密并发给指定连接（发送的最小单元）。 */
+  private transmitTo(
+    conn: Connection,
+    toPeerId: number,
+    forwardCounter: number,
+    ipPacket: Buffer,
+  ): void {
     const sendKey = deriveTrafficKey(
       conn.rootKey,
       0,
@@ -1185,7 +1255,7 @@ export class EasyTierAcceptor {
     });
     this.callbacks.onDataPlaneLog?.(
       `发送数据包 ${ipPacket.length}B → 下一跳 peer=${conn.remotePeerId}` +
-        (toPeerId !== conn.remotePeerId ? `（最终目标 ${toPeerId}）` : '') +
+        (toPeerId !== conn.remotePeerId && toPeerId !== 0 ? `（最终目标 ${toPeerId}）` : '') +
         ` seq=${conn.sendSeq - 1n}`,
     );
     conn.socket.write(framed);

@@ -230,27 +230,173 @@ export function encodeTcpHeader(
    * 却按含载荷的段长传，两者不一致。
    */
   pseudo: { src: string; dst: string; payload?: Buffer },
+  /** TCP 选项（会被补齐到 4 字节边界）。SACK 靠它协商与上报 */
+  options?: TcpOption[],
 ): Buffer {
-  const buf = Buffer.alloc(20);
+  const optionsBuffer =
+    options === undefined || options.length === 0 ? Buffer.alloc(0) : encodeTcpOptions(options);
+  if (optionsBuffer.length > 40) {
+    throw new Error(`TCP 选项过长（${optionsBuffer.length} 字节，上限 40）`);
+  }
+  const headerLength = 20 + optionsBuffer.length;
+  const buf = Buffer.alloc(headerLength);
   buf.writeUInt16BE(header.srcPort, 0);
   buf.writeUInt16BE(header.dstPort, 2);
   buf.writeUInt32BE(header.seq >>> 0, 4);
   buf.writeUInt32BE(header.ack >>> 0, 8);
-  buf[12] = 5 << 4; // data offset 5（20 字节）
+  // data offset 以 4 字节为单位
+  buf[12] = (headerLength / 4) << 4;
   buf[13] = header.flags;
   buf.writeUInt16BE(header.window, 14);
   buf.writeUInt16BE(0, 16); // 校验和先留 0
   buf.writeUInt16BE(header.urgentPointer ?? 0, 18);
+  if (optionsBuffer.length > 0) optionsBuffer.copy(buf, 20);
+
   // 校验和必须覆盖头部与载荷整体
   const payload = pseudo.payload ?? Buffer.alloc(0);
   const checksum = tcpChecksum(buf, {
     src: pseudo.src,
     dst: pseudo.dst,
-    tcpLength: 20 + payload.length,
+    tcpLength: headerLength + payload.length,
     payload,
   });
   buf.writeUInt16BE(checksum, 16);
   return buf;
+}
+
+/** TCP 选项类型号（IANA）。 */
+export const TcpOptionKind = {
+  /** 选项列表结束 */
+  END: 0,
+  /** 无操作（用于对齐） */
+  NOP: 1,
+  /** 最大段长 */
+  MSS: 2,
+  /** 允许 SACK（只在 SYN/SYN-ACK 里） */
+  SACK_PERMITTED: 4,
+  /** SACK 块 */
+  SACK: 5,
+  /** 窗口扩大因子 */
+  WINDOW_SCALE: 3,
+} as const;
+
+/** 一个 TCP 选项。 */
+export type TcpOption =
+  | { kind: typeof TcpOptionKind.END }
+  | { kind: typeof TcpOptionKind.NOP }
+  | { kind: typeof TcpOptionKind.MSS; mss: number }
+  | { kind: typeof TcpOptionKind.SACK_PERMITTED }
+  /** SACK 块：每个都是 `[left, right)` 的**实际序列号**（不是相对值） */
+  | { kind: typeof TcpOptionKind.SACK; blocks: Array<{ left: number; right: number }> }
+  | { kind: typeof TcpOptionKind.WINDOW_SCALE; shift: number };
+
+/**
+ * 编码 TCP 选项，并补齐到 4 字节边界。
+ *
+ * 补齐用 `NOP` 还是 `END` 有讲究：`END` 之后的字节被忽略，
+ * 而 `NOP` 会被当作独立选项跳过。规范允许两者，这里用 `END`（更省）。
+ */
+export function encodeTcpOptions(options: TcpOption[]): Buffer {
+  const parts: Buffer[] = [];
+  for (const option of options) {
+    switch (option.kind) {
+      case TcpOptionKind.END:
+        parts.push(Buffer.from([TcpOptionKind.END]));
+        break;
+      case TcpOptionKind.NOP:
+        parts.push(Buffer.from([TcpOptionKind.NOP]));
+        break;
+      case TcpOptionKind.MSS: {
+        const buf = Buffer.alloc(4);
+        buf[0] = TcpOptionKind.MSS;
+        buf[1] = 4;
+        buf.writeUInt16BE(option.mss, 2);
+        parts.push(buf);
+        break;
+      }
+      case TcpOptionKind.SACK_PERMITTED:
+        parts.push(Buffer.from([TcpOptionKind.SACK_PERMITTED, 2]));
+        break;
+      case TcpOptionKind.WINDOW_SCALE:
+        parts.push(Buffer.from([TcpOptionKind.WINDOW_SCALE, 3, option.shift]));
+        break;
+      case TcpOptionKind.SACK: {
+        // 每个块 8 字节（left/right 各 4 字节），选项头 2 字节
+        const count = Math.min(option.blocks.length, 4);
+        const buf = Buffer.alloc(2 + count * 8);
+        buf[0] = TcpOptionKind.SACK;
+        buf[1] = buf.length;
+        for (let i = 0; i < count; i += 1) {
+          buf.writeUInt32BE(option.blocks[i].left >>> 0, 2 + i * 8);
+          buf.writeUInt32BE(option.blocks[i].right >>> 0, 6 + i * 8);
+        }
+        parts.push(buf);
+        break;
+      }
+    }
+  }
+  let merged = Buffer.concat(parts);
+  // 补齐到 4 字节边界
+  const padding = (4 - (merged.length % 4)) % 4;
+  if (padding > 0) {
+    merged = Buffer.concat([merged, Buffer.alloc(padding, TcpOptionKind.END)]);
+  }
+  return merged;
+}
+
+/**
+ * 解析 TCP 选项。
+ *
+ * 必须容忍格式问题：`END` 之后全部忽略、长度字段非法时停止解析
+ * （不能抛错——一个坏选项不该让整条连接失败）。
+ */
+export function decodeTcpOptions(buffer: Buffer): TcpOption[] {
+  const options: TcpOption[] = [];
+  let offset = 0;
+  while (offset < buffer.length) {
+    const kind = buffer[offset];
+    if (kind === TcpOptionKind.END) break;
+    if (kind === TcpOptionKind.NOP) {
+      offset += 1;
+      continue;
+    }
+    // 其余选项都有长度字节
+    if (offset + 1 >= buffer.length) break;
+    const length = buffer[offset + 1];
+    if (length < 2 || offset + length > buffer.length) break;
+    const body = buffer.subarray(offset + 2, offset + length);
+    switch (kind) {
+      case TcpOptionKind.MSS:
+        if (body.length >= 2) {
+          options.push({ kind: TcpOptionKind.MSS, mss: body.readUInt16BE(0) });
+        }
+        break;
+      case TcpOptionKind.SACK_PERMITTED:
+        options.push({ kind: TcpOptionKind.SACK_PERMITTED });
+        break;
+      case TcpOptionKind.WINDOW_SCALE:
+        if (body.length >= 1) {
+          options.push({ kind: TcpOptionKind.WINDOW_SCALE, shift: body[0] });
+        }
+        break;
+      case TcpOptionKind.SACK: {
+        const blocks: Array<{ left: number; right: number }> = [];
+        for (let i = 0; i + 8 <= body.length; i += 8) {
+          blocks.push({
+            left: body.readUInt32BE(i),
+            right: body.readUInt32BE(i + 4),
+          });
+        }
+        options.push({ kind: TcpOptionKind.SACK, blocks });
+        break;
+      }
+      default:
+        // 未知选项：按长度跳过（RFC 1122 要求）
+        break;
+    }
+    offset += length;
+  }
+  return options;
 }
 
 /** 伪首部 + 段的 TCP 校验和。 */
@@ -390,6 +536,8 @@ export function buildTcpSegment(options: {
   /** 伪首部用 */
   srcIp: string;
   dstIp: string;
+  /** TCP 选项（SACK 协商与上报） */
+  tcpOptions?: TcpOption[];
 }): Buffer {
   const payload = options.payload ?? Buffer.alloc(0);
   const header = encodeTcpHeader(
@@ -402,6 +550,7 @@ export function buildTcpSegment(options: {
       window: options.window,
     },
     { src: options.srcIp, dst: options.dstIp, payload },
+    options.tcpOptions,
   );
   return Buffer.concat([header, payload]);
 }
@@ -409,4 +558,33 @@ export function buildTcpSegment(options: {
 /** 这个 TCP 段是否带某个标志。 */
 export function hasTcpFlag(flags: number, flag: number): boolean {
   return (flags & flag) !== 0;
+}
+
+/**
+ * 这个地址是不是"要发给所有人"（广播或组播）。
+ *
+ * 虚拟网络里这两种流量的用途：
+ * - **广播**（`255.255.255.255` 或子网广播如 `10.126.126.255`）：
+ *   DHCP、ARP 代理、服务发现（mDNS 走组播）
+ * - **组播**（`224.0.0.0/4`）：mDNS（`224.0.0.251`）、SSDP 等
+ *
+ * 处理方式与单播完全不同：单播要算下一跳，广播/组播必须**发给所有对端**
+ * （在点对点虚拟网络里，没有真正的链路层广播，只能逐个转发）。
+ *
+ * `networkPrefix` 用于识别子网广播（例如本机 `10.126.126.1/24` 的广播是
+ * `10.126.126.255`）。传 null 时只认 `255.255.255.255` 与组播段。
+ */
+export function isBroadcastOrMulticast(ip: string, networkPrefix = 24): boolean {
+  const value = ipToInt(ip);
+  // 受限广播：255.255.255.255
+  if (value === 0xffffffff) return true;
+  // 组播：224.0.0.0/4（首字节 224-239）
+  if ((value >>> 24) >= 224 && (value >>> 24) <= 239) return true;
+  // 子网广播：主机位全 1
+  if (networkPrefix > 0 && networkPrefix < 32) {
+    const hostBits = 32 - networkPrefix;
+    const hostMask = hostBits === 32 ? 0xffffffff : (1 << hostBits) - 1;
+    if ((value & hostMask) === hostMask) return true;
+  }
+  return false;
 }

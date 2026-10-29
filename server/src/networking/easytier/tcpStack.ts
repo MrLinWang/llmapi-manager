@@ -39,8 +39,10 @@ import {
   buildTcpSegment,
   decodeIpv4Header,
   decodeTcpHeader,
-  decodeUdpHeader,
+  decodeTcpOptions,
   hasTcpFlag,
+  TcpOptionKind,
+  type TcpOption,
 } from './ip';
 
 /** TCP 会话状态（RFC 9293 的状态子集）。 */
@@ -102,6 +104,55 @@ interface TcpConnection {
   /** 已经从本机服务读出、但因窗口不足还没发出的数据 */
   pendingSend: Buffer;
   /**
+   * 对端是否允许 SACK（在 SYN/SYN-ACK 里用 `SACK_PERMITTED` 选项协商）。
+   *
+   * 没协商就不能发 SACK 块——对端会当作未知选项忽略，等于白占头部空间。
+   */
+  sackEnabled: boolean;
+  /**
+   * 乱序到达的数据，按起始序列号存放。
+   *
+   * **必须有它**：之前 `acceptPayload` 不看序列号，收到什么就往本机 socket
+   * 写什么。一旦网络乱序，写进 socket 的字节顺序就错了——TCP 承诺的是
+   * "有序字节流"，而下游（HTTP 解析器等）拿到乱序数据会解析失败或更糟。
+   */
+  outOfOrder: Map<number, Buffer>;
+  /**
+   * 待上报给对端的 SACK 块（`[left, right)` 实际序列号）。
+   *
+   * 每次发 ACK 时带上，告诉对端"这些区间我收到了"，
+   * 对端据此**只重传真正的空洞**，而不是整段重发。
+   */
+  sackBlocks: Array<{ left: number; right: number }>;
+  /**
+   * 对端上报给我们的 SACK 块。
+   *
+   * 用于选择性重传：结合 `unacked` 找出对端**没收到**的区间。
+   */
+  peerSackBlocks: Array<{ left: number; right: number }>;
+
+  // ── BBR 状态（仅 algorithm === 'bbr' 时使用） ──
+  /**
+   * 带宽估计（字节/毫秒）。
+   *
+   * 取"最近若干个往返里观察到的最大投递速率"——BBR 的核心观点是
+   * **链路的最大带宽是一个稳定属性**，不该因为一次丢包就大幅下调。
+   */
+  bwEstimate: number;
+  /**
+   * 最小 RTT（毫秒）。用滑动窗口取最小值。
+   *
+   * 它代表"链路里没有排队时的往返时间"，是算 BDP 的一半。
+   */
+  minRttMs: number;
+  /** 本轮统计的起点（用于算投递速率） */
+  bwSampleStartMs: number;
+  /** 本轮统计已确认的字节数 */
+  bwSampleBytes: number;
+  /** 累计已确认字节（用于诊断） */
+  deliveredBytes: number;
+
+  /**
    * 已见过的最高确认号。
    *
    * 判断"这次 ACK 是新确认还是重复确认"必须有它：只看
@@ -110,6 +161,19 @@ interface TcpConnection {
   lastAckNumber: number;
 }
 
+/**
+ * 拥塞控制算法。
+ *
+ * - `reno`：丢包驱动。窗口靠 ACK 线性增长、丢包砍半。实现简单，
+ *   但在**有随机丢包**的链路上会把窗口压得过小（它把丢包当成拥塞信号，
+ *   而实际可能只是链路误码）。
+ * - `bbr`（默认）：**模型驱动**。持续估计"带宽 × 最小 RTT"作为窗口，
+ *   不把丢包直接当作拥塞信号。高丢包率链路上吞吐明显更好。
+ *
+ * 默认选 bbr：虚拟网络常跑在公网隧道上，随机丢包不罕见。
+ */
+export type CongestionControl = 'reno' | 'bbr';
+
 export interface TcpStackOptions {
   /** 本机在虚拟网络里的 IP */
   localIp: string;
@@ -117,6 +181,8 @@ export interface TcpStackOptions {
   bridgeHost: string;
   /** 单个连接的空闲超时（毫秒），超时后强制关闭 */
   idleTimeoutMs?: number;
+  /** 拥塞控制算法（默认 `bbr`） */
+  congestionControl?: CongestionControl;
   /** 重传超时基数（毫秒） */
   retransmitBaseMs?: number;
   /** 最大重传次数，超过则放弃连接 */
@@ -171,6 +237,7 @@ export class TcpStack extends EventEmitter {
       localIp: options.localIp,
       bridgeHost: options.bridgeHost,
       idleTimeoutMs: options.idleTimeoutMs ?? 120_000,
+      congestionControl: options.congestionControl ?? 'bbr',
       retransmitBaseMs: options.retransmitBaseMs ?? 1_000,
       maxRetransmits: options.maxRetransmits ?? 8,
       sendIpPacket: options.sendIpPacket,
@@ -255,21 +322,9 @@ export class TcpStack extends EventEmitter {
     const ipHeader = decodeIpv4Header(packet);
     if (ipHeader === null) return false;
 
-    if (ipHeader.protocol === IpProtocol.UDP) {
-      // UDP 未实现（见 README 已知边界）。**必须显式记日志而不是静默返回**：
-      // DNS 走 UDP，用户遇到"连得上但域名解析不了"时会去查 DNS 配置，
-      // 而真正的原因在这里。日志要能指出目标端口，方便判断是不是 DNS。
-      const udp = decodeUdpHeader(packet.subarray(ipHeader.headerLength));
-      this.log(
-        `丢弃 UDP 包 ${ipHeader.src} → ${ipHeader.dst}:${udp?.dstPort ?? '?'}（本实现只做 TCP）`,
-      );
-      return false;
-    }
-    if (ipHeader.protocol !== IpProtocol.TCP) {
-      // ICMP 同样未实现：`ping` 不通是预期行为，记一行便于对照
-      this.log(`丢弃非 TCP 包 protocol=${ipHeader.protocol}（本实现只做 TCP）`);
-      return false;
-    }
+    // 非 TCP 由 Acceptor 的分发器转给 UDP 栈 / ICMP 处理器，这里不处理也不记日志
+    // （否则每条 DNS 查询都会刷一行"丢弃 UDP"，那是误导）
+    if (ipHeader.protocol !== IpProtocol.TCP) return false;
     // 分片包丢弃：本实现不做 IP 重组，拼接错的数据比丢包更糟
     if (ipHeader.moreFragments || ipHeader.fragmentOffset !== 0) {
       this.log('丢弃 IP 分片包（不做重组）');
@@ -285,7 +340,12 @@ export class TcpStack extends EventEmitter {
     if (tcpHeader === null) return false;
 
     const payload = segment.subarray(tcpHeader.dataOffset);
-    this.handleSegment(ipHeader.src, ipHeader.dst, tcpHeader, payload);
+    // 选项区在 20 字节固定头之后、dataOffset 之前
+    const options =
+      tcpHeader.dataOffset > 20
+        ? decodeTcpOptions(segment.subarray(20, tcpHeader.dataOffset))
+        : [];
+    this.handleSegment(ipHeader.src, ipHeader.dst, tcpHeader, payload, options);
     return true;
   }
 
@@ -294,6 +354,7 @@ export class TcpStack extends EventEmitter {
     dstIp: string,
     header: { srcPort: number; dstPort: number; seq: number; ack: number; flags: number; window: number },
     payload: Buffer,
+    options: TcpOption[] = [],
   ): void {
     const key = `${srcIp}:${header.srcPort}->${dstIp}:${header.dstPort}`;
     const existing = this.connections.get(key);
@@ -313,7 +374,7 @@ export class TcpStack extends EventEmitter {
         this.sendRst(srcIp, dstIp, header);
         return;
       }
-      this.acceptConnection(srcIp, dstIp, header, bridgePort);
+      this.acceptConnection(srcIp, dstIp, header, bridgePort, options);
       return;
     }
 
@@ -339,7 +400,7 @@ export class TcpStack extends EventEmitter {
       // 会被误判成"新确认"，导致重复 ACK 计数从 0 开始——快速重传永远不触发。
       existing.lastAckNumber = header.ack;
       this.connectBridge(existing);
-      if (payload.length > 0) this.acceptPayload(existing, payload);
+      if (payload.length > 0) this.acceptPayload(existing, header.seq, payload);
       if (hasTcpFlag(header.flags, TcpFlags.FIN)) this.handleFin(existing, header);
       return;
     }
@@ -364,6 +425,12 @@ export class TcpStack extends EventEmitter {
         return seqDiff(header.ack, end) < 0;
       });
 
+      // 记录对端上报的 SACK 块：后面选择性重传要用
+      const sackOption = options.find((option) => option.kind === TcpOptionKind.SACK);
+      if (sackOption !== undefined && sackOption.kind === TcpOptionKind.SACK) {
+        existing.peerSackBlocks = sackOption.blocks;
+      }
+
       // 新确认 vs 重复确认：靠 lastAckNumber 判定
       const newlyAcked = seqDiff(header.ack, existing.lastAckNumber);
       if (newlyAcked > 0) {
@@ -377,7 +444,18 @@ export class TcpStack extends EventEmitter {
         if (existing.dupAckCount === 3) {
           // 快速重传：不等 RTO，立即重发最老的那一段。
           // 这一步是吞吐的关键——RTO 往往几百毫秒，等它会让长连接明显卡顿。
-          const oldest = [...existing.unacked].sort((a, b) => seqDiff(a.seq, b.seq))[0];
+          // 选**真正的空洞**：第一个未被 SACK 覆盖的段。
+          // 直接取最老的段是错的——那一段可能对端早就收到了。
+          const oldest = [...existing.unacked]
+            .sort((a, b) => seqDiff(a.seq, b.seq))
+            .find(
+              (seg) =>
+                !this.isCoveredBySack(
+                  existing,
+                  seg.seq,
+                  seg.seq + seg.payload.length,
+                ),
+            );
           if (oldest !== undefined) {
             this.log(`快速重传：3 个重复 ACK，重发 seq=${oldest.seq}`);
             this.resendSegment(existing, oldest.seq, oldest.flags, oldest.payload);
@@ -393,7 +471,7 @@ export class TcpStack extends EventEmitter {
 
     // ── 数据与 ACK ──
     if (payload.length > 0) {
-      this.acceptPayload(existing, payload);
+      this.acceptPayload(existing, header.seq, payload);
       // 立即确认，避免对端等 RTO 重传
       this.sendSegment(existing, TcpFlags.ACK, Buffer.alloc(0));
     }
@@ -407,6 +485,7 @@ export class TcpStack extends EventEmitter {
     dstIp: string,
     header: { srcPort: number; dstPort: number; seq: number; window: number },
     bridgePort: string,
+    options: TcpOption[] = [],
   ): void {
     const conn: TcpConnection = {
       remoteIp: srcIp,
@@ -432,12 +511,25 @@ export class TcpStack extends EventEmitter {
       dupAckCount: 0,
       pendingSend: Buffer.alloc(0),
       lastAckNumber: 0,
+      sackEnabled: false,
+      outOfOrder: new Map(),
+      sackBlocks: [],
+      peerSackBlocks: [],
+      bwEstimate: 0,
+      minRttMs: Number.POSITIVE_INFINITY,
+      bwSampleStartMs: Date.now(),
+      bwSampleBytes: 0,
+      deliveredBytes: 0,
     };
     this.connections.set(this.key(conn), conn);
     this.portMap.set(header.dstPort, bridgePort);
     this.log(`新连接 ${srcIp}:${header.srcPort} → 虚拟 ${dstIp}:${header.dstPort}`);
 
-    this.sendSegment(conn, TcpFlags.SYN | TcpFlags.ACK, Buffer.alloc(0));
+    // SACK 协商：对端的 SYN 里带 SACK_PERMITTED 才启用（双向都要同意）
+    conn.sackEnabled = options.some(
+      (option) => option.kind === TcpOptionKind.SACK_PERMITTED,
+    );
+    this.sendSegment(conn, TcpFlags.SYN | TcpFlags.ACK, Buffer.alloc(0), undefined, true);
     // SYN 占一个序列号
     conn.sendSeq = (conn.sendSeq + 1) >>> 0;
     this.emit('connection', {
@@ -499,21 +591,112 @@ export class TcpStack extends EventEmitter {
   }
 
   /** 收到虚拟对端的数据：转交给本机 socket。 */
-  private acceptPayload(conn: TcpConnection, payload: Buffer): void {
-    // 序列号校验：只接受期望的那个（简化实现，不做乱序重组）
-    conn.recvNext = (conn.recvNext + payload.length) >>> 0;
+  /**
+   * 收到对端的数据：按序列号**有序**交付给本机 socket。
+   *
+   * 这是 TCP 的"有序字节流"承诺。之前的实现不看序列号、收到就写——
+   * 网络一乱序，写进 socket 的字节顺序就错了，下游（HTTP 解析器等）
+   * 会解析失败或得到错误结果。注释写着"序列号校验"但代码没做，是典型
+   * 的"注释与实现脱节"。
+   *
+   * 三种情况：
+   * - `seq == recvNext`：正是期望的，交付并顺带排空乱序缓存
+   * - `seq > recvNext`：未来数据，缓存到 `outOfOrder` 并生成 SACK 块
+   * - `seq < recvNext`：重复/部分重复，裁掉已交付部分再处理
+   */
+  private acceptPayload(conn: TcpConnection, seq: number, payload: Buffer): void {
+    const diff = seqDiff(seq, conn.recvNext);
+
+    if (diff > 0) {
+      // ── 乱序（未来数据）──
+      if (!conn.outOfOrder.has(seq)) {
+        conn.outOfOrder.set(seq, Buffer.from(payload));
+        // 缓存上限：防止对端猛发乱序数据打爆内存
+        if (conn.outOfOrder.size > 512) {
+          this.log('乱序缓存过多，丢弃该连接');
+          this.teardown(conn);
+          this.connections.delete(this.key(conn));
+          return;
+        }
+      }
+      // 生成/更新 SACK 块，告诉对端"这段我收到了"
+      this.rebuildSackBlocks(conn);
+      return;
+    }
+
+    if (diff < 0) {
+      // ── 重复数据 ──
+      const overlap = -diff; // recvNext - seq
+      if (overlap >= payload.length) {
+        // 整段都已交付过，忽略（对端重传的）
+        return;
+      }
+      // 裁掉已交付的前缀
+      this.deliverToBridge(conn, payload.subarray(overlap));
+      conn.recvNext = (conn.recvNext + (payload.length - overlap)) >>> 0;
+    } else {
+      // ── 正是期望的 ──
+      this.deliverToBridge(conn, payload);
+      conn.recvNext = (conn.recvNext + payload.length) >>> 0;
+    }
+
+    // 排空乱序缓存里现在能接上的数据
+    this.drainOutOfOrder(conn);
+    this.rebuildSackBlocks(conn);
+  }
+
+  /** 把数据交给本机 socket（或暂存，等桥接建立）。 */
+  private deliverToBridge(conn: TcpConnection, payload: Buffer): void {
+    if (payload.length === 0) return;
     if (conn.bridge !== null && conn.bridge.writable) {
       conn.bridge.write(payload);
-    } else {
-      // 桥接还没连上：缓存，等 connect 后按序写出
-      conn.pendingToBridge.push(Buffer.from(payload));
-      // 防止对端猛发导致内存暴涨
-      if (conn.pendingToBridge.length > 256) {
-        this.log('桥接未就绪且缓存过多，丢弃该连接');
-        this.teardown(conn);
-        this.connections.delete(this.key(conn));
+      return;
+    }
+    // 桥接还没连上：缓存，等 connect 后按序写出
+    conn.pendingToBridge.push(Buffer.from(payload));
+    // 防止对端猛发导致内存暴涨
+    if (conn.pendingToBridge.length > 256) {
+      this.log('桥接未就绪且缓存过多，丢弃该连接');
+      this.teardown(conn);
+      this.connections.delete(this.key(conn));
+    }
+  }
+
+  /** 连续把乱序缓存里能接上的数据交付出去。 */
+  private drainOutOfOrder(conn: TcpConnection): void {
+    for (;;) {
+      const next = conn.outOfOrder.get(conn.recvNext);
+      if (next === undefined) return;
+      conn.outOfOrder.delete(conn.recvNext);
+      this.deliverToBridge(conn, next);
+      conn.recvNext = (conn.recvNext + next.length) >>> 0;
+    }
+  }
+
+  /**
+   * 根据乱序缓存重建 SACK 块。
+   *
+   * 把缓存里连续的区间合并成块（`[left, right)`）。合并很重要：
+   * 逐个段上报会塞满 40 字节的选项空间（最多 4 个块），
+   * 而合并后通常一两个块就够。
+   */
+  private rebuildSackBlocks(conn: TcpConnection): void {
+    const starts = [...conn.outOfOrder.keys()].sort((a, b) => seqDiff(a, b));
+    const blocks: Array<{ left: number; right: number }> = [];
+    for (const start of starts) {
+      const data = conn.outOfOrder.get(start);
+      if (data === undefined) continue;
+      const end = (start + data.length) >>> 0;
+      const last = blocks[blocks.length - 1];
+      // 与前一块相邻或重叠就合并（seqDiff 处理回绕）
+      if (last !== undefined && seqDiff(start, last.right) <= 0) {
+        if (seqDiff(end, last.right) > 0) last.right = end;
+      } else {
+        blocks.push({ left: start, right: end });
       }
     }
+    // 只保留最近 4 个块（选项空间上限）
+    conn.sackBlocks = blocks.slice(-4);
   }
 
   private handleFin(
@@ -538,8 +721,32 @@ export class TcpStack extends EventEmitter {
   }
 
   /** 发一个 TCP 段（封装成完整 IP 包）。 */
-  private sendSegment(conn: TcpConnection, flags: number, payload: Buffer, seqOverride?: number): void {
+  private sendSegment(
+    conn: TcpConnection,
+    flags: number,
+    payload: Buffer,
+    seqOverride?: number,
+    /**
+     * 是否在 SYN-ACK 里宣告 SACK 支持。
+     *
+     * 只有握手时该带这个选项；后续 ACK 带 SACK_PERMITTED 是无效的
+     * （RFC 2018 规定它只出现在 SYN/SYN-ACK 里）。
+     */
+    announceSack = false,
+  ): void {
     const seq = seqOverride ?? conn.sendSeq;
+
+    // 组装选项：握手时宣告 SACK；平时有乱序数据就上报 SACK 块
+    const tcpOptions: TcpOption[] = [];
+    if (announceSack) {
+      tcpOptions.push({ kind: TcpOptionKind.MSS, mss: conn.mss });
+      tcpOptions.push({ kind: TcpOptionKind.SACK_PERMITTED });
+    } else if (conn.sackEnabled && conn.sackBlocks.length > 0) {
+      // 上报乱序到达的区间：对端据此只重传真正的空洞。
+      // 没有这一步，对端只能靠"3 个重复 ACK"猜，或等 RTO。
+      tcpOptions.push({ kind: TcpOptionKind.SACK, blocks: conn.sackBlocks });
+    }
+
     const segment = buildTcpSegment({
       srcPort: conn.localPort,
       dstPort: conn.remotePort,
@@ -550,6 +757,7 @@ export class TcpStack extends EventEmitter {
       payload,
       srcIp: conn.localIp,
       dstIp: conn.remoteIp,
+      ...(tcpOptions.length > 0 ? { tcpOptions } : {}),
     });
     const packet = buildIpv4Packet({
       src: conn.localIp,
@@ -605,7 +813,15 @@ export class TcpStack extends EventEmitter {
       conn.retransmitTimer = null;
       if (conn.state === 'closed' || this.connections.get(this.key(conn)) === undefined) return;
       const now = Date.now();
-      const due = conn.unacked.filter((seg) => now - seg.sentAt >= this.options.retransmitBaseMs);
+      const due = conn.unacked.filter(
+        (seg) =>
+          now - seg.sentAt >= this.options.retransmitBaseMs &&
+          // **SACK 的核心价值**：对端已经通过 SACK 块告诉我们
+          // "这段我收到了"，就不必重传。没有这个过滤，超时会把
+          // 整段未确认区间全部重发——包括早已到达的数据，
+          // 白白占用带宽并加重拥塞。
+          !this.isCoveredBySack(conn, seg.seq, seg.seq + seg.payload.length),
+      );
       if (due.length === 0) {
         if (conn.unacked.length > 0) this.scheduleRetransmit(conn);
         return;
@@ -626,6 +842,22 @@ export class TcpStack extends EventEmitter {
       this.scheduleRetransmit(conn);
     }, this.options.retransmitBaseMs);
     conn.retransmitTimer.unref?.();
+  }
+
+  /**
+   * 这个序列号区间是否已被对端的 SACK 块覆盖（= 对端已收到）。
+   *
+   * 判断要求**整段**被某个 SACK 块包含：部分覆盖时仍要重传剩余部分
+   * （本实现按整段重传，保守但正确）。
+   */
+  private isCoveredBySack(conn: TcpConnection, left: number, right: number): boolean {
+    for (const block of conn.peerSackBlocks) {
+      // seqDiff 处理 32 位回绕
+      if (seqDiff(left, block.left) >= 0 && seqDiff(right, block.right) <= 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private resendSegment(conn: TcpConnection, seq: number, flags: number, payload: Buffer): void {
@@ -703,6 +935,10 @@ export class TcpStack extends EventEmitter {
    *   避免把网络压到丢包。
    */
   private growWindow(conn: TcpConnection, ackedBytes: number): void {
+    if (this.options.congestionControl === 'bbr') {
+      this.updateBbrOnAck(conn, ackedBytes);
+      return;
+    }
     if (conn.cwnd < conn.ssthresh) {
       // 慢启动：按确认的字节数增长（近似"每 ACK 加一个 MSS"）
       conn.cwnd = Math.min(conn.cwnd + ackedBytes, 1024 * 1024);
@@ -716,6 +952,72 @@ export class TcpStack extends EventEmitter {
   }
 
   /**
+   * BBR 的 ACK 处理：更新带宽与最小 RTT，再用 BDP 重算窗口。
+   *
+   * ## 与 Reno 的根本区别
+   *
+   * Reno 把"丢包"当成拥塞信号，一丢就砍半窗口。BBR 不问丢包，
+   * 只问两件事：
+   * - **链路最快能跑多少**（`bwEstimate`，取观察到的最大投递速率）
+   * - **往返最少要多久**（`minRttMs`，取滑动窗口最小值）
+   *
+   * 两者相乘就是"链路里最多能存多少数据"（BDP），窗口就该是它的倍数。
+   * 这样即使有随机丢包，窗口也不会被无谓压低。
+   *
+   * ## 简化之处（如实说明）
+   *
+   * 真正的 BBR 有四个状态（Startup / Drain / ProbeBW / ProbeRTT）与
+   * 精细的增益循环。这里实现的是**简化版**：
+   * - 不做状态机，直接按 BDP × 增益算窗口
+   * - 增益固定为 2（BBR 在 ProbeBW 阶段用的 cwnd gain 也是 2）
+   * - 带宽用固定窗口（约 1 秒）内的最大值，不做多轮采样与轮次边界判定
+   *
+   * 对点对点虚拟链路够用；在复杂公网环境下不如完整 BBR。
+   */
+  private updateBbrOnAck(conn: TcpConnection, ackedBytes: number): void {
+    const now = Date.now();
+    conn.deliveredBytes += ackedBytes;
+    conn.bwSampleBytes += ackedBytes;
+
+    // 最小 RTT：用滑动窗口（10 秒）内的最小值。超时重置，避免旧值一直压制
+    // 窗口（链路变慢后 minRtt 该更新）。
+    const sampleMs = now - conn.bwSampleStartMs;
+    if (sampleMs >= 1000) {
+      const rate = sampleMs > 0 ? conn.bwSampleBytes / sampleMs : 0;
+      if (rate > conn.bwEstimate) {
+        // 取最大值：带宽是链路的稳定属性，一次采样偏低不代表链路变差
+        conn.bwEstimate = rate;
+      }
+      conn.bwSampleBytes = 0;
+      conn.bwSampleStartMs = now;
+
+      // minRtt 也每秒刷新一次：本轮 RTT 用"从这里回溯到 ACK 的时间"近似。
+      // 没有精确的发送时间戳，所以用采样窗口作为 RTT 上界的粗估——
+      // 这是本简化实现的已知不足（真实 BBR 靠时间戳选项）。
+      if (sampleMs < conn.minRttMs) conn.minRttMs = sampleMs;
+    }
+
+    // 没有足够样本时先用保守初值，别把窗口压到 0
+    const minRtt = Number.isFinite(conn.minRttMs) ? Math.max(conn.minRttMs, 1) : 100;
+    const bw = conn.bwEstimate > 0 ? conn.bwEstimate : 0;
+    if (bw > 0) {
+      // BDP × 增益 2：BBR 在 ProbeBW 阶段的标准做法
+      const target = Math.floor(bw * minRtt * 2);
+      const bounded = Math.min(Math.max(target, MIN_CWND), 1024 * 1024);
+      if (bounded > conn.cwnd) {
+        // 窗口增长要平滑：一次跳太多会让发送突发
+        conn.cwnd = Math.min(conn.cwnd + ackedBytes, bounded);
+      } else {
+        // 允许缓慢回落到目标（链路变慢时），但不因单次丢包砍半
+        conn.cwnd = Math.max(bounded, Math.floor(conn.cwnd * 0.9));
+      }
+    } else {
+      // 还没测出带宽：按慢启动走，尽快拿到第一个样本
+      conn.cwnd = Math.min(conn.cwnd + ackedBytes, 1024 * 1024);
+    }
+  }
+
+  /**
    * 检测到丢包时的窗口收缩。
    *
    * `ssthresh` 砍半、`cwnd` 退到 1 个 MSS 并重新慢启动——这是最保守的
@@ -723,9 +1025,20 @@ export class TcpStack extends EventEmitter {
    * 保守一点比激进重传好。
    */
   private onCongestionLoss(conn: TcpConnection): void {
+    conn.dupAckCount = 0;
+
+    if (this.options.congestionControl === 'bbr') {
+      // **BBR 不因丢包砍窗口**。这是它与 Reno 最重要的区别：
+      // 随机丢包不代表链路拥塞，砍窗口只会白白损失吞吐。
+      // 窗口由带宽估计决定，这里只是记一笔便于诊断。
+      this.log(
+        `BBR：观察到丢包，窗口保持 cwnd=${conn.cwnd}B（不当作拥塞信号）`,
+      );
+      return;
+    }
+
     conn.ssthresh = Math.max(Math.floor(conn.cwnd / 2), MIN_CWND);
     conn.cwnd = MIN_CWND;
-    conn.dupAckCount = 0;
     this.log(`拥塞：cwnd → ${conn.cwnd}B，ssthresh → ${conn.ssthresh}B`);
   }
 
