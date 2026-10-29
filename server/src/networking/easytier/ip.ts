@@ -221,8 +221,15 @@ export function encodeTcpHeader(
     window: number;
     urgentPointer?: number;
   },
-  /** 伪首部所需的 IP 地址与 TCP 段总长（含头部） */
-  pseudo: { src: string; dst: string; tcpLength: number },
+  /**
+   * 伪首部信息。
+   *
+   * `payload` 必须传：TCP 校验和覆盖**头部 + 载荷**，只算头部会让所有
+   * 带数据的段校验和错误，对端静默丢弃——症状是"握手正常、发数据没反应"。
+   * 踩过：`tcpChecksum(buf, pseudo)` 只传了 20 字节头部，而 `tcpLength`
+   * 却按含载荷的段长传，两者不一致。
+   */
+  pseudo: { src: string; dst: string; payload?: Buffer },
 ): Buffer {
   const buf = Buffer.alloc(20);
   buf.writeUInt16BE(header.srcPort, 0);
@@ -234,14 +241,22 @@ export function encodeTcpHeader(
   buf.writeUInt16BE(header.window, 14);
   buf.writeUInt16BE(0, 16); // 校验和先留 0
   buf.writeUInt16BE(header.urgentPointer ?? 0, 18);
-  buf.writeUInt16BE(tcpChecksum(buf, pseudo), 16);
+  // 校验和必须覆盖头部与载荷整体
+  const payload = pseudo.payload ?? Buffer.alloc(0);
+  const checksum = tcpChecksum(buf, {
+    src: pseudo.src,
+    dst: pseudo.dst,
+    tcpLength: 20 + payload.length,
+    payload,
+  });
+  buf.writeUInt16BE(checksum, 16);
   return buf;
 }
 
 /** 伪首部 + 段的 TCP 校验和。 */
 export function tcpChecksum(
   segment: Buffer,
-  pseudo: { src: string; dst: string; tcpLength: number },
+  pseudo: { src: string; dst: string; tcpLength: number; payload?: Buffer },
 ): number {
   const pseudoHeader = Buffer.alloc(12);
   pseudoHeader.writeUInt32BE(ipToInt(pseudo.src), 0);
@@ -249,7 +264,10 @@ export function tcpChecksum(
   pseudoHeader[8] = 0; // 保留
   pseudoHeader[9] = IpProtocol.TCP;
   pseudoHeader.writeUInt16BE(pseudo.tcpLength, 10);
-  return internetChecksum(Buffer.concat([pseudoHeader, segment]));
+  // 载荷必须参与计算——只算头部是本文件曾经的真实 bug
+  const body =
+    pseudo.payload === undefined ? segment : Buffer.concat([segment, pseudo.payload]);
+  return internetChecksum(Buffer.concat([pseudoHeader, body]));
 }
 
 /** 解析 UDP 头。 */
@@ -326,7 +344,7 @@ export function buildTcpSegment(options: {
       flags: options.flags,
       window: options.window,
     },
-    { src: options.srcIp, dst: options.dstIp, tcpLength: 20 + payload.length },
+    { src: options.srcIp, dst: options.dstIp, payload },
   );
   return Buffer.concat([header, payload]);
 }

@@ -155,8 +155,14 @@ describe('TCP 头', () => {
     expect(internetChecksum(Buffer.concat([pseudoHeader, buf]))).toBe(0);
   });
 
-  it('带载荷时伪首部长度包含载荷', () => {
-    const payload = Buffer.from('hello');
+  it('带载荷的段校验和覆盖头部与载荷整体（自验证为 0）', () => {
+    // 这是本文件曾经的真实 bug：`encodeTcpHeader` 只对 20 字节头部算校验和，
+    // 却按"头+载荷"的长度传伪首部。结果所有带数据的段校验和都是错的，
+    // 对端**静默丢弃**——症状是"握手正常、发数据没反应"。
+    //
+    // 用"伪首部 + 整个段再算一次结果为 0"固定：这个性质的成立要求校验和
+    // 覆盖范围与伪首部声明的长度完全一致，算错了必然不成立。
+    const payload = Buffer.from('hello-payload');
     const buf = buildTcpSegment({
       srcPort: 1,
       dstPort: 2,
@@ -169,10 +175,26 @@ describe('TCP 头', () => {
       dstIp: pseudo.dst,
     });
     expect(buf.length).toBe(20 + payload.length);
-    // 校验和必须用 25 的段长算；用 20 会得到不同的值
-    const wrong = tcpChecksum(buf, { ...pseudo, tcpLength: 20 });
-    const right = tcpChecksum(buf, { ...pseudo, tcpLength: 25 });
-    expect(wrong).not.toBe(right);
+
+    const pseudoHeader = Buffer.alloc(12);
+    pseudoHeader.writeUInt32BE(ipToInt(pseudo.src), 0);
+    pseudoHeader.writeUInt32BE(ipToInt(pseudo.dst), 4);
+    pseudoHeader[9] = IpProtocol.TCP;
+    pseudoHeader.writeUInt16BE(buf.length, 10);
+    expect(internetChecksum(Buffer.concat([pseudoHeader, buf]))).toBe(0);
+  });
+
+  it('载荷内容不同则校验和不同（载荷确实参与计算）', () => {
+    const make = (payload: Buffer) =>
+      buildTcpSegment({
+        srcPort: 1, dstPort: 2, seq: 0, ack: 0,
+        flags: TcpFlags.PSH | TcpFlags.ACK, window: 100,
+        payload, srcIp: pseudo.src, dstIp: pseudo.dst,
+      });
+    const a = make(Buffer.from('aaa'));
+    const b = make(Buffer.from('bbb'));
+    // 头部完全相同，只有载荷不同 → 校验和必须不同
+    expect(a.readUInt16BE(16)).not.toBe(b.readUInt16BE(16));
   });
 });
 

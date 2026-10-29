@@ -246,20 +246,9 @@ describe.skipIf(!CAN_RUN)('数据面：官方节点通过虚拟 IP 访问自研�
     expect(bridgeEstablished, '虚拟连接没有桥接到本机服务').toBe(true);
   }, 120_000);
 
-  it('回程数据被封装发往虚拟对端（已知边界：官方侧投递待确认）', async () => {
-    // ⚠️ 这一条如实记录**当前真实状态**，不是"通过"的伪装。
-    //
-    // 已确认的事实：本机桥接服务回的 HTTP 响应（105 字节）被封装成 Data 包
-    // 并发往官方节点（日志"发送数据包 105B"）。去程（SYN 到桥接建立）也通。
-    //
-    // 未确认的一环：官方节点收到这个 Data 包后是否投递给它的 smoltcp。
-    // 测试环境里官方跑在 `noTun`（smoltcp 用户态栈），它的虚拟 IP 不挂在
-    // 操作系统网络栈上，Node 的 `net.connect` 只能经端口转发进虚拟网，
-    // 而端口转发能否回环投递到本地入口由官方内部实现决定。
-    //
-    // 所以这里断言的是**我们这侧的行为**：响应数据确实被加密发出。
-    // 端到端"官方侧拿到响应体"需要在有 TUN 权限的环境（或官方侧可观测的
-    // 回调）里验，见 README 的已知边界。
+  it('回程数据被封装发往虚拟对端', async () => {
+    // 断言我们这侧的出口行为：响应数据被封装并发往虚拟对端。
+    // 端到端"官方真的收到"由下面那条测试验证。
     const sentBack = await waitFor(
       () => output.some((l) => l.includes('发送数据包')) &&
             output.some((l) => /发送数据包 \d{3,}B/.test(l)),
@@ -268,7 +257,7 @@ describe.skipIf(!CAN_RUN)('数据面：官方节点通过虚拟 IP 访问自研�
     expect(sentBack, '响应数据没有被封装发往虚拟对端').toBe(true);
   }, 90_000);
 
-  it.skip('官方节点收到响应体内容（需 TUN 环境，见 README 边界）', async () => {
+  it('官方节点收到完整的响应体内容（端到端打通）', async () => {
     const bodyLine = output.find((l) => l.includes('DATA BODY'));
     expect(bodyLine, '没有收到任何响应体').toBeDefined();
     expect(bodyLine!).toContain(RESPONSE_BODY);
