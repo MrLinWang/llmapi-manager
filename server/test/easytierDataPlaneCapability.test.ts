@@ -27,8 +27,9 @@ describe('自研引擎的数据面能力', () => {
     // 全部静默丢弃——症状是"能连上、但没有任何数据回来"。
     expect(acceptorSource).toContain('if (header.packetType === PacketType.Data)');
     expect(acceptorSource).toContain('handleDataPacket');
-    // 且必须交给用户态 TCP 栈
-    expect(acceptorSource).toContain('this.tcpStack?.handleIpPacket');
+    // 且必须交给分发器——按协议号分流到 ICMP / UDP / TCP
+    expect(acceptorSource).toContain('dispatchIpPacket');
+    expect(acceptorSource).toContain('this.tcpStack.handleIpPacket');
   });
 
   it('数据面数据包是加密的（与 RPC 同一套 dataPlane）', () => {
@@ -40,6 +41,25 @@ describe('自研引擎的数据面能力', () => {
   it('协议层定义了 Data 类型，值为 1', () => {
     // Data=1 是 EasyTier 承载业务流量的类型（`peer_manager.rs:462`）
     expect(PacketType.Data).toBe(1);
+  });
+
+  it('UDP 与 ICMP 也接进了数据面分发（DNS 与 ping 曾经完全不通）', () => {
+    // UDP：DNS 走它。ICMP：ping 走它。两者以前被直接丢弃，
+    // 症状是"连得上但域名解析不了 / ping 不通"，排查方向会跑到 DNS 配置上。
+    expect(acceptorSource).toContain('this.udpStack.handleIpPacket');
+    expect(acceptorSource).toContain('buildIcmpEchoReply');
+    const udp = fs.readFileSync(
+      path.join(__dirname, '../src/networking/easytier/udpStack.ts'),
+      'utf8',
+    );
+    expect(udp).toContain('dgram');
+    expect(udp).toContain('resolveSystemDnsServer');
+    const icmp = fs.readFileSync(
+      path.join(__dirname, '../src/networking/easytier/icmp.ts'),
+      'utf8',
+    );
+    expect(icmp).toContain('ECHO_REQUEST');
+    expect(icmp).toContain('ECHO_REPLY');
   });
 
   it('用户态 TCP 栈存在，且以真实本机 socket 为桥接目标', () => {

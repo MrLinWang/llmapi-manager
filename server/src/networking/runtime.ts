@@ -7,6 +7,7 @@ import type {
   NetworkingStatus,
 } from '../domain/networking';
 import { EasyTierAcceptor } from './easytier/acceptor';
+import { resolveSystemDnsServer } from './easytier/udpStack';
 import { randomBytes } from 'node:crypto';
 
 /**
@@ -514,17 +515,37 @@ export class NetworkingRuntime {
     // 那种情况下不能开数据面——但我们也不该让整个组网启动失败：
     // 控制面（互相发现、路由同步）仍然有价值。所以这里降级为"只开控制面"
     // 并明确告警，而不是抛错或静默失效。
-    if (config.portForwards.length > 0) {
+    // 守卫必须**同时看 TCP 与 UDP**：只看 portForwards 会让"只配了 DNS 转发"
+    // 的组网完全没有数据面——UDP 包到了却被判"未配置映射"，而用户明明配了。
+    // 这个 bug 是端到端 DNS 测试一跑就抓到的。
+    if (config.portForwards.length > 0 || config.udpForwards.length > 0) {
       if (config.ipv4 === null) {
         this.logger.warn(
           '组网数据面未启用：需要在配置里指定本机虚拟 IP（networking.ipv4）。' +
             '没有它无法作为回包源地址，对端会丢弃数据。控制面（节点发现与路由同步）不受影响。',
         );
       } else {
-        acceptor.enableDataPlane(config.portForwards);
+        // 目标为空字符串的 UDP 映射要先探测系统解析器：
+        // DNS 解析器通常不是 127.0.0.1，写死会让开箱的 DNS 不工作
+        const systemDns = config.udpForwards.some((f) => f.targetHost === '')
+          ? resolveSystemDnsServer()
+          : null;
+        acceptor.enableDataPlane({
+          tcp: config.portForwards,
+          udp: config.udpForwards.map((f) => ({
+            virtualPort: f.virtualPort,
+            targetHost: f.targetHost === '' ? (systemDns ?? '127.0.0.1') : f.targetHost,
+            targetPort: f.targetPort,
+          })),
+        });
+        if (systemDns !== null) {
+          this.logger.info(`组网 UDP 转发使用系统 DNS 解析器：${systemDns}:53`);
+        }
         this.logger.info(
-          `组网数据面已启用：${config.portForwards
+          `组网数据面已启用：TCP ${config.portForwards
             .map((f) => `${f.virtualPort}→127.0.0.1:${f.localPort}`)
+            .join(', ')}；UDP ${config.udpForwards
+            .map((f) => `${f.virtualPort}→${f.targetHost === '' ? '系统解析器' : f.targetHost}:${f.targetPort}`)
             .join(', ')}`,
         );
       }

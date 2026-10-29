@@ -49,7 +49,9 @@ import { extractFrame, framePacket } from './framing';
 import { PacketType, PeerManagerHeaderFlags, decodeHeader } from './protocol';
 import { deriveTrafficKey, directionForSender, decryptPayload, encryptPayload } from './dataPlane';
 import { TcpStack, selectPeerForPacket } from './tcpStack';
-import { decodeIpv4Header } from './ip';
+import { UdpStack } from './udpStack';
+import { buildIcmpEchoReply } from './icmp';
+import { IpProtocol, decodeIpv4Header } from './ip';
 import {
   buildOspfSyncRouteRequest,
   buildWrappedRpcResponse,
@@ -256,6 +258,8 @@ export class EasyTierAcceptor {
   async close(): Promise<void> {
     this.tcpStack?.close();
     this.tcpStack = null;
+    this.udpStack?.close();
+    this.udpStack = null;
     for (const conn of this.connections) conn.socket.destroy();
     this.connections.clear();
     await new Promise<void>((resolve) => {
@@ -730,11 +734,65 @@ export class EasyTierAcceptor {
       return;
     }
 
-    this.tcpStack?.handleIpPacket(ipPacket);
+    this.dispatchIpPacket(ipPacket);
   }
 
-  /** 用户态 TCP 栈（懒创建：只有配置了端口转发才有意义）。 */
+  /**
+   * 按 IP 协议号把包分发给对应的处理器。
+   *
+   * 顺序有讲究：**ICMP 先处理**——它是无状态的 echo 应答，不该因为
+   * TCP/UDP 栈的会话状态而受影响（`ping` 要能随时通）。
+   */
+  private dispatchIpPacket(ipPacket: Buffer): void {
+    const header = decodeIpv4Header(ipPacket);
+    if (header === null) return;
+
+    if (header.protocol === IpProtocol.ICMP) {
+      const reply = buildIcmpEchoReply(
+        ipPacket,
+        this.options.virtualIpv4 ?? '',
+        header.src,
+      );
+      if (reply !== null) {
+        this.sendDataPacket(reply);
+      } else {
+        this.callbacks.onDataPlaneLog?.(
+          `丢弃非 echo-request 的 ICMP（type 不在支持范围）`,
+        );
+      }
+      return;
+    }
+
+    if (header.protocol === IpProtocol.UDP) {
+      if (this.udpStack === null) {
+        this.callbacks.onDataPlaneLog?.(
+          `收到 UDP 包但未配置 UDP 映射（${header.src} → ${header.dst}）；` +
+            `DNS 走 UDP，需要配 udpForwards 才能解析域名`,
+        );
+        return;
+      }
+      this.udpStack.handleIpPacket(ipPacket);
+      return;
+    }
+
+    if (header.protocol === IpProtocol.TCP) {
+      if (this.tcpStack === null) {
+        this.callbacks.onDataPlaneLog?.('收到 TCP 包但未配置 TCP 映射');
+        return;
+      }
+      this.tcpStack.handleIpPacket(ipPacket);
+      return;
+    }
+
+    this.callbacks.onDataPlaneLog?.(
+      `丢弃不支持协议的 IP 包 protocol=${header.protocol}`,
+    );
+  }
+
+  /** 用户态 TCP 栈（懒创建：只有配置了端口映射才有意义）。 */
   private tcpStack: TcpStack | null = null;
+  /** 用户态 UDP 转发（DNS 走它）。 */
+  private udpStack: UdpStack | null = null;
 
   /**
    * 启用数据面：把虚拟 IP 上的端口桥接到本机端口。
@@ -743,10 +801,15 @@ export class EasyTierAcceptor {
    * 时，把连接转给本机 127.0.0.1:localPort"。这就是组网的实际用途——
    * follower 通过虚拟 IP 访问 master 的管理界面（8787）。
    */
-  enableDataPlane(
-    forwards: Array<{ virtualPort: number; localPort: number }>,
-  ): void {
-    if (forwards.length === 0) return;
+  enableDataPlane(options: {
+    /** TCP 端口映射：虚拟端口 → 本机端口 */
+    tcp?: Array<{ virtualPort: number; localPort: number }>;
+    /** UDP 端口映射：虚拟端口 → 目标（DNS 常指向 systemd-resolved 的 127.0.0.53） */
+    udp?: Array<{ virtualPort: number; targetHost: string; targetPort: number }>;
+  }): void {
+    const tcpForwards = options.tcp ?? [];
+    const udpForwards = options.udp ?? [];
+    if (tcpForwards.length === 0 && udpForwards.length === 0) return;
     // 没有虚拟 IP 时**不能**开数据面：我们会用自己的 IP 作为回包的源地址，
     // 而 `0.0.0.0` 不是合法源地址，对端会判为无效并丢弃——症状是
     // "端口映射配了、TCP 能建立、但一收数据就卡住"，极难定位。
@@ -757,18 +820,44 @@ export class EasyTierAcceptor {
           '它是回包的源地址，留空会让对端丢弃我们的数据',
       );
     }
-    if (this.tcpStack === null) {
-      this.tcpStack = new TcpStack({
-        localIp: this.options.virtualIpv4,
-        bridgeHost: '127.0.0.1',
-        sendIpPacket: (packet) => this.sendDataPacket(packet),
-        log: (message) => this.callbacks.onDataPlaneLog?.(message),
-      });
-      this.tcpStack.start();
+    if (tcpForwards.length > 0) {
+      if (this.tcpStack === null) {
+        this.tcpStack = new TcpStack({
+          localIp: this.options.virtualIpv4,
+          bridgeHost: '127.0.0.1',
+          sendIpPacket: (packet) => this.sendDataPacket(packet),
+          log: (message) => this.callbacks.onDataPlaneLog?.(message),
+        });
+        this.tcpStack.start();
+      }
+      for (const forward of tcpForwards) {
+        this.tcpStack.listen(forward.virtualPort, forward.localPort);
+      }
     }
-    for (const forward of forwards) {
-      this.tcpStack.listen(forward.virtualPort, forward.localPort);
+
+    if (udpForwards.length > 0) {
+      if (this.udpStack === null) {
+        this.udpStack = new UdpStack({
+          localIp: this.options.virtualIpv4,
+          // 兜底目标；每个端口通过 listen() 自带目标，这个值基本不会用到
+          forwardHost: '127.0.0.1',
+          sendIpPacket: (packet) => this.sendDataPacket(packet),
+          log: (message) => this.callbacks.onDataPlaneLog?.(message),
+        });
+        this.udpStack.start();
+      }
+      for (const forward of udpForwards) {
+        this.udpStack.listen(forward.virtualPort, forward.targetHost, forward.targetPort);
+      }
     }
+  }
+
+  /** 数据面会话数（诊断用）。 */
+  dataPlaneStats(): { tcp: number; udp: number } {
+    return {
+      tcp: this.tcpStack?.connectionCount() ?? 0,
+      udp: this.udpStack?.sessionCount() ?? 0,
+    };
   }
 
   /** 数据面连接数（诊断用）。 */

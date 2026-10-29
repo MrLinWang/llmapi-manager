@@ -393,16 +393,25 @@ fn build_config(options: &NodeOptions) -> anyhow::Result<TomlConfig> {
     Ok(config)
 }
 
-/// 解析 `"<bind>-><dst>"` 形式的转发规则。
+/// 解析 `"[udp:]<bind>-><dst>"` 形式的转发规则。
 ///
 /// 用 `->` 而不是 `:` 分隔两端，否则 `127.0.0.1:8080:10.0.0.1:80`
 /// 会有 4 段、无法与 IPv6 地址区分。`->` 视觉上也更清楚。
+///
+/// 协议默认是 tcp；前面加 `udp:` 表示 UDP 转发。UDP 支持是必需的——
+/// **DNS 走 UDP**，没有它就没法在虚拟网内验证域名解析。
 fn parse_port_forward(rule: &str) -> napi::Result<easytier::common::config::PortForwardConfig> {
     use std::net::SocketAddr;
 
-    let (bind, dst) = rule.split_once("->").ok_or_else(|| {
+    // 协议前缀：`udp:` 开头表示 UDP，其余都按 tcp
+    let (proto, rest) = match rule.trim().strip_prefix("udp:") {
+        Some(remainder) => ("udp", remainder),
+        None => ("tcp", rule.trim().strip_prefix("tcp:").unwrap_or(rule.trim())),
+    };
+
+    let (bind, dst) = rest.split_once("->").ok_or_else(|| {
         napi::Error::from_reason(format!(
-            "端口转发规则格式错误：{rule}（期望 \"<bind_ip>:<port>-><dst_ip>:<port>\"）"
+            "端口转发规则格式错误：{rule}（期望 \"[udp:]<bind_ip>:<port>-><dst_ip>:<port>\"）"
         ))
     })?;
 
@@ -416,7 +425,7 @@ fn parse_port_forward(rule: &str) -> napi::Result<easytier::common::config::Port
     Ok(easytier::common::config::PortForwardConfig {
         bind_addr,
         dst_addr,
-        proto: "tcp".to_string(),
+        proto: proto.to_string(),
     })
 }
 

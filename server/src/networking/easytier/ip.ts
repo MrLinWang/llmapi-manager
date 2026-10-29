@@ -281,19 +281,76 @@ export function decodeUdpHeader(buffer: Buffer): UdpHeader | null {
   };
 }
 
-/** 编码 UDP 头（8 字节）。校验和为 0 表示"未计算"，IPv4 下合法。 */
+/**
+ * 计算 UDP 校验和（含伪首部）。
+ *
+ * UDP 的校验和规则比 TCP 特殊：**算出来是 0 时要写成 0xffff**。
+ * 因为线上 0 表示"发送方未计算校验和"，接收方会跳过校验——把真实的
+ * 校验结果 0 原样写进去，等于声明"不校验"，对端就可能接受被篡改的包。
+ *
+ * 返回 0 表示调用方应当省略校验（仅在数据本身不需要校验时）。
+ */
+export function udpChecksum(
+  header: Buffer,
+  payload: Buffer,
+  pseudo: { src: string; dst: string },
+): number {
+  const udpLength = header.length + payload.length;
+  const pseudoHeader = Buffer.alloc(12);
+  pseudoHeader.writeUInt32BE(ipToInt(pseudo.src), 0);
+  pseudoHeader.writeUInt32BE(ipToInt(pseudo.dst), 4);
+  pseudoHeader[8] = 0;
+  pseudoHeader[9] = IpProtocol.UDP;
+  pseudoHeader.writeUInt16BE(udpLength, 10);
+  const sum = internetChecksum(Buffer.concat([pseudoHeader, header, payload]));
+  // 0 在 UDP 里表示"未计算"，所以真实结果 0 必须写成 0xffff
+  return sum === 0 ? 0xffff : sum;
+}
+
+/**
+ * 编码 UDP 头（8 字节）。
+ *
+ * 传了 `pseudo` 就会算校验和（推荐——不少实现会丢弃校验和为 0 的包）；
+ * 不传则填 0 表示"未计算"，IPv4 下这是合法的。
+ */
 export function encodeUdpHeader(header: {
   srcPort: number;
   dstPort: number;
   length: number;
   checksum?: number;
+  /** 传了就自动计算校验和 */
+  pseudo?: { src: string; dst: string; payload: Buffer };
 }): Buffer {
   const buf = Buffer.alloc(8);
   buf.writeUInt16BE(header.srcPort, 0);
   buf.writeUInt16BE(header.dstPort, 2);
   buf.writeUInt16BE(header.length, 4);
-  buf.writeUInt16BE(header.checksum ?? 0, 6);
+  let checksum = header.checksum ?? 0;
+  if (header.pseudo !== undefined) {
+    checksum = udpChecksum(buf, header.pseudo.payload, {
+      src: header.pseudo.src,
+      dst: header.pseudo.dst,
+    });
+  }
+  buf.writeUInt16BE(checksum, 6);
   return buf;
+}
+
+/** 构造一个完整 UDP 数据报（UDP 头 + 载荷，不含 IP 头），校验和已填。 */
+export function buildUdpDatagram(options: {
+  srcPort: number;
+  dstPort: number;
+  payload: Buffer;
+  srcIp: string;
+  dstIp: string;
+}): Buffer {
+  const header = encodeUdpHeader({
+    srcPort: options.srcPort,
+    dstPort: options.dstPort,
+    length: 8 + options.payload.length,
+    pseudo: { src: options.srcIp, dst: options.dstIp, payload: options.payload },
+  });
+  return Buffer.concat([header, options.payload]);
 }
 
 /**

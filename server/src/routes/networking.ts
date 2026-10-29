@@ -108,6 +108,7 @@ export function registerNetworkingRoutes(
         ipv4?: unknown;
         listenPort?: unknown;
         portForwards?: unknown;
+        udpForwards?: unknown;
       };
       const settings = repos.settings.read();
       const current = readConfig(repos, ctx.secrets);
@@ -166,6 +167,54 @@ export function registerNetworkingRoutes(
           seen.add(forward.virtualPort);
         }
         next.portForwards = parsed;
+      }
+      if (body.udpForwards !== undefined) {
+        const raw = body.udpForwards;
+        if (!Array.isArray(raw)) {
+          throw badRequest('networking.udpForwards.mustBeArray');
+        }
+        const parsed: Array<{ virtualPort: number; targetHost: string; targetPort: number }> = [];
+        for (const item of raw) {
+          const entry = item as {
+            virtualPort?: unknown;
+            targetHost?: unknown;
+            targetPort?: unknown;
+          };
+          const virtualPort = entry.virtualPort;
+          const targetHost = entry.targetHost;
+          const targetPort = entry.targetPort;
+          if (
+            typeof virtualPort !== 'number' ||
+            !Number.isInteger(virtualPort) ||
+            virtualPort < 1 ||
+            virtualPort > 65535
+          ) {
+            throw badRequest('networking.udpForwards.invalidVirtualPort');
+          }
+          // 空字符串表示"自动探测系统解析器"，是合法值
+          if (typeof targetHost !== 'string') {
+            throw badRequest('networking.udpForwards.invalidTargetHost');
+          }
+          if (
+            typeof targetPort !== 'number' ||
+            !Number.isInteger(targetPort) ||
+            targetPort < 1 ||
+            targetPort > 65535
+          ) {
+            throw badRequest('networking.udpForwards.invalidTargetPort');
+          }
+          parsed.push({ virtualPort, targetHost, targetPort });
+        }
+        const seen = new Set<number>();
+        for (const forward of parsed) {
+          if (seen.has(forward.virtualPort)) {
+            throw badRequest('networking.udpForwards.duplicateVirtualPort', {
+              port: forward.virtualPort,
+            });
+          }
+          seen.add(forward.virtualPort);
+        }
+        next.udpForwards = parsed;
       }
       if (body.enabled !== undefined) {
         if (typeof body.enabled !== 'boolean') throw badRequest('networking.enabled.mustBeBoolean');

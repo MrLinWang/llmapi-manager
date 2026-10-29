@@ -27,6 +27,15 @@ export const zhNetworking = {
      */
     duplicateVirtualPort: 'portForwards 里的虚拟端口 {{port}} 重复了',
   },
+  udpForwards: {
+    /** UDP 转发（DNS 走 UDP，没有它解析不了域名） */
+    mustBeArray: 'udpForwards 必须是数组',
+    invalidVirtualPort: 'udpForwards[].virtualPort 必须是 1-65535 之间的整数',
+    /** 空字符串是合法值，表示自动探测系统 DNS 解析器 */
+    invalidTargetHost: 'udpForwards[].targetHost 必须是字符串（留空表示自动探测系统解析器）',
+    invalidTargetPort: 'udpForwards[].targetPort 必须是 1-65535 之间的整数',
+    duplicateVirtualPort: 'udpForwards 里的虚拟端口 {{port}} 重复了',
+  },
   enabled: {
     mustBeBoolean: 'enabled 必须是布尔值',
   },

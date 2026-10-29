@@ -87,6 +87,20 @@ export interface NetworkingConfig {
    * "本机监听 → 转发到虚拟网内的目标"）。
    */
   portForwards: Array<{ virtualPort: number; localPort: number }>;
+  /**
+   * UDP 转发（只对 `builtin` 引擎生效）。**DNS 走 UDP**，没有它
+   * 虚拟网内的域名解析必然失败。
+   *
+   * `targetHost` 为空字符串表示"自动探测本机解析器"——DNS 的解析器
+   * 通常**不是** `127.0.0.1`（systemd-resolved 用 `127.0.0.53`），
+   * 由运行时读 `/etc/resolv.conf` 决定，避免开箱就不工作。
+   */
+  udpForwards: Array<{
+    virtualPort: number;
+    /** 空字符串 = 自动探测系统解析器 */
+    targetHost: string;
+    targetPort: number;
+  }>;
   /** 中继服务器列表。为空时 EasyTier 只能靠局域网发现 */
   peers: string[];
   /** 本节点在网络里显示的名字，便于在两台机器间辨认 */
@@ -110,6 +124,8 @@ export function defaultNetworkingConfig(): NetworkingConfig {
     ipv4: null,
     listenPort: 11011,
     portForwards: [{ virtualPort: 8787, localPort: 8787 }],
+    // 默认把虚拟网内的 53 端口转给本机解析器：开箱就能解析域名
+    udpForwards: [{ virtualPort: 53, targetHost: '', targetPort: 53 }],
   };
 }
 

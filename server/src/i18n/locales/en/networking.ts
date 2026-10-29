@@ -18,6 +18,14 @@ export const enNetworking: typeof zhNetworking = {
     invalidLocalPort: 'portForwards[].localPort must be an integer between 1 and 65535',
     duplicateVirtualPort: 'duplicate virtual port {{port}} in portForwards',
   },
+  udpForwards: {
+    mustBeArray: 'udpForwards must be an array',
+    invalidVirtualPort: 'udpForwards[].virtualPort must be an integer between 1 and 65535',
+    invalidTargetHost:
+      'udpForwards[].targetHost must be a string (empty means auto-detect the system resolver)',
+    invalidTargetPort: 'udpForwards[].targetPort must be an integer between 1 and 65535',
+    duplicateVirtualPort: 'duplicate virtual port {{port}} in udpForwards',
+  },
   enabled: {
     mustBeBoolean: 'enabled must be a boolean',
   },
