@@ -102,6 +102,17 @@ describe('设备互联：参数校验', () => {
     // 密钥默认为空，必须由用户显式设置
     expect(config.networkSecret).toBe('');
   });
+
+  it('默认引擎是自研（不依赖 Rust 工具链），并预置本服务管理界面的端口映射', () => {
+    const config = defaultNetworkingConfig();
+    // 默认自研：原生模块需要编译，默认安装路径里往往不存在
+    expect(config.engine).toBe('builtin');
+    // 监听端口避开官方的 11010，允许两个引擎在同一台机器并存
+    expect(config.listenPort).toBe(11011);
+    // 开箱即用的数据面映射：对端可通过虚拟 IP 访问本服务管理界面。
+    // 没有这一项，组网只能互相看见而没有任何服务可达。
+    expect(config.portForwards).toEqual([{ virtualPort: 8787, localPort: 8787 }]);
+  });
 });
 
 describe('设备互联：真实状态与"名义运行"的区分', () => {

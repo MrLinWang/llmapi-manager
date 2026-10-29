@@ -12,6 +12,12 @@ export const enNetworking: typeof zhNetworking = {
   listenPort: {
     invalid: 'listenPort must be an integer between 1 and 65535',
   },
+  portForwards: {
+    mustBeArray: 'portForwards must be an array',
+    invalidVirtualPort: 'portForwards[].virtualPort must be an integer between 1 and 65535',
+    invalidLocalPort: 'portForwards[].localPort must be an integer between 1 and 65535',
+    duplicateVirtualPort: 'duplicate virtual port {{port}} in portForwards',
+  },
   enabled: {
     mustBeBoolean: 'enabled must be a boolean',
   },

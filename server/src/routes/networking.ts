@@ -107,6 +107,7 @@ export function registerNetworkingRoutes(
         hostname?: unknown;
         ipv4?: unknown;
         listenPort?: unknown;
+        portForwards?: unknown;
       };
       const settings = repos.settings.read();
       const current = readConfig(repos, ctx.secrets);
@@ -125,6 +126,46 @@ export function registerNetworkingRoutes(
           throw badRequest('networking.listenPort.invalid');
         }
         next.listenPort = port;
+      }
+      if (body.portForwards !== undefined) {
+        const raw = body.portForwards;
+        if (!Array.isArray(raw)) {
+          throw badRequest('networking.portForwards.mustBeArray');
+        }
+        const parsed: Array<{ virtualPort: number; localPort: number }> = [];
+        for (const item of raw) {
+          const entry = item as { virtualPort?: unknown; localPort?: unknown };
+          const virtualPort = entry.virtualPort;
+          const localPort = entry.localPort;
+          if (
+            typeof virtualPort !== 'number' ||
+            !Number.isInteger(virtualPort) ||
+            virtualPort < 1 ||
+            virtualPort > 65535
+          ) {
+            throw badRequest('networking.portForwards.invalidVirtualPort');
+          }
+          if (
+            typeof localPort !== 'number' ||
+            !Number.isInteger(localPort) ||
+            localPort < 1 ||
+            localPort > 65535
+          ) {
+            throw badRequest('networking.portForwards.invalidLocalPort');
+          }
+          parsed.push({ virtualPort, localPort });
+        }
+        // 重复的 virtualPort 会导致后注册的覆盖前面的——用户看不出为什么某条不生效
+        const seen = new Set<number>();
+        for (const forward of parsed) {
+          if (seen.has(forward.virtualPort)) {
+            throw badRequest('networking.portForwards.duplicateVirtualPort', {
+              port: forward.virtualPort,
+            });
+          }
+          seen.add(forward.virtualPort);
+        }
+        next.portForwards = parsed;
       }
       if (body.enabled !== undefined) {
         if (typeof body.enabled !== 'boolean') throw badRequest('networking.enabled.mustBeBoolean');

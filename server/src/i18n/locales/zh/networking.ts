@@ -16,6 +16,17 @@ export const zhNetworking = {
     /** 自研引擎的 TCP 监听端口 */
     invalid: 'listenPort 必须是 1-65535 之间的整数',
   },
+  portForwards: {
+    /** 数据面的端口映射列表 */
+    mustBeArray: 'portForwards 必须是数组',
+    invalidVirtualPort: 'portForwards[].virtualPort 必须是 1-65535 之间的整数',
+    invalidLocalPort: 'portForwards[].localPort 必须是 1-65535 之间的整数',
+    /**
+     * 重复的虚拟端口：后注册的会覆盖前面的，用户看不出为什么某条规则不生效，
+     * 所以直接拒绝比静默覆盖好
+     */
+    duplicateVirtualPort: 'portForwards 里的虚拟端口 {{port}} 重复了',
+  },
   enabled: {
     mustBeBoolean: 'enabled 必须是布尔值',
   },
