@@ -52,6 +52,7 @@ import { TcpStack, selectPeerForPacket } from './tcpStack';
 import { UdpStack } from './udpStack';
 import { buildIcmpEchoReply } from './icmp';
 import { IpReassembler } from './ipReassembly';
+import { PeerTopology, decodeConnPeerList, decodeConnBitmap } from './topology';
 import { IpProtocol, decodeIpv4Header } from './ip';
 import {
   buildOspfSyncRouteRequest,
@@ -86,6 +87,8 @@ const SYNC_REQ_FIELD = {
   mySessionId: 2,
   isInitiator: 3,
   peerInfos: 4,
+  /** oneof conn_info 的 bitmap 分支（`peer_rpc.proto:117`） */
+  connBitmap: 5,
   /** oneof conn_info 的 list 分支（`peer_rpc.proto:118`） */
   connPeerList: 7,
 } as const;
@@ -161,6 +164,23 @@ interface Connection {
   latencyMs?: number;
 }
 
+/**
+ * 中继跳数上限。
+ *
+ * 每转发一跳 `forward_counter` 加一，超过就丢弃。用途是**防环**：
+ * 拓扑有误或对端路由不一致时，包可能在几个节点间来回弹，
+ * 没有上限会一直占用带宽。8 跳对"两台机器 + 中继"的组网绰绰有余。
+ */
+const MAX_FORWARD_HOPS = 8;
+
+/**
+ * 拓扑广播的去抖窗口（毫秒）。
+ *
+ * 多节点同时上线时 OSPF 请求会成串到达；每个都触发全量广播会产生
+ * O(n²) 的包。合并到 200ms 内一次即可。
+ */
+const TOPOLOGY_BROADCAST_DEBOUNCE_MS = 200;
+
 /** 单帧解析循环的状态。 */
 function makeFrameBuffer() {
   return { buf: Buffer.alloc(0) };
@@ -233,6 +253,7 @@ export class EasyTierAcceptor {
     // 传了固定私钥时**必须从它推导公钥**，不能另外随机一对——
     // 否则广播出去的 noise_static_pubkey 与握手实际使用的私钥不匹配，
     // 对端钉扎校验会失败（或更糟：对端接受的公钥永远无法再复现）。
+    this.topology = new PeerTopology(options.myPeerId);
     this.staticKeyPair = options.staticPrivateKey
       ? {
           privateKey: options.staticPrivateKey,
@@ -264,6 +285,11 @@ export class EasyTierAcceptor {
     this.udpStack?.close();
     this.udpStack = null;
     this.reassembler.close();
+    if (this.topologyBroadcastTimer !== null) {
+      clearTimeout(this.topologyBroadcastTimer);
+      this.topologyBroadcastTimer = null;
+    }
+    this.topology.clear();
     for (const conn of this.connections) conn.socket.destroy();
     this.connections.clear();
     await new Promise<void>((resolve) => {
@@ -574,6 +600,33 @@ export class EasyTierAcceptor {
       }
       if (selfInfo.ipv4Addr !== null) conn.ipv4 = selfInfo.ipv4Addr;
     }
+    // ── 学拓扑：节点信息 + 连接关系 ──
+    // 这是多跳中继的基础：只有知道"谁连着谁"，才能算出到非直连目标的下一跳。
+    this.topology.learnPeers(
+      learned.map((info) => ({
+        peerId: info.peerId,
+        ipv4: info.ipv4Addr,
+        hostname: info.hostname,
+        networkLength: info.networkLength,
+      })),
+    );
+    // 连接关系有两个 oneof 分支，官方不同场景会用不同分支，两种都要解
+    const innerFields = decodeFields(innerBody);
+    const connPeerListRaw = getBytes(innerFields, SYNC_REQ_FIELD.connPeerList);
+    if (connPeerListRaw !== null) {
+      for (const row of decodeConnPeerList(connPeerListRaw)) {
+        this.topology.learnConnections(row.peerId, row.connectedPeerIds);
+      }
+    }
+    const connBitmapRaw = getBytes(innerFields, SYNC_REQ_FIELD.connBitmap);
+    if (connBitmapRaw !== null) {
+      const { peerIds, bits } = decodeConnBitmap(connBitmapRaw);
+      this.topology.learnConnBitmap(peerIds, bits);
+    }
+    // 我们与这条连接的对端本身就是直连——这条边必须自己补上，
+    // 不能指望对端在 conn_info 里提到我们（它可能只报自己的邻居）
+    this.topology.addEdge(this.options.myPeerId, conn.remotePeerId);
+
     // 对端广播的 peer_infos 里有没有我们？有 = 它的 OSPF 图已经学到本节点
     this.debug(
       `对端 peer_infos: ${JSON.stringify(
@@ -604,7 +657,33 @@ export class EasyTierAcceptor {
     // 主动广播自己的路由信息，让对端的 OSPF 图里出现本节点
     if (this.options.advertiseRoute === true) {
       this.advertiseRoute(conn);
+      // **还要广播给其他所有连接**：刚才学到的拓扑（比如"B 存在"）
+      // 需要让 A 也看到。只在回应请求者时广播的话，A 送来第一个请求时
+      // 我们还不知道 B，A 就永远学不到 B——三节点以上无法互相发现。
+      this.scheduleTopologyBroadcast();
     }
+  }
+
+  /**
+   * 拓扑变化后，延迟一小段时间再向所有连接重播。
+   *
+   * 去抖的原因：多节点同时上线时，OSPF 请求会成串到达，每个都触发一轮
+   * 全量广播会产生 O(n²) 的包。合并成一个延迟任务即可。
+   */
+  private scheduleTopologyBroadcast(): void {
+    if (this.topologyBroadcastTimer !== null) return;
+    this.topologyBroadcastTimer = setTimeout(() => {
+      this.topologyBroadcastTimer = null;
+      for (const conn of this.connections) {
+        if (this.options.advertiseRoute !== true) continue;
+        try {
+          this.advertiseRoute(conn);
+        } catch (cause) {
+          this.callbacks.onError?.(cause as Error);
+        }
+      }
+    }, TOPOLOGY_BROADCAST_DEBOUNCE_MS);
+    this.topologyBroadcastTimer.unref?.();
   }
 
   /** 构造并发送自己的 `SyncRouteInfo` 请求（让对端把本节点加进路由表）。 */
@@ -614,11 +693,15 @@ export class EasyTierAcceptor {
     // 无虚拟 IP 的节点进不了路由表（实测踩过：连接/应答都正常，
     // 但对端 peer 列表主机名一直是 peer-<id> 兜底）。
     const ip = this.options.virtualIpv4 ?? null;
+    // 版本必须递增，否则对端按"版本更高才接受"的规则丢弃整个更新
+    this.topologyVersion += 1;
+    const version = this.topologyVersion;
+
     const route: RoutePeerInfo = {
       peerId: this.options.myPeerId,
       cost: 1,
       hostname: this.options.hostname ?? null,
-      version: 1,
+      version,
       easytierVersion: '2.7.0',
       proxyCidrs: [],
       peerRouteId: Date.now() % 0x7fffffff,
@@ -628,9 +711,40 @@ export class EasyTierAcceptor {
       noiseStaticPubkey: this.staticKeyPair.publicKey,
     };
 
+    // **把所有已知节点都带上**，而不只是自己。
+    //
+    // 多跳的前提：对端要能通过我们学到"还有哪些节点存在"。只报自己时，
+    // 对端的 OSPF 图里永远只有它和本节点，它根本不知道第三个节点，
+    // 也就不会把发往第三方的包交给我们转发——中继无从谈起。
+    //
+    // 自己那条用最新构造的 `route`（含刚更新的 peerRouteId），
+    // 其余用拓扑里学到的信息。
+    const otherRoutes: RoutePeerInfo[] = this.topology
+      .knownPeers()
+      .filter((peer) => peer.peerId !== this.options.myPeerId)
+      // **不要把接收方自己的信息回给它**。官方在
+      // `check_duplicate_peer_id` 里会检查"别人发来的我的信息"：
+      // peer_route_id 与本机不同且 version 更高时，判定本机 peer id 被
+      // 重复占用并 `panic!`。我们的副本里 peerRouteId/version 都是造出来的，
+      // 必然对不上——回给对端等于主动触发它的重复检测。
+      .filter((peer) => peer.peerId !== conn.remotePeerId)
+      .map((peer) => ({
+        peerId: peer.peerId,
+        cost: 1,
+        hostname: peer.hostname,
+        // 同样要用递增版本：对端按"比旧版本高才接受"判断
+        version,
+        easytierVersion: '2.7.0',
+        proxyCidrs: [],
+        peerRouteId: peer.peerId,
+        networkLength: peer.networkLength,
+        ipv4Addr: peer.ipv4,
+        noiseStaticPubkey: null,
+      }));
+
     // SyncRouteInfoRequest：my_peer_id(1) + my_session_id(2) + is_initiator(3)
     //                      + peer_infos(4) + conn_peer_list(7, oneof)
-    const innerInfos = encodeRoutePeerInfos([route]);
+    const innerInfos = encodeRoutePeerInfos([route, ...otherRoutes]);
 
     // conn_info：告诉对端"谁和谁直连"。路由表的下一跳图完全由各节点的
     // conn_info 拼出来——只发 peer_infos 不发 conn_info，图里就没有
@@ -639,20 +753,34 @@ export class EasyTierAcceptor {
     //
     // 用 conn_peer_list 分支（peer_ospf_route.rs:1458 的 update_conn_info
     // 两种 oneof 都支持），语义直白：本节点直连着对端。
-    const connPeerList = Buffer.concat([
-      encodeBytesField(
-        1, // RouteConnPeerList.peer_conn_infos
-        Buffer.concat([
-          encodeBytesField(
-            1, // PeerConnInfo.peer_id
-            encodePeerIdVersion(this.options.myPeerId, 1),
-          ),
-          ...directPeers.map(
-            (peerId) => encodeVarintField(2, peerId), // PeerConnInfo.connected_peer_ids
-          ),
-        ]),
+    // 连接关系也要广播**全部已知的边**，不只是自己那一条：
+    // 对端靠这些边拼出完整拓扑，才能算出"到第三方该经由谁"。
+    const connectionRows = this.topology.connectionRows();
+    // 兜底：拓扑还没学到边时，至少把自己与直连对端的关系报出去
+    if (connectionRows.length === 0 && directPeers.length > 0) {
+      connectionRows.push({
+        peerId: this.options.myPeerId,
+        connectedPeerIds: directPeers,
+      });
+    }
+    const connPeerList = Buffer.concat(
+      connectionRows.map((row) =>
+        encodeBytesField(
+          1, // RouteConnPeerList.peer_conn_infos
+          Buffer.concat([
+            encodeBytesField(
+              1, // PeerConnInfo.peer_id
+              // 版本同样要递增：官方 `update_conn_info_one_peer` 只在
+              // `peer_id_version.version > old.version` 时才更新
+              encodePeerIdVersion(row.peerId, version),
+            ),
+            ...row.connectedPeerIds.map(
+              (peerId) => encodeVarintField(2, peerId), // PeerConnInfo.connected_peer_ids
+            ),
+          ]),
+        ),
       ),
-    ]);
+    );
 
     const body = Buffer.concat([
       encodeVarintField(SYNC_REQ_FIELD.myPeerId, this.options.myPeerId),
@@ -706,7 +834,7 @@ export class EasyTierAcceptor {
    */
   private handleDataPacket(
     conn: Connection,
-    header: { flags: number },
+    header: { flags: number; toPeerId: number; forwardCounter: number },
     frame: Buffer,
   ): void {
     if ((header.flags & PeerManagerHeaderFlags.ENCRYPTED) === 0) {
@@ -735,6 +863,29 @@ export class EasyTierAcceptor {
       this.callbacks.onError?.(
         new Error(`Data 包解密失败：${(e as Error).message}`),
       );
+      return;
+    }
+
+    // ── 中继：包头指定的目标不是我们 → 转给下一跳 ──
+    //
+    // 这是多跳的关键。对端 A 想访问 B（A 与 B 不直连，都连着我们），
+    // 它会把包发给我们、`to_peer_id` 填 B。我们必须把它转出去，
+    // 而不是当成"发给自己的数据"去解析 IP 头。
+    //
+    // `to_peer_id == 0` 表示"按目标 IP 路由"，那是发给我们自己的。
+    if (header.toPeerId !== 0 && header.toPeerId !== this.options.myPeerId) {
+      // 转发计数防环：每跳 +1，超过上限说明拓扑有环或路由不对
+      const nextCounter = header.forwardCounter + 1;
+      if (nextCounter > MAX_FORWARD_HOPS) {
+        this.callbacks.onDataPlaneLog?.(
+          `中继跳数超过上限（${nextCounter}），丢弃：目标 ${header.toPeerId}`,
+        );
+        return;
+      }
+      this.sendDataPacket(ipPacket, {
+        toPeerId: header.toPeerId,
+        forwardCounter: nextCounter,
+      });
       return;
     }
 
@@ -812,6 +963,27 @@ export class EasyTierAcceptor {
   private readonly reassembler = new IpReassembler({
     log: (message) => this.callbacks.onDataPlaneLog?.(message),
   });
+  /**
+   * 虚拟网络拓扑（从 OSPF 消息里学）。
+   *
+   * 多跳中继的基础：靠它算出"到非直连目标该经由哪个邻居转发"。
+   */
+  private readonly topology: PeerTopology;
+  /** 拓扑变化后的去抖广播定时器（见 `scheduleTopologyBroadcast`） */
+  private topologyBroadcastTimer: NodeJS.Timeout | null = null;
+  /**
+   * 拓扑广播的版本号，**必须单调递增**。
+   *
+   * 官方的 `update_peer_infos` 与 `update_conn_info_one_peer` 都按
+   * `new.version > old.version` 决定是否接受更新——版本不涨的包会被**静默丢弃**。
+   * 我一开始对所有节点都写死 `version: 1`，于是：
+   *
+   * - 第一次广播被接受（对端还没有这些条目）
+   * - 之后拓扑再变化（比如第三个节点上线），同一版本的更新全被忽略
+   *
+   * 症状是"先连上的对端永远学不到后连上的节点"，非常有误导性。
+   */
+  private topologyVersion = 1;
 
   /**
    * 启用数据面：把虚拟 IP 上的端口桥接到本机端口。
@@ -904,22 +1076,87 @@ export class EasyTierAcceptor {
    * 3. 多条连接且都不匹配 —— 丢弃并记日志。**不能猜**：发错对端会让
    *    数据出现在别人的虚拟网里；而静默丢弃至少是"不通"而不是"串了"。
    */
-  private pickConnectionFor(ipPacket: Buffer): Connection | null {
+  private pickConnectionFor(ipPacket: Buffer): {
+    conn: Connection | null;
+    /** 包头里该填的最终目标 peer_id（多跳时与 conn.remotePeerId 不同） */
+    toPeerId: number;
+  } {
     const header = decodeIpv4Header(ipPacket);
+    const dstIp = header?.dst ?? null;
+
+    // ① 按目标 IP 查拓扑，得到最终目标 peer_id
+    const dstPeerId = dstIp === null ? null : this.topology.peerIdByIpv4(dstIp);
+    if (dstPeerId !== null) {
+      if (dstPeerId === this.options.myPeerId) {
+        // 目标是自己：不该走网络（可能是我们广告的 IP 被误用）
+        this.callbacks.onDataPlaneLog?.(
+          `目标 IP ${dstIp} 是本机虚拟 IP，丢弃（不应回环发送）`,
+        );
+        return { conn: null, toPeerId: dstPeerId };
+      }
+      // ② 算下一跳：多跳时 nextHop ≠ 最终目标
+      const hop = this.topology.nextHop(dstPeerId);
+      if (hop !== null && hop !== this.options.myPeerId) {
+        const conn = this.connectionFor(hop);
+        if (conn !== null) {
+          if (hop !== dstPeerId) {
+            this.callbacks.onDataPlaneLog?.(
+              `多跳转发：目标 ${dstPeerId} 经由邻居 ${hop}`,
+            );
+          }
+          // 包头填**最终目标**，中间节点靠 to_peer_id 继续转发
+          return { conn, toPeerId: dstPeerId };
+        }
+      }
+    }
+
+    // ③ 拓扑里没有该 IP（对端还没广播）→ 退回直连匹配
     const { peer, reason } = selectPeerForPacket(
       [...this.connections],
-      header?.dst ?? null,
+      dstIp,
     );
     if (reason === 'ambiguous') {
       this.callbacks.onDataPlaneLog?.(
-        `多条连接但目标 IP ${header?.dst ?? '未知'} 无匹配，丢弃该包（不猜，避免发错对端）`,
+        `多条连接但目标 IP ${dstIp ?? '未知'} 无匹配，丢弃该包（不猜，避免发错对端）`,
       );
     }
-    return peer;
+    return { conn: peer, toPeerId: peer?.remotePeerId ?? 0 };
   }
 
-  private sendDataPacket(ipPacket: Buffer): void {
-    const conn = this.pickConnectionFor(ipPacket);
+  /** 找一条到指定 peer 的连接（没有则 null）。 */
+  private connectionFor(peerId: number): Connection | null {
+    for (const conn of this.connections) {
+      if (conn.remotePeerId === peerId) return conn;
+    }
+    return null;
+  }
+
+  private sendDataPacket(ipPacket: Buffer, relay?: { toPeerId: number; forwardCounter: number }): void {
+    let conn: Connection | null;
+    let toPeerId: number;
+    let forwardCounter = 0;
+
+    if (relay !== undefined) {
+      // 中继：目标由包头指定，我们只负责找"到该目标的下一跳"
+      toPeerId = relay.toPeerId;
+      forwardCounter = relay.forwardCounter;
+      const hop = this.topology.nextHop(toPeerId);
+      conn =
+        hop === null || hop === this.options.myPeerId
+          ? null
+          : this.connectionFor(hop);
+      if (conn === null) {
+        this.callbacks.onDataPlaneLog?.(
+          `中继失败：目标 ${toPeerId} 无可用下一跳，丢弃`,
+        );
+        return;
+      }
+    } else {
+      const picked = this.pickConnectionFor(ipPacket);
+      conn = picked.conn;
+      toPeerId = picked.toPeerId;
+    }
+
     if (conn === null) {
       this.callbacks.onDataPlaneLog?.('发送数据包时没有匹配的连接，丢弃');
       return;
@@ -941,12 +1178,15 @@ export class EasyTierAcceptor {
 
     const framed = framePacket(ciphertext, {
       fromPeerId: this.options.myPeerId,
-      toPeerId: conn.remotePeerId,
+      toPeerId,
       packetType: PacketType.Data,
       flags: PeerManagerHeaderFlags.ENCRYPTED,
+      forwardCounter,
     });
     this.callbacks.onDataPlaneLog?.(
-      `发送数据包 ${ipPacket.length}B → peer=${conn.remotePeerId} seq=${conn.sendSeq - 1n}`,
+      `发送数据包 ${ipPacket.length}B → 下一跳 peer=${conn.remotePeerId}` +
+        (toPeerId !== conn.remotePeerId ? `（最终目标 ${toPeerId}）` : '') +
+        ` seq=${conn.sendSeq - 1n}`,
     );
     conn.socket.write(framed);
   }

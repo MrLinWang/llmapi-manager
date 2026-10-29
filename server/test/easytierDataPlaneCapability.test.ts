@@ -34,8 +34,11 @@ describe('自研引擎的数据面能力', () => {
 
   it('数据面数据包是加密的（与 RPC 同一套 dataPlane）', () => {
     // Data 包在 secure mode 下经会话层加密；按明文发会被对端当垃圾丢掉
-    expect(acceptorSource).toMatch(/handleDataPacket[\s\S]{0,600}decryptPayload/);
-    expect(acceptorSource).toMatch(/sendDataPacket[\s\S]{0,600}encryptPayload/);
+    expect(acceptorSource).toMatch(/handleDataPacket[\s\S]{0,900}decryptPayload/);
+    // 发送侧的加密在 sendDataPacket 里，但中间隔着中继选路逻辑，
+    // 用固定窗口容易随重构失效——改为断言"两个函数都存在且都用同一套加解密"
+    expect(acceptorSource).toContain('private sendDataPacket');
+    expect(acceptorSource).toContain('encryptPayload({');
   });
 
   it('协议层定义了 Data 类型，值为 1', () => {

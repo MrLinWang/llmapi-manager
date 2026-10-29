@@ -2431,11 +2431,16 @@ describe('冒烟：诊断接口', () => {
       expect(response.statusCode).toBe(200);
       const body = response.json();
 
-      // 这条断言的价值：用户遇到"通过虚拟网络连上了但 DNS 解析不了"时，
-      // 答案必须能在诊断里查到——DNS 走 UDP，而自研引擎不支持 UDP。
-      // 若诊断不报这项，用户只能去翻文档或读源码。
-      expect(body.engines.dataPlane.builtin.udp).toBe(false);
+      // 这条断言的价值：诊断必须如实反映能力现状。UDP（DNS）与 ICMP（ping）
+      // 已实现，所以这里断言 true；同时仍未实现的项（UDP 分片、广播、
+      // 高级拥塞控制）必须仍然报 false——不能因为补了几项就把整张表刷成 true。
+      expect(body.engines.dataPlane.builtin.udp).toBe(true);
       expect(body.engines.dataPlane.builtin.tcp).toBe(true);
+      expect(body.engines.dataPlane.builtin.icmp).toBe(true);
+      expect(body.engines.dataPlane.builtin.ipFragmentReassembly).toBe(true);
+      expect(body.engines.dataPlane.builtin.multiHopRelay).toBe(true);
+      expect(body.engines.dataPlane.builtin.udpFragmentation).toBe(false);
+      expect(body.engines.dataPlane.builtin.broadcast).toBe(false);
       // 原生引擎复用官方实现，这些能力都有
       expect(body.engines.dataPlane.native.udp).toBe(true);
       // 默认引擎必须是自研，与配置默认值一致

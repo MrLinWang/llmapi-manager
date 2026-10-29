@@ -689,10 +689,15 @@ export function registerDiagnosticsRoutes(
   const dataPlaneCapabilities = {
     builtin: {
       tcp: true,
-      udp: false,
-      icmp: false,
-      ipFragmentReassembly: false,
-      congestionControl: false,
+      udp: true,
+      icmp: true,
+      ipFragmentReassembly: true,
+      congestionControl: true,
+      multiHopRelay: true,
+      // 仍未实现的：UDP 分片、广播/组播、SACK/BBR 等高级拥塞控制
+      udpFragmentation: false,
+      broadcast: false,
+      advancedCongestionControl: false,
     },
     native: { tcp: true, udp: true, icmp: true },
   } as const;

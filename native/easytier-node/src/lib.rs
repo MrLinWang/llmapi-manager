@@ -192,6 +192,25 @@ pub struct NodeStatus {
     pub peer_count: u32,
 }
 
+/// 路由表里的一条记录（**含非直连节点**）。
+///
+/// 与 `PeerInfo` 的区别很关键：`PeerInfo` 来自 `peer_snapshots()`，只有
+/// **直连**节点；这里来自 `route_snapshots()`，包含 OSPF 学到的所有可达节点。
+/// 验证多跳拓扑传播（A 能否看到经由我们转发的 B）必须用这个。
+#[napi(object)]
+pub struct RouteEntry {
+    /// 路由目标所属的节点 id
+    pub peer_id: u32,
+    /// 该节点的主机名
+    pub hostname: String,
+    /// 该节点声明的虚拟 IPv4
+    pub ipv4: Option<String>,
+    /// 下一跳节点 id。等于 `peer_id` 表示直连；不同则说明要经过中继
+    pub next_hop_peer_id: u32,
+    /// 路径跳数
+    pub cost: i32,
+}
+
 #[napi(object)]
 pub struct PeerInfo {
     pub hostname: String,
@@ -552,6 +571,26 @@ pub async fn node_status() -> Result<NodeStatus> {
 }
 
 /// 列出当前已连接的对端。
+#[napi]
+pub async fn list_routes() -> Result<Vec<RouteEntry>> {
+    let guard = INSTANCE.lock().await;
+    let Some(instance) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    let routes = instance.route_snapshots().await;
+    Ok(routes
+        .into_iter()
+        .map(|route| RouteEntry {
+            peer_id: route.peer_id,
+            hostname: route.hostname,
+            ipv4: route.ipv4_addr.map(|addr| addr.to_string()),
+            next_hop_peer_id: route.next_hop_peer_id,
+            cost: route.cost,
+        })
+        .collect())
+}
+
 #[napi]
 pub async fn list_peers() -> Result<Vec<PeerInfo>> {
     let guard = INSTANCE.lock().await;
