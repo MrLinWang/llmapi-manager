@@ -330,3 +330,54 @@ describe('切引擎后的状态一致性', () => {
     expect(await rt.peers()).toEqual([]);
   }, 30_000);
 });
+
+/**
+ * 没有虚拟 IP 时的数据面降级。
+ *
+ * 数据面要拿本机虚拟 IP 作为回包源地址，没有它就不能开。但**不该让整个
+ * 组网启动失败**：控制面（互相发现、路由同步）仍然有价值。正确行为是
+ * 只开控制面 + 明确告警。
+ *
+ * 这条也覆盖了一个真实风险：默认配置 `ipv4: null` + 非空 `portForwards`
+ * 是**默认组合**，若实现成抛错，用户开箱启动就会失败。
+ */
+describe('数据面在没有虚拟 IP 时降级为仅控制面', () => {
+  it('没有配置 ipv4 时组网仍能启动，数据面不启用', async () => {
+    const warnings: string[] = [];
+    const logger = {
+      info: () => {},
+      warn: (message: unknown) => warnings.push(String(message)),
+      error: () => {},
+      debug: () => {},
+      child() {
+        return this;
+      },
+    } as unknown as Logger;
+
+    const rt = new NetworkingRuntime(logger);
+    const port = 15800 + Math.floor(Math.random() * 300);
+    const config = {
+      ...defaultNetworkingConfig(),
+      engine: 'builtin' as const,
+      enabled: true,
+      networkName: `noip-${Date.now().toString(36)}`,
+      networkSecret: 'secret-x',
+      hostname: 'ts-noip',
+      // 关键：不指定虚拟 IP
+      ipv4: null,
+      listenPort: port,
+      portForwards: [{ virtualPort: 8787, localPort: 8787 }],
+    };
+
+    // 不能抛错——默认配置就是这种组合
+    await rt.start(config);
+    const status = await rt.status(config);
+    expect(status.running).toBe(true);
+    expect(status.engine).toBe('builtin');
+
+    // 必须告警，且说清需要什么
+    expect(warnings.join('')).toContain('networking.ipv4');
+
+    await rt.stop();
+  }, 30_000);
+});

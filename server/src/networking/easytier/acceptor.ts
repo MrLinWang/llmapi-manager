@@ -725,9 +725,19 @@ export class EasyTierAcceptor {
     forwards: Array<{ virtualPort: number; localPort: number }>,
   ): void {
     if (forwards.length === 0) return;
+    // 没有虚拟 IP 时**不能**开数据面：我们会用自己的 IP 作为回包的源地址，
+    // 而 `0.0.0.0` 不是合法源地址，对端会判为无效并丢弃——症状是
+    // "端口映射配了、TCP 能建立、但一收数据就卡住"，极难定位。
+    // 明确拒绝并说清原因，比开一个坏的数据面好。
+    if (this.options.virtualIpv4 === undefined || this.options.virtualIpv4 === '') {
+      throw new Error(
+        '启用数据面需要先配置本机的虚拟 IP（networking.ipv4）——' +
+          '它是回包的源地址，留空会让对端丢弃我们的数据',
+      );
+    }
     if (this.tcpStack === null) {
       this.tcpStack = new TcpStack({
-        localIp: this.options.virtualIpv4 ?? '0.0.0.0',
+        localIp: this.options.virtualIpv4,
         bridgeHost: '127.0.0.1',
         sendIpPacket: (packet) => this.sendDataPacket(packet),
         log: (message) => this.callbacks.onDataPlaneLog?.(message),

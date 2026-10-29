@@ -503,13 +503,26 @@ export class NetworkingRuntime {
 
     // 数据面：把虚拟 IP 上的端口桥接到本机真实端口。
     // 没有它，对端"连得上虚拟 IP"却没有任何服务可达——控制面通、数据面不通。
+    // 数据面：把虚拟 IP 上的端口桥接到本机真实端口。
+    //
+    // 需要虚拟 IP 作为回包源地址。**默认配置里 ipv4 是 null**（让对端自动分配），
+    // 那种情况下不能开数据面——但我们也不该让整个组网启动失败：
+    // 控制面（互相发现、路由同步）仍然有价值。所以这里降级为"只开控制面"
+    // 并明确告警，而不是抛错或静默失效。
     if (config.portForwards.length > 0) {
-      acceptor.enableDataPlane(config.portForwards);
-      this.logger.info(
-        `组网数据面已启用：${config.portForwards
-          .map((f) => `${f.virtualPort}→127.0.0.1:${f.localPort}`)
-          .join(', ')}`,
-      );
+      if (config.ipv4 === null) {
+        this.logger.warn(
+          '组网数据面未启用：需要在配置里指定本机虚拟 IP（networking.ipv4）。' +
+            '没有它无法作为回包源地址，对端会丢弃数据。控制面（节点发现与路由同步）不受影响。',
+        );
+      } else {
+        acceptor.enableDataPlane(config.portForwards);
+        this.logger.info(
+          `组网数据面已启用：${config.portForwards
+            .map((f) => `${f.virtualPort}→127.0.0.1:${f.localPort}`)
+            .join(', ')}`,
+        );
+      }
     }
 
     this.builtin = {
