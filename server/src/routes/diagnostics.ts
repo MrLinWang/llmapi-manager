@@ -652,6 +652,7 @@ export function registerDiagnosticsRoutes(
             builtinAvailable: availability.builtinAvailable,
             nativeAvailable: availability.nativeAvailable,
             defaultEngine: 'builtin',
+            dataPlane: dataPlaneCapabilities,
           },
         };
       }
@@ -664,6 +665,7 @@ export function registerDiagnosticsRoutes(
           builtinAvailable: availability.builtinAvailable,
           nativeAvailable: availability.nativeAvailable,
           defaultEngine: 'builtin',
+          dataPlane: dataPlaneCapabilities,
         },
         checks: report.checks.map((check: NativeLayerCheck) => ({
           name: check.layer,
@@ -676,6 +678,24 @@ export function registerDiagnosticsRoutes(
       };
     },
   );
+
+  /**
+   * 两个引擎的数据面能力对照。
+   *
+   * 必须能在诊断里查到：这是"自研引擎能不能承载真实流量"的关键差异
+   * （尤其 UDP——DNS 走它）。用户遇到"连得上但域名解析不了"时，
+   * 答案应该在这里，而不是靠翻文档或读源码。
+   */
+  const dataPlaneCapabilities = {
+    builtin: {
+      tcp: true,
+      udp: false,
+      icmp: false,
+      ipFragmentReassembly: false,
+      congestionControl: false,
+    },
+    native: { tcp: true, udp: true, icmp: true },
+  } as const;
 
   /** 转换器本身的自检：不依赖任何供应商，纯函数层面验证映射是否正常 */
   defineRoute(

@@ -2426,6 +2426,22 @@ describe('冒烟：诊断接口', () => {
       expect(body.primary.convertResponsesToChat).toBe(false);
     });
 
+    it('组网诊断能回答"自研引擎的数据面到底支持什么"', async () => {
+      const response = await diagCall('GET', '/api/diagnostics/networking');
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+
+      // 这条断言的价值：用户遇到"通过虚拟网络连上了但 DNS 解析不了"时，
+      // 答案必须能在诊断里查到——DNS 走 UDP，而自研引擎不支持 UDP。
+      // 若诊断不报这项，用户只能去翻文档或读源码。
+      expect(body.engines.dataPlane.builtin.udp).toBe(false);
+      expect(body.engines.dataPlane.builtin.tcp).toBe(true);
+      // 原生引擎复用官方实现，这些能力都有
+      expect(body.engines.dataPlane.native.udp).toBe(true);
+      // 默认引擎必须是自研，与配置默认值一致
+      expect(body.engines.defaultEngine).toBe('builtin');
+    });
+
     it('转换器自检能跑通纯函数映射', async () => {
       const response = await diagCall('GET', '/api/diagnostics/converter');
       expect(response.statusCode).toBe(200);
