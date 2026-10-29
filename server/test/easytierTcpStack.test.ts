@@ -8,6 +8,7 @@ import {
   buildTcpSegment,
   decodeIpv4Header,
   decodeTcpHeader,
+  encodeUdpHeader,
   hasTcpFlag,
 } from '../src/networking/easytier/ip';
 
@@ -287,6 +288,29 @@ describe('用户态 TCP 栈：边界', () => {
     const handled = stack.handleIpPacket(packet);
     expect(handled).toBe(false);
     expect(stack.connectionCount()).toBe(0);
+  });
+
+  it('UDP 包被显式丢弃并给出可读原因（不是静默忽略）', () => {
+    // DNS 走 UDP。若静默丢弃，用户会去查 DNS 配置而真正原因在这里。
+    const logs: string[] = [];
+    const sink = makeSink();
+    const stack = new TcpStack({
+      localIp: LOCAL_IP,
+      bridgeHost: '127.0.0.1',
+      sendIpPacket: sink.fn,
+      log: (message) => logs.push(message),
+    });
+    stacks.push(stack);
+    const handled = stack.handleIpPacket(
+      buildIpv4Packet({
+        src: REMOTE_IP, dst: LOCAL_IP, protocol: IpProtocol.UDP, identification: 1,
+        payload: encodeUdpHeader({ srcPort: 53000, dstPort: 53, length: 8 }),
+      }),
+    );
+    expect(handled).toBe(false);
+    // 日志必须指出目标端口，才能一眼看出是 DNS
+    expect(logs.join('')).toContain('UDP');
+    expect(logs.join('')).toContain('53');
   });
 
   it('非 TCP 协议不由本栈处理', () => {

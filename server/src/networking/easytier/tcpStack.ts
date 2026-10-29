@@ -39,6 +39,7 @@ import {
   buildTcpSegment,
   decodeIpv4Header,
   decodeTcpHeader,
+  decodeUdpHeader,
   hasTcpFlag,
 } from './ip';
 
@@ -215,7 +216,22 @@ export class TcpStack extends EventEmitter {
     if (this.closed) return false;
     const ipHeader = decodeIpv4Header(packet);
     if (ipHeader === null) return false;
-    if (ipHeader.protocol !== IpProtocol.TCP) return false;
+
+    if (ipHeader.protocol === IpProtocol.UDP) {
+      // UDP 未实现（见 README 已知边界）。**必须显式记日志而不是静默返回**：
+      // DNS 走 UDP，用户遇到"连得上但域名解析不了"时会去查 DNS 配置，
+      // 而真正的原因在这里。日志要能指出目标端口，方便判断是不是 DNS。
+      const udp = decodeUdpHeader(packet.subarray(ipHeader.headerLength));
+      this.log(
+        `丢弃 UDP 包 ${ipHeader.src} → ${ipHeader.dst}:${udp?.dstPort ?? '?'}（本实现只做 TCP）`,
+      );
+      return false;
+    }
+    if (ipHeader.protocol !== IpProtocol.TCP) {
+      // ICMP 同样未实现：`ping` 不通是预期行为，记一行便于对照
+      this.log(`丢弃非 TCP 包 protocol=${ipHeader.protocol}（本实现只做 TCP）`);
+      return false;
+    }
     // 分片包丢弃：本实现不做 IP 重组，拼接错的数据比丢包更糟
     if (ipHeader.moreFragments || ipHeader.fragmentOffset !== 0) {
       this.log('丢弃 IP 分片包（不做重组）');
