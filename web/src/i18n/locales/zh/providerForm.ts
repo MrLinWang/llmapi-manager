@@ -17,6 +17,7 @@ export const zhProviderForm = {
     basic: '基本信息',
     connection: '连接信息',
     models: '模型与备注',
+    efforts: '思考档位',
   },
   basic: {
     name: '名称',
@@ -63,5 +64,12 @@ export const zhProviderForm = {
     website: '官网（可选）',
     notes: '备注（可选）',
     requireOne: '至少填写一个模型名',
+    imageLabel: '生图模型（可选）',
+    imagePlaceholder: '输入生图模型名后回车，如 gpt-image-2',
+    imageRemove: '移除生图模型 {{model}}',
+    imageFetchTitle: '用当前填写的协议与地址向上游查询可用模型，只列出只输出图像的模型',
+    imageEmptyList: '上游没有返回只输出图像的模型（或没声明输出模态），可以直接手填。',
+    imageHint:
+      '生图模型只服务 /v1/images/*（Codex 的内置生图工具走这里），不会发布别名、也不会出现在 Codex 的 /model 列表里。两边都填同一个名字时按生图处理。',
   },
 };

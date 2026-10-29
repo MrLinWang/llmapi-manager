@@ -292,6 +292,15 @@ Codex 在 API Key 认证下把审批模型**硬编码**成 `gpt-5.6-luna`，没�
   前端不回显明文，编辑态不该为了拉列表强迫用户重填。
 - 连上了但响应里没有 `data[]` / `models[]` 时返回 `ok: false` 并说明原因，
   **不要返回空数组** —— 界面会看起来像"上游真的没有模型"。
+- **`ProviderService.update()` 是全量更新，但 `imageModels` 有"不传 = 保留"的语义。**
+  逐档实测、`registry:sync` 这类"只改部分字段"的调用方漏传该字段时，
+  不能把用户的生图模型清空（真实缺陷：点一次逐档实测，生图模型消失）。
+  新增任何走 `update()` 的部分更新路径，都要么显式带上 `imageModels`，要么依赖这层兜底。
+  前端表单是全量编辑器，必须**总是显式提交**（含空数组），否则清空操作会被当成"不改"。
+- 返回**两个**模型数组：`models`（对话）与 `imageModels`（生图），互斥且不交叉。
+  生图判据是 `architecture.output_modalities` **没有 `text`**，而不是"含 `image`"——
+  多模态模型（`["text","image"]`）仍能聊天，挪进生图列表会让用户在 Codex 的 `/model`
+  里看不到它。上游没声明 `architecture` 时一律当对话模型，**不做推测**。
 - 任何失败都不抛异常、不回 500（与连通性测试一致）。
 - 上游 `/models` 的 URL 与转发路径同一套规则：`baseUrl` 已以 `/v1` 结尾时不重复拼接。
 - 前端模型编辑器是**标签片段**式（参考 new-api 渠道模型框）：已选模型在框中以片段排列、
@@ -321,6 +330,23 @@ Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities
   nginx 默认会缓冲整条流，进度会攒到最后一起到。
 - **全档位被拒时不要写能力表。** 那可能是网络抖动、Key 错或协议错，固化成"不支持推理"
   会让用户更难排查；把上游第一条原因带进 `error` 让用户自己判断。
+
+**档位相关的 UI 只在「编辑供应商」表单的「思考档位」一节**，不要在供应商列表行内加回
+档位列或行内探测按钮。一个供应商可能声明十几个模型，每个还要带"接受哪些/被拒哪些"，
+塞进表格那一格会把整行撑坏，还挤掉名称、地址、Key 这些按行扫读的字段。
+档位是"配这家时关心一次"的详情信息，不属于列表概览。
+
+展示有三态，**不许合并**（合并会让用户误判"测过了"或"没测"）：
+
+| `reasoningEfforts` | 含义 | 界面 |
+| --- | --- | --- |
+| `undefined` | 没测过 → 目录回落默认三档 | `未实测（点「逐档实测」探测）` |
+| `[]` | 测过但全被拒 → 目录写空数组，Codex 隐藏推理菜单 | `未探测到可用档位，已保留原配置` |
+| 非空 | 上游真正接受的档位 | 直接列出，如 `low / high` |
+
+探测**是写库操作、不是编辑态**：它直接写 `modelCapabilities`，不能等用户点保存。
+表单里测完必须把返回的 `provider.modelCapabilities` 合并进本地 `capabilities` 状态，
+否则"测完再点保存"会用旧值覆盖刚测出的结果。父组件通过 `onProbed` 刷新列表。
 
 ### 14. API 令牌只能收窄权限
 
@@ -426,7 +452,7 @@ Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities
 
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 658 + web 30 = 688 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 694 + web 37 = 731 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
@@ -443,7 +469,8 @@ Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities
 - 改到协议转换 → 补 `server/test/convert.test.ts`（请求/响应/流式三向映射），
   并确认 smoke 里三条都在："自动开启后打通 Chat 上游"、"有 responses 供应商时不自动开"、
   "转换解决不了时仍 501 且不改设置"。
-- 改到模型拉取 → 补 `server/test/smoke.test.ts`（三种协议、`/v1` 拼接、借用已保存 Key、上游不可达不 500）。
+- 改到模型拉取 → 补 `server/test/smoke.test.ts`（三种协议、`/v1` 拼接、借用已保存 Key、
+  上游不可达不 500、按 `architecture.output_modalities` 分出 `imageModels` 且与 `models` 不重叠）。
 - 改到逐档实测 → 补 `server/test/effortProbe.test.ts`（两种协议的请求形状、`/v1` 拼接、accepted/rejected、
   全拒时不写能力、进度回调），并确认 smoke 里「NDJSON 流事件顺序」「anthropic 400」「无模型 400」
   「未知 id 404」「只读令牌 403」仍在。

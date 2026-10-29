@@ -91,6 +91,18 @@ function invalid(key: MessageKey, params?: MessageParams): AliasInvalidReason {
 }
 
 /**
+ * 别名解析的可选项。
+ *
+ * `imagePath`：本次请求走的是 `/v1/images/*`。此时该供应商必须把模型登记在
+ * **`imageModels`** 里——`models` 是对话模型，拿它去打 Images 端点必然被上游拒绝。
+ * 分开判断才能给出"该模型在对话列表里、但不在生图列表里"这种可操作的报错，
+ * 而不是笼统的"未声明模型"（用户会去 `models` 里找，那儿明明有）。
+ */
+export interface ResolveModelOptions {
+  imagePath?: boolean;
+}
+
+/**
  * 解析请求里的 model。
  * 关键约束：带 lam- 前缀但解析不出来时必须报错，绝不回落到默认供应商
  * —— 回落会用别的供应商额度、回答另一个模型，调用方看不出来。
@@ -98,6 +110,7 @@ function invalid(key: MessageKey, params?: MessageParams): AliasInvalidReason {
 export function resolveModel(
   requested: string,
   providers: readonly ProviderRecord[],
+  options: ResolveModelOptions = {},
 ): AliasResolution {
   if (!isAliasShape(requested)) {
     return { kind: 'default', upstreamModel: requested };
@@ -123,7 +136,31 @@ export function resolveModel(
       ...invalid('gateway.alias.providerDisabled', { name: provider.name }),
     };
   }
-  if (!provider.models.includes(upstreamModel)) {
+
+  // 生图与对话的模型清单是分开的两份，别名也按路径查对应的那份。
+  if (options.imagePath === true) {
+    const imageModels = provider.imageModels ?? [];
+    if (!imageModels.includes(upstreamModel)) {
+      // 分两种报错：在对话列表里 → 提示挪到生图列表；两边都没有 → 常规"未声明"。
+      // 合成一句"未声明模型"会让用户在 models 里找到它，然后怀疑功能坏了。
+      if (provider.models.includes(upstreamModel)) {
+        return {
+          kind: 'invalid',
+          ...invalid('gateway.alias.modelIsNotImageModel', {
+            name: provider.name,
+            model: upstreamModel,
+          }),
+        };
+      }
+      return {
+        kind: 'invalid',
+        ...invalid('gateway.alias.modelNotDeclared', {
+          name: provider.name,
+          model: upstreamModel,
+        }),
+      };
+    }
+  } else if (!provider.models.includes(upstreamModel)) {
     return {
       kind: 'invalid',
       ...invalid('gateway.alias.modelNotDeclared', {

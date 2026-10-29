@@ -262,15 +262,14 @@ describe('前端页面装配', () => {
     expect(screen.queryByText('gpt-x-mini')).toBeTruthy();
   });
 
-  it('供应商页可逐档实测：确认后调用接口并展示接受的档位', async () => {
-    // jsdom 没有实现 window.confirm（直接调用会抛 "Not implemented"），必须 stub。
-    // 用 try/finally 恢复：这条用例失败时也不能把 stub 泄漏给后续用例。
+  it('编辑供应商时可逐档实测：确认后调用接口并展示接受的档位', async () => {
+    // 档位相关 UI 已从列表行内移到「编辑供应商」：一个供应商可能有十几个模型，
+    // 每行还要带档位与被拒说明，塞进表格那一格会把整行撑坏。
     const originalConfirm = window.confirm;
     window.confirm = () => true;
     requests = [];
     setOverrides({
       '/api/providers/p_1/probe-efforts': {
-        // 与服务端一致：NDJSON 流，start → progress* → result
         __delayMs: 300,
         __ndjson:
           [
@@ -308,12 +307,12 @@ describe('前端页面装配', () => {
       );
 
       await screen.findByText('Mock OpenAI');
-      // 图标按钮的 aria-label 就是动作文案，因此可以直接按名字点
-      fireEvent.click(screen.getByRole('button', { name: '逐档实测' }));
+      // 档位 UI 现在只在编辑态出现：先进编辑
+      fireEvent.click(screen.getByRole('button', { name: '编辑' }));
+      fireEvent.click(await screen.findByRole('button', { name: '逐档实测' }));
 
-      // 等待期间必须能看到进度条（这是本用例的核心回归点：不能只显示一句"请稍候"）
+      // 等待期间必须能看到进度条（不能只显示一句"请稍候"）
       const bar = await waitFor(() => screen.getByRole('progressbar'));
-      // 初始分母 = 模型数（2）× 候选档位数（9）——此时服务端 start 事件还没到
       expect(bar.getAttribute('aria-valuemax')).toBe('18');
 
       await waitFor(() => expect(screen.getByText('low / medium / high')).toBeTruthy());
@@ -327,6 +326,73 @@ describe('前端页面装配', () => {
       expect(posted?.headers['content-type']).toBeUndefined();
     } finally {
       window.confirm = originalConfirm;
+      setOverrides({});
+    }
+  });
+
+  it('已落盘的思考档位在编辑表单里常驻可见（不依赖探测动作）', async () => {
+    // 数据来自 provider.modelCapabilities，是服务端落盘值：
+    // 关掉页面、第二天再打开仍应看得到，不必为看一眼结果重测（几十秒 + 真烧额度）。
+    setOverrides({
+      '/api/providers': {
+        providers: [
+          {
+            ...providers[0],
+            models: ['gpt-x'],
+            imageModels: ['gpt-image-2'],
+            modelCapabilities: {
+              'gpt-x': { supportsReasoning: true, reasoningEfforts: ['low', 'high'] },
+              'gpt-image-2': { reasoningEfforts: [] },
+            },
+          },
+        ],
+      },
+    });
+    try {
+      const { render, screen, fireEvent } = await import('@testing-library/react');
+      const { AuthProvider } = await import('../src/lib/auth');
+      const ProvidersPage = (await import('../src/pages/ProvidersPage')).default;
+
+      render(
+        <AuthProvider>
+          <ProvidersPage />
+        </AuthProvider>,
+      );
+
+      await screen.findByText('Mock OpenAI');
+      fireEvent.click(screen.getByRole('button', { name: '编辑' }));
+
+      // 对话模型探出的档位直接可见，且没有任何探测动作发生
+      await screen.findByText('low / high');
+      // 生图模型也在同一区块里展示（两份模型清单都要能查到档位）。
+      // 它同时出现在模型框与档位块里，所以用 title 定位档位块那一处。
+      expect(screen.getAllByText('gpt-image-2').length).toBeGreaterThanOrEqual(2);
+      // 空数组语义：测过但一个档位都没被接受 → 明确说明，而不是空白
+      expect(screen.getByText('未探测到可用档位，已保留原配置')).toBeTruthy();
+    } finally {
+      setOverrides({});
+    }
+  });
+
+  it('没实测过的供应商在编辑表单里给出可做的下一步', async () => {
+    setOverrides({ '/api/providers': { providers: [providers[0]] } });
+    try {
+      const { render, screen, fireEvent } = await import('@testing-library/react');
+      const { AuthProvider } = await import('../src/lib/auth');
+      const ProvidersPage = (await import('../src/pages/ProvidersPage')).default;
+
+      render(
+        <AuthProvider>
+          <ProvidersPage />
+        </AuthProvider>,
+      );
+
+      await screen.findByText('Mock OpenAI');
+      fireEvent.click(screen.getByRole('button', { name: '编辑' }));
+
+      // 空白会让人以为这块没实现；明确告诉用户"还没测"
+      await screen.findByText('未实测（点「逐档实测」探测）');
+    } finally {
       setOverrides({});
     }
   });
@@ -750,10 +816,47 @@ describe('前端页面装配', () => {
       </MemoryRouter>,
     );
 
-    const button = await screen.findByRole('button', { name: '从上游获取模型' });
-    // 还没填 Base URL，按钮应禁用，避免发出必然失败的请求
-    expect((button as HTMLButtonElement).disabled).toBe(true);
+    // 现在有两个这样的按钮：对话模型与生图模型各一个（候选列表互不交叉，
+    // 所以两个入口都要有）。两个都必须禁用：还没填 Base URL，
+    // 点下去只会发出必然失败的请求。
+    const buttons = await screen.findAllByRole('button', { name: '从上游获取模型' });
+    expect(buttons).toHaveLength(2);
+    for (const button of buttons) {
+      expect((button as HTMLButtonElement).disabled).toBe(true);
+    }
   });
+  it('生图模型有自己独立的标签框，与对话模型互不干扰', async () => {
+    // 两份清单分开存的界面表现：编辑已保存的供应商时，models 与 imageModels
+    // 各渲染到自己的框里，不能混在一起（混了就会让图像模型出现在 Codex 的 /model 里）。
+    const { render, screen } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const { ProviderForm } = await import('../src/components/ProviderForm');
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <ProviderForm
+            provider={{
+              ...providers[0],
+              models: ['gpt-x'],
+              imageModels: ['gpt-image-2'],
+            }}
+            onSaved={() => {}}
+            onCancel={() => {}}
+          />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // 两个框各自渲染自己的片段，移除按钮的 aria-label 也分开了
+    expect(await screen.findByLabelText('移除模型 gpt-x')).toBeTruthy();
+    expect(await screen.findByLabelText('移除生图模型 gpt-image-2')).toBeTruthy();
+    // 对话模型的移除按钮不该指向生图模型，反之亦然
+    expect(screen.queryByLabelText('移除模型 gpt-image-2')).toBeNull();
+    expect(screen.queryByLabelText('移除生图模型 gpt-x')).toBeNull();
+  });
+
   it('模型以标签片段呈现：可输入添加、点 × 移除', async () => {
     const { render, screen, fireEvent, within } = await import('@testing-library/react');
     const { MemoryRouter } = await import('react-router-dom');

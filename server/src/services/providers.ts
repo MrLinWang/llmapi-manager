@@ -22,6 +22,13 @@ export interface ProviderInput {
   apiKey?: string;
   models?: string[];
   /**
+   * 生图模型列表（只服务 `/v1/images/*`，不发布别名、不进 Codex 模型目录）。
+   *
+   * 语义见 `ProviderRecord.imageModels`；不传表示"不改"，传数组表示整体替换
+   * （与 `models` 一致）。
+   */
+  imageModels?: string[];
+  /**
    * 按模型名记录的上游能力（上下文窗口 / 输出上限）。
    *
    * 由「从上游获取模型」或显式提交带上来；不传表示"保持已存的值不变"，
@@ -64,11 +71,43 @@ function normalizeModels(models: string[] | undefined): string[] {
 }
 
 /**
+ * 规范化两个模型列表，并把生图模型从对话模型里**剔除**。
+ *
+ * 为什么要剔除（而不是报错）：`models` 决定 Codex `/model` 里能看到什么，
+ * 一个图像模型出现在那里，用户选中后发出的对话请求必然被上游拒绝。
+ * 前端已经分两个框录入，但接口是公开的、也允许脚本提交——所以约束放在服务端。
+ *
+ * 用"剔除"而不是"400 报错"：用户把一个生图模型同时填进两个框时，
+ * 意图明确（我要用它生图），按生图处理比拒绝保存更符合预期，也不会丢数据。
+ *
+ * `fallbackImageModels` 是**部分更新**时用的兜底（见 `update()`）：
+ * 不传 `imageModels` 的调用方（逐档实测、registry 同步脚本）只想改能力表，
+ * 不该顺手把生图模型清空。没有这个兜底就会出现"点一次逐档实测，生图模型消失"。
+ */
+function normalizeModelLists(
+  input: ProviderInput,
+  fallbackImageModels: readonly string[] = [],
+): {
+  models: string[];
+  imageModels: string[];
+} {
+  // 不传 = 不改（沿用已存值）；传空数组 = 明确清空。
+  // 这两个语义必须分开，否则无法表达"清空生图模型"这个操作。
+  const imageModels = normalizeModels(
+    input.imageModels === undefined ? [...fallbackImageModels] : input.imageModels,
+  );
+  const imageSet = new Set(imageModels);
+  const models = normalizeModels(input.models).filter((model) => !imageSet.has(model));
+  return { models, imageModels };
+}
+
+/**
  * 规范化模型能力表。
  *
  * 三条规则都是有原因的：
- * 1. 只保留仍在 `models` 里的条目 —— 模型删掉了，它的能力就是死数据，
+ * 1. 只保留仍在模型列表里的条目 —— 模型删掉了，它的能力就是死数据，
  *    留着会让"下一个人同名模型"读到上一个模型的窗口，属于静默错配。
+ *    `models` 与 `imageModels` 都算"仍在"，因为两者都要用到上下文/输出上限。
  * 2. 只接受正整数，非法值整条丢弃 —— 上下文写成 0/负数会被 Codex 当成
  *    "窗口为 0"，比缺省更糟（缺省会回落保守默认值）。
  * 3. 规范化后为空则返回 undefined 而不是 `{}` —— 让落盘里不出现空对象噪音，
@@ -77,9 +116,10 @@ function normalizeModels(models: string[] | undefined): string[] {
 function normalizeCapabilities(
   capabilities: Record<string, ModelCapability> | undefined,
   models: readonly string[],
+  imageModels: readonly string[] = [],
 ): Record<string, ModelCapability> | undefined {
   if (!capabilities) return undefined;
-  const allowed = new Set(models);
+  const allowed = new Set([...models, ...imageModels]);
   const out: Record<string, ModelCapability> = {};
   for (const [model, capability] of Object.entries(capabilities)) {
     if (!allowed.has(model) || !capability || typeof capability !== 'object') continue;
@@ -202,7 +242,7 @@ export class ProviderService {
     const records = this.repos.providers.list();
     const taken = new Set(records.map((item) => item.providerKey));
     const now = new Date().toISOString();
-    const models = normalizeModels(input.models);
+    const { models, imageModels } = normalizeModelLists(input);
     const record: ProviderRecord = {
       id: `p_${randomUUID().slice(0, 8)}`,
       tenantId: this.repos.tenantId,
@@ -212,7 +252,8 @@ export class ProviderService {
       baseUrl: normalizeBaseUrl(input.baseUrl),
       apiKey: this.secrets.encode(input.apiKey ?? ''),
       models,
-      modelCapabilities: normalizeCapabilities(input.modelCapabilities, models),
+      imageModels: imageModels.length > 0 ? imageModels : undefined,
+      modelCapabilities: normalizeCapabilities(input.modelCapabilities, models, imageModels),
       enabled: input.enabled ?? true,
       priority: input.priority ?? this.nextPriority(records),
       notes: input.notes?.trim() || undefined,
@@ -237,7 +278,11 @@ export class ProviderService {
         ? current.apiKey
         : this.secrets.encode(input.apiKey.trim());
 
-    const models = normalizeModels(input.models);
+    // 不传 imageModels 时沿用已存值：这个方法是**全量更新**，但逐档实测、
+    // registry 同步脚本这类"只改能力表"的调用方不该被迫重填整个模型列表
+    // （漏填就会静默清空，症状是"点一次逐档实测，生图模型不见了"）。
+    // 要清空就显式传 `imageModels: []`。
+    const { models, imageModels } = normalizeModelLists(input, current.imageModels ?? []);
     const updated: ProviderRecord = {
       ...current,
       name: input.name.trim(),
@@ -249,12 +294,15 @@ export class ProviderService {
       baseUrl: normalizeBaseUrl(input.baseUrl),
       apiKey: nextApiKey,
       models,
+      // 空数组落盘成 undefined：让"没有生图模型"在存储里只有一种形态，
+      // 免得后面各处既要判断 undefined 又要判断 length。
+      imageModels: imageModels.length > 0 ? imageModels : undefined,
       // 没传就沿用已存的能力（前端编辑态不一定重新拉列表）；传了就整体替换，
-      // 但仍然只保留仍在新 models 里的条目，避免删模型后留下死数据。
+      // 但仍然只保留仍在模型列表里的条目，避免删模型后留下死数据。
       modelCapabilities:
         input.modelCapabilities === undefined
-          ? normalizeCapabilities(current.modelCapabilities, models)
-          : normalizeCapabilities(input.modelCapabilities, models),
+          ? normalizeCapabilities(current.modelCapabilities, models, imageModels)
+          : normalizeCapabilities(input.modelCapabilities, models, imageModels),
       enabled: input.enabled ?? current.enabled,
       priority: input.priority ?? current.priority,
       notes: input.notes?.trim() || undefined,

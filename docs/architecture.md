@@ -115,6 +115,7 @@ POST /api/agents/codex/apply
   │                         web_search / [model_providers.llmapi] 表内 5 个键，
   │                         其中 wire_api 固定 "responses"
   ├─ domain/modelCatalog.ts  用当前聚合别名整份生成 Codex 模型目录（catalog 角色）
+  │                          别名只来自 models；imageModels 不进目录（见 gateway.md）
   ├─ agents/registry.ts      AgentPathResolver 解析物理路径（本期落到 OS 家目录）
   ├─ agents/patch.ts         读现有文件 → 备份（若存在）→ 就地改写 / 整体覆盖 → 原子替换
   └─ agents.json            记录快照：写入的键值 + appliedBy + created 标记
@@ -195,7 +196,8 @@ log/                                 仓库根，已 gitignore（LOG_DIR 可改�
 | JSON 文件而非数据库 | 单机自托管、零外部依赖；Repository 接口隔离，替换成本可控 |
 | 别名严格失败不回落 | 回落会用别家额度、答错模型，且调用方无感知 |
 | 单进程同时托管前端 | 部署简单；开发期 Vite 代理保持热更新 |
-| 默认不做协议转换 | 三条路径与上游协议严格一一对应，不匹配明确 501、不静默转发。例外：`protocolConversion` 开启（或协议不匹配时自动开启）后，仅 `/v1/responses → openai` 走转换 |
+| 默认不做协议转换 | 对话路径与上游协议严格一一对应，不匹配明确 501、不静默转发。例外：`protocolConversion` 开启（或协议不匹配时自动开启）后，仅 `/v1/responses → openai` 走转换 |
+| 生图是直通而非转换 | `/v1/images/generations`、`/v1/images/edits` 接受 `openai` 与 `responses` 两种供应商（`apiType` 描述对话协议，不描述「有没有 Images 端点」），JSON 原样透传；唯一改写成功响应的地方是把上游的 `data[].url` 下载并内联成 `b64_json`（Codex 只认后者） |
 | 只回退一次 | 优先保证可预测性；多层重试需要熔断与配额才能安全 |
 | 权限声明与路由注册绑定 | 漏声明会启动失败，避免"新路由默认放开"这类事故 |
 | Agent 路径可解析 | 现在写家目录，将来可切到每租户工作区而不动上层 |

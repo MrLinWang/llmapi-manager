@@ -14,6 +14,8 @@ export const zhProviders = {
     baseUrlType: 'baseUrl 必须是字符串',
     modelsType: 'models 必须是字符串数组',
     modelsItems: 'models 只能包含字符串',
+    imageModelsType: 'imageModels 必须是字符串数组',
+    imageModelsItems: 'imageModels 只能包含字符串',
     modelCapabilitiesType: 'modelCapabilities 必须是对象',
     idsType: 'ids 必须是字符串数组',
     enabledType: 'enabled 必须是布尔值',

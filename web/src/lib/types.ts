@@ -30,7 +30,13 @@ export interface Provider {
   providerKey: string;
   apiType: ApiType;
   baseUrl: string;
+  /** 对话模型：发布别名、进 Codex 模型目录 */
   models: string[];
+  /**
+   * 生图模型：只服务 `/v1/images/*`，不发布别名、不进 Codex 模型目录。
+   * 与 `models` 分开是为了让图像模型不出现在 Codex 的 `/model` 列表里。
+   */
+  imageModels?: string[];
   /** 按模型名记录的上游能力；缺省表示未知，目录回落保守默认值 */
   modelCapabilities?: Record<string, ModelCapability>;
   enabled: boolean;
@@ -58,6 +64,11 @@ export interface TestResult {
   latencyMs: number;
   status?: number;
   models?: string[];
+  /**
+   * 只输出图像、不能聊天的模型（上游 `architecture.output_modalities` 里没有 text）。
+   * 界面用它把候选分到「生图模型」框；缺省表示上游没声明这个字段。
+   */
+  imageModels?: string[];
   /** 上游声明的模型能力，仅在响应里确实带了这些字段时出现 */
   capabilities?: Record<string, ModelCapability>;
   error?: string;

@@ -11,6 +11,13 @@ export interface ConnectivityResult {
   status?: number;
   models?: string[];
   /**
+   * 只输出图像、不能聊天的模型（来自上游 `architecture.output_modalities`）。
+   *
+   * 前端用它把候选分成两栏：对话模型与生图模型各拉各的框。
+   * 上游没声明 `architecture` 时这个数组为空，用户手填即可。
+   */
+  imageModels?: string[];
+  /**
    * 模型名 → 上游声明的能力（上下文窗口 / 输出上限）。
    *
    * 只在响应里确实带了这些字段的模型上出现；取不到的模型**不出现在这里**，
@@ -115,9 +122,37 @@ function readCapability(entry: Record<string, unknown>): ModelCapability | undef
   return capability;
 }
 
+/**
+ * 该条目是否"输出图像"（即生图模型）。
+ *
+ * 依据是上游 `/models` 的 `architecture.output_modalities`——实测本机 OpenDesign
+ * 的 44 个模型里，恰好 5 个是 `["image"]`（gpt-image-2 / nano-banana-2 /
+ * nano-banana-2-lite / seedream-5.0 / seedream-5.0-pro），其余都是 `["text"]`。
+ *
+ * 判据刻意用"**没有**文本输出能力"而不是"含 image"：像 `gpt-4o` 这类多模态模型
+ * 也能输出图像，但它同样能聊天，把它挪进生图列表会让用户在 Codex 里看不到它。
+ * 只有输出模态里没有 `text` 的，才是"只能生图、不能聊天"的模型。
+ *
+ * 上游没声明 `architecture` 时**不做任何假设**（返回 false），
+ * 由用户自己在生图模型框里手填——误判的代价比让用户多点一次大得多。
+ */
+function outputsImageOnly(entry: Record<string, unknown>): boolean {
+  const architecture =
+    entry.architecture && typeof entry.architecture === 'object'
+      ? (entry.architecture as Record<string, unknown>)
+      : undefined;
+  if (!architecture) return false;
+  const raw = architecture.output_modalities;
+  if (!Array.isArray(raw)) return false;
+  const modalities = raw.filter((item): item is string => typeof item === 'string');
+  if (modalities.length === 0) return false;
+  return modalities.includes('image') && !modalities.includes('text');
+}
+
 /** 一次遍历同时取出模型名与能力，避免为了多拿一个字段再解析一遍 JSON。 */
 function extractModels(payload: unknown): {
   models: string[];
+  imageModels: string[];
   capabilities: Record<string, ModelCapability>;
 } | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
@@ -129,9 +164,11 @@ function extractModels(payload: unknown): {
       : undefined;
   if (!list) return undefined;
   const models: string[] = [];
+  const imageModels: string[] = [];
   const capabilities: Record<string, ModelCapability> = {};
   for (const item of list) {
     if (typeof item === 'string') {
+      // 字符串条目没有 `architecture`，无从判断是不是生图模型：一律当对话模型。
       models.push(item);
       continue;
     }
@@ -139,11 +176,15 @@ function extractModels(payload: unknown): {
     const entry = item as Record<string, unknown>;
     const id = entry.id ?? entry.name ?? entry.model;
     if (typeof id !== 'string') continue;
-    models.push(id);
+    if (outputsImageOnly(entry)) {
+      imageModels.push(id);
+    } else {
+      models.push(id);
+    }
     const capability = readCapability(entry);
     if (capability) capabilities[id] = capability;
   }
-  return { models, capabilities };
+  return { models, imageModels, capabilities };
 }
 
 /**
@@ -187,9 +228,8 @@ export async function fetchProviderModels(
       };
     }
 
-    let extracted:
-      | { models: string[]; capabilities: Record<string, ModelCapability> }
-      | undefined;
+    // 直接从函数签名推导，避免两处各写一份结构（加字段时容易只改一处）
+    let extracted: ReturnType<typeof extractModels>;
     try {
       extracted = extractModels(JSON.parse(text));
     } catch {
@@ -219,6 +259,9 @@ export async function fetchProviderModels(
       latencyMs,
       status: response.status,
       models: extracted.models,
+      // 空数组时不返回该字段：没有生图模型与"上游不支持生图"是两件事，
+      // 但对界面而言"这一栏没东西可选"就够了，不必再多一个状态。
+      imageModels: extracted.imageModels.length > 0 ? extracted.imageModels : undefined,
       // 一个能力都没解析出来时不给这个字段，免得调用方把空对象当成"上游明确声明无限制"
       capabilities:
         Object.keys(extracted.capabilities).length > 0

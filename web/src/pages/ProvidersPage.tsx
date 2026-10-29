@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { api, ApiError } from '../lib/api';
 import { useAsync } from '../lib/useAsync';
-import type { EffortProbeResult, Provider, TestResult } from '../lib/types';
+import type { Provider, TestResult } from '../lib/types';
 import {
   Badge,
   Card,
@@ -23,14 +23,6 @@ export default function ProvidersPage(): JSX.Element {
   const [creating, setCreating] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
-  const [probingId, setProbingId] = useState<string | null>(null);
-  const [probeProgress, setProbeProgress] = useState<{
-    done: number;
-    total: number;
-    model: string;
-    effort: string;
-  } | null>(null);
-  const [probeResults, setProbeResults] = useState<Record<string, EffortProbeResult>>({});
   const [actionError, setActionError] = useState<string | null>(null);
 
   const providers = data?.providers ?? [];
@@ -46,57 +38,6 @@ export default function ProvidersPage(): JSX.Element {
       setActionError(cause instanceof ApiError ? cause.message : t('common.testFailed'));
     } finally {
       setTestingId(null);
-    }
-  };
-
-  const closeProbeResult = (providerId: string): void => {
-    setProbeResults((prev) => {
-      const next = { ...prev };
-      delete next[providerId];
-      return next;
-    });
-  };
-
-  const probe = async (provider: Provider): Promise<void> => {
-    // 候选档位数优先取上次响应的真实值；首次探测还没有结果，按服务端的 9 档估算。
-    const previous = probeResults[provider.id];
-    const candidates =
-      previous && previous.candidates.length > 0 ? previous.candidates.length : 9;
-    const confirmed = window.confirm(
-      t('providers.probe.confirm', {
-        models: provider.models.length,
-        requests: provider.models.length * candidates,
-      }),
-    );
-    if (!confirmed) return;
-    setActionError(null);
-    setProbingId(provider.id);
-    // 初始分母按「模型数 × 候选档位数」估：服务端 start 事件到达前就先画一条 0% 的轨道，
-    // 用户点下去立刻能看到进度条，而不是只有一行"请稍候"。
-    setProbeProgress({
-      done: 0,
-      total: provider.models.length * candidates,
-      model: '',
-      effort: '',
-    });
-    // 先清掉上一次结果：探测期间继续显示旧数据会让人以为这次已经出结果了。
-    closeProbeResult(provider.id);
-    try {
-      const result = await api.probeProviderEfforts(provider.id, (progress) => {
-        setProbeProgress({
-          done: progress.done,
-          total: progress.total,
-          model: progress.model,
-          effort: progress.effort,
-        });
-      });
-      setProbeResults((prev) => ({ ...prev, [provider.id]: result }));
-      reload();
-    } catch (cause) {
-      setActionError(cause instanceof ApiError ? cause.message : t('common.actionFailed'));
-    } finally {
-      setProbingId(null);
-      setProbeProgress(null);
     }
   };
 
@@ -154,44 +95,6 @@ export default function ProvidersPage(): JSX.Element {
       />
 
       {actionError && <Notice tone="error">{actionError}</Notice>}
-      {probingId !== null && (
-        <Notice tone="info">
-          <div className="space-y-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span>
-                {probeProgress !== null && probeProgress.done > 0
-                  ? t('providers.probe.progress', probeProgress)
-                  : t('providers.probe.running')}
-              </span>
-              {probeProgress !== null && probeProgress.total > 0 && (
-                <span className="font-mono text-[11px] text-muted">
-                  {probeProgress.done} / {probeProgress.total}
-                </span>
-              )}
-            </div>
-            <div
-              role="progressbar"
-              aria-label={t('providers.probe.running')}
-              aria-valuemin={0}
-              aria-valuemax={probeProgress?.total ?? 0}
-              aria-valuenow={probeProgress?.done ?? 0}
-              className="h-1.5 w-full overflow-hidden rounded-full bg-line"
-            >
-              <div
-                className="h-full rounded-full bg-accent transition-[width] duration-300 ease-out"
-                style={{
-                  width: `${
-                    probeProgress !== null && probeProgress.total > 0
-                      ? Math.min(100, Math.round((probeProgress.done / probeProgress.total) * 100))
-                      : 0
-                  }%`,
-                }}
-              />
-            </div>
-          </div>
-        </Notice>
-      )}
-
       {(creating || editing) && (
         <ProviderForm
           provider={editing ?? undefined}
@@ -204,6 +107,7 @@ export default function ProvidersPage(): JSX.Element {
             setEditing(null);
             reload();
           }}
+          onProbed={reload}
         />
       )}
 
@@ -319,12 +223,6 @@ export default function ProvidersPage(): JSX.Element {
                           onClick={() => void test(provider)}
                         />
                         <IconButton
-                          icon="zap"
-                          label={t('providers.actions.probe')}
-                          disabled={provider.models.length === 0 || probingId !== null}
-                          onClick={() => void probe(provider)}
-                        />
-                        <IconButton
                           icon="arrow-up"
                           label={t('providers.actions.moveUp')}
                           disabled={index === 0}
@@ -369,46 +267,6 @@ export default function ProvidersPage(): JSX.Element {
         )}
       </Card>
 
-      {/*
-        结果面板放在列表下方而不是行内：一个供应商可能声明很多模型、每行还要显示
-        接受的档位，塞进操作列会把表格撑坏。按供应商分别渲染，互不影响。
-      */}
-      {providers.map((provider) => {
-        const result = probeResults[provider.id];
-        if (!result) return null;
-        return (
-          <Card key={provider.id} title={`${t('providers.probe.title')} · ${provider.name}`}>
-            <ul className="space-y-2">
-              {result.models.map((model) => (
-                <li key={model.model} className="flex flex-wrap items-center gap-2">
-                  <code className="code-chip">{model.model}</code>
-                  {model.accepted.length > 0 ? (
-                    <code className="code-chip bg-accent-soft text-accent">
-                      {model.accepted.join(' / ')}
-                    </code>
-                  ) : (
-                    <Badge tone="danger">
-                      {model.error ?? t('providers.probe.allRejected')}
-                    </Badge>
-                  )}
-                </li>
-              ))}
-            </ul>
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-3">
-              <p className="max-w-2xl text-[11px] leading-5 text-muted">
-                {t('providers.probe.hint')}
-              </p>
-              <button
-                type="button"
-                className="btn-ghost btn-sm whitespace-nowrap"
-                onClick={() => closeProbeResult(provider.id)}
-              >
-                {t('providers.probe.close')}
-              </button>
-            </div>
-          </Card>
-        );
-      })}
     </div>
   );
 }

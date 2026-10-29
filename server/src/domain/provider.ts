@@ -155,9 +155,24 @@ export interface ProviderRecord {
   apiType: ApiType;
   baseUrl: string;
   apiKey: string;
+  /**
+   * **对话模型**列表：发布成 `lam-<key>/<model>` 别名、进入 Codex 模型目录、
+   * 参与对话路径选路。生图模型不放这里，见 `imageModels`。
+   */
   models: string[];
   /**
-   * 按模型名记录的上游能力，键必须在 `models` 里。
+   * **生图模型**列表：只服务 `/v1/images/*`，**不**发布别名、**不**进 Codex 模型目录。
+   *
+   * 为什么要和 `models` 分开：Codex 的 `/model` 列表来自我们生成的目录，而目录条目
+   * 来自聚合别名。若把 `gpt-image-2` 放进 `models`，它就会出现在 Codex 的模型选择器里，
+   * 用户能选中它去聊天——那个请求会打到对话端点，上游必然报错（图像模型不接 Chat）。
+   * 分开存之后，"能生图"与"能聊天"是两件事，各自的列表互不污染。
+   *
+   * 可选且缺省为空：老数据没有这个字段，读出来当作"没有生图模型"。
+   */
+  imageModels?: string[];
+  /**
+   * 按模型名记录的上游能力，键必须在 `models` **或** `imageModels` 里。
    *
    * 可选且缺省为空：老数据没有这个字段，读出来当作"未知"，目录回落保守默认值。
    * 只在向上游拉取模型列表时自动填充，也允许调用方显式传入覆盖。

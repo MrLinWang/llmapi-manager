@@ -98,6 +98,23 @@ describe('别名生成', () => {
     const aliases = listAliases([provider()]);
     expect(aliases[0].capability).toBeUndefined();
   });
+
+  it('生图模型不发布别名（否则会出现在 Codex 的 /model 里）', () => {
+    // 两份列表分开的意义就在这里：imageModels 只服务 /v1/images/*，
+    // 不进聚合别名 → 不进 Codex 目录 → 用户不会在 /model 里选中它去聊天。
+    const aliases = listAliases([
+      provider({ models: ['gpt-x'], imageModels: ['gpt-image-2'] }),
+    ]);
+    expect(aliases.map((item) => item.alias)).toEqual(['lam-alpha/gpt-x']);
+    expect(aliases.some((item) => item.alias.includes('gpt-image-2'))).toBe(false);
+  });
+
+  it('只有生图模型的供应商不发布任何别名', () => {
+    const aliases = listAliases([
+      provider({ models: [], imageModels: ['gpt-image-2'] }),
+    ]);
+    expect(aliases).toEqual([]);
+  });
 });
 
 describe('别名解析', () => {
@@ -145,5 +162,27 @@ describe('别名解析', () => {
     expect(resolveModel('lam-alpha', providers).kind).toBe('invalid');
     expect(resolveModel('lam-/gpt-x', providers).kind).toBe('invalid');
     expect(resolveModel('lam-alpha/', providers).kind).toBe('invalid');
+  });
+
+  it('生图路径按 imageModels 解析，对话路径按 models 解析', () => {
+    // 同一个别名在两条路径下的结论不同——这正是"两份清单"的语义。
+    const split = [
+      provider({ models: ['gpt-x'], imageModels: ['gpt-image-2'] }),
+    ];
+    expect(resolveModel('lam-alpha/gpt-image-2', split, { imagePath: true }).kind).toBe('alias');
+    expect(resolveModel('lam-alpha/gpt-x', split, { imagePath: true }).kind).toBe('invalid');
+    expect(resolveModel('lam-alpha/gpt-x', split).kind).toBe('alias');
+    expect(resolveModel('lam-alpha/gpt-image-2', split).kind).toBe('invalid');
+  });
+
+  it('模型在对话列表却被当生图模型用时，报错要说清该移到哪', () => {
+    // 笼统的"未声明模型"会让用户去 models 里找——那儿明明有，于是怀疑功能坏了。
+    const split = [provider({ models: ['gpt-x'], imageModels: [] })];
+    const result = resolveModel('lam-alpha/gpt-x', split, { imagePath: true });
+    expect(result.kind).toBe('invalid');
+    if (result.kind === 'invalid') {
+      expect(result.reasonKey).toBe('gateway.alias.modelIsNotImageModel');
+      expect(result.reason).toContain('生图模型列表');
+    }
   });
 });
