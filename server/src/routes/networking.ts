@@ -4,7 +4,7 @@ import type { TenantRepos } from '../store/tenantScope';
 import { defineRoute } from '../http/guard';
 import type { RouteRegistry } from '../http/routeRegistry';
 import { badRequest } from '../http/errors';
-import { NetworkingRuntime } from '../networking/runtime';
+import { NetworkingRuntime, type NetworkingIdentityStore } from '../networking/runtime';
 import { defaultNetworkingConfig } from '../domain/networking';
 
 /** 把落盘的密文密钥解得明文再交给原生模块。对外一律不返回明文。 */
@@ -27,13 +27,51 @@ function toView(config: ReturnType<typeof readConfig>) {
   };
 }
 
+/**
+ * 组网身份的持久化实现：落在 `identity.json` 的 `networkingIdentity` 字段。
+ *
+ * 私钥用 `ctx.secrets.encode()` 加密——它是网络的准入门槛之一（知道它 +
+ * 网络密钥就能冒充本机），不能明文落盘。读取时解不开（换了
+ * `DATA_ENCRYPTION_KEY`）就返回 null 并重新生成，同时留日志：此时对端
+ * 的钉扎必然失效，用户需要知道原因。
+ */
+function buildIdentityStore(ctx: AppContext): NetworkingIdentityStore {
+  return {
+    load: () => {
+      const data = ctx.store.identity.read();
+      const stored = data.networkingIdentity;
+      if (stored === undefined) return null;
+      try {
+        return {
+          peerId: stored.peerId,
+          staticPrivateKeyBase64: ctx.secrets.decode(stored.staticPrivateKeyEnc),
+        };
+      } catch (cause) {
+        ctx.logger.warn('组网身份的私钥解不开（DATA_ENCRYPTION_KEY 可能已更换），将重新生成', cause);
+        return null;
+      }
+    },
+    save: (identity) => {
+      const data = ctx.store.identity.read();
+      ctx.store.identity.write({
+        ...data,
+        networkingIdentity: {
+          peerId: identity.peerId,
+          staticPrivateKeyEnc: ctx.secrets.encode(identity.staticPrivateKeyBase64),
+        },
+      });
+    },
+  };
+}
+
 export function registerNetworkingRoutes(
   app: FastifyInstance,
   ctx: AppContext,
   registry: RouteRegistry,
   repos: TenantRepos,
 ): void {
-  const runtime = new NetworkingRuntime(ctx.logger);
+  // 每台机器一个稳定的组网身份，跨重启不变
+  const runtime = new NetworkingRuntime(ctx.logger, buildIdentityStore(ctx));
 
   defineRoute(
     app,

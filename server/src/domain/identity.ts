@@ -38,6 +38,21 @@ export interface Principal {
 export interface IdentityData {
   tenants: Tenant[];
   users: User[];
+  /**
+   * 本机的组网身份（EasyTier 的 peer_id 与 Noise 静态私钥）。
+   *
+   * **必须跨重启保持稳定**：对端按 `noise_static_pubkey` 钉扎本机身份，
+   * 重启后换密钥会被当成"另一个节点"。放在这里是因为它是**本机级**数据
+   * （与租户无关），和租户体系同一个文件可以省一次落盘路径的维护。
+   *
+   * 私钥是 `ctx.secrets.encode()` 的密文（`enc:v1:` 前缀），不是明文。
+   * 缺失时为 undefined——首次启动会生成并写回（向后兼容旧数据文件）。
+   */
+  networkingIdentity?: {
+    peerId: number;
+    /** Noise 静态私钥的密文 */
+    staticPrivateKeyEnc: string;
+  };
 }
 
 export const DEFAULT_TENANT_ID = 't_default';

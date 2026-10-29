@@ -77,6 +77,23 @@ export interface NativeProtocolSelfCheck {
 const MODULE_NAME = '@llmapi/easytier-node';
 
 /**
+ * 组网身份的持久化存储。
+ *
+ * **必须持久化**：对端会按 `noise_static_pubkey` 钉扎本机身份，重启后换密钥
+ * 会让对端认为"这是另一个节点"（或直接拒绝、或留下僵尸条目）。此前身份只
+ * 存在进程内存里，重启即变——作为备用实现影响有限，但作为主引擎必须修。
+ *
+ * 私钥由调用方负责加密落盘（走 `ctx.secrets.encode()`），本类只要求
+ * "读得到、写进去"两个动作，不关心存储介质。
+ */
+export interface NetworkingIdentityStore {
+  /** 读已保存的身份；没有则返回 null */
+  load(): { peerId: number; staticPrivateKeyBase64: string } | null;
+  /** 保存身份 */
+  save(identity: { peerId: number; staticPrivateKeyBase64: string }): void;
+}
+
+/**
  * 自研引擎的默认监听端口，仅作领域层默认值的镜像（实际用的是
  * `config.listenPort`）。留这个常量是为了让"默认 11011"这件事在运行时有
  * 一处可读的定义，但**不要用它覆盖配置**——端口必须由用户可改。
@@ -127,20 +144,44 @@ export class NetworkingRuntime {
    */
   private identity: { peerId: number; staticPrivateKey: Buffer } | null = null;
 
-  constructor(private readonly logger: Logger) {}
+  private readonly logger: Logger;
+  private readonly identityStore: NetworkingIdentityStore | null;
+
+  constructor(logger: Logger, identityStore?: NetworkingIdentityStore) {
+    this.logger = logger;
+    this.identityStore = identityStore ?? null;
+  }
 
   /** 取（或创建）本机稳定的组网身份。 */
   private stableIdentity(): { peerId: number; staticPrivateKey: Buffer } {
-    if (this.identity === null) {
-      // peer_id 取 32 位随机数并避开 0 与广播地址
-      let peerId = 0;
-      while (peerId === 0 || peerId === 0xffffffff) {
-        peerId = randomBytes(4).readUInt32LE(0);
+    if (this.identity !== null) return this.identity;
+
+    // 优先读已持久化的身份：重启后必须保持同一身份，否则对端的钉扎会失效
+    const stored = this.identityStore?.load() ?? null;
+    if (stored !== null) {
+      const staticPrivateKey = Buffer.from(stored.staticPrivateKeyBase64, 'base64');
+      if (staticPrivateKey.length === 32) {
+        this.identity = { peerId: stored.peerId, staticPrivateKey };
+        return this.identity;
       }
-      // X25519 私钥是 32 字节随机数（clamp 由实现负责）
-      this.identity = { peerId, staticPrivateKey: randomBytes(32) };
+      // 长度不对说明数据被破坏：重新生成而不是崩掉，但要留下日志
+      this.logger.warn('组网身份的私钥长度不是 32 字节，已重新生成（对端可能需要重新钉扎）');
     }
-    return this.identity;
+
+    // peer_id 取 32 位随机数并避开 0 与广播地址
+    let peerId = 0;
+    while (peerId === 0 || peerId === 0xffffffff) {
+      peerId = randomBytes(4).readUInt32LE(0);
+    }
+    // X25519 私钥是 32 字节随机数（clamp 由实现负责）
+    const identity = { peerId, staticPrivateKey: randomBytes(32) };
+    this.identity = identity;
+    this.identityStore?.save({
+      peerId: identity.peerId,
+      staticPrivateKeyBase64: identity.staticPrivateKey.toString('base64'),
+    });
+    this.logger.info(`已生成并保存组网身份：peerId=${identity.peerId}`);
+    return identity;
   }
 
   /**

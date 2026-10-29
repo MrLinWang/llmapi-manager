@@ -327,11 +327,10 @@ EasyTier 的 `PacketType.Data` 载荷是**完整 IP 包**（`peer_manager.rs:462
 
 按"影响多大"排序，前三条是真的会咬人的：
 
-1. **身份不跨重启持久化**（最需要优先处理）。`runtime.ts` 的 `peerId` 与
-   Noise 静态私钥在进程内稳定，但**重启后重新生成**。对端若按
-   `noise_static_pubkey` 钉扎了本机，重启后会认为"这是另一个节点"。
-   目前的实际影响有限（官方默认不做钉扎校验），但要让本实现当长期在线的
-   主引擎，必须把这对密钥落盘（放租户数据目录、经 `ctx.secrets.encode()`）。
+1. ~~身份不跨重启持久化~~ **已修**：`peerId` 与 Noise 静态私钥现在落在
+   `identity.json` 的 `networkingIdentity` 字段（私钥经 `ctx.secrets.encode()`
+   加密），重启后保持一致，对端的钉扎不会失效。解不开（换了
+   `DATA_ENCRYPTION_KEY`）时重生成并告警——代价是钉扎失效，用户需要知道。
 2. **组网状态不跨服务重启恢复**。`NetworkingRuntime` 不是单例，
    服务重启后 `status()` 会报 `running: false`，而端口可能仍被上一个进程
    占着。`start()` 失败时会把端口占用转成可操作的说明并记进
