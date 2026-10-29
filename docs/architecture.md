@@ -126,6 +126,37 @@ POST /api/agents/codex/apply
 还原走同一套规则的反向操作，只撤销"值仍等于我们写入值"的键；由我们生成的模型目录文件按 `created` 删除。
 细节见 [agents.md](./agents.md)。
 
+## 数据流：一次虚拟网络访问（组网数据面）
+
+设备互联让两台机器在没有公网 IP 时互相可达。**默认引擎是自研的 TS 实现**
+（`engine: 'builtin'`），原生模块（Rust + N-API）保留为备用——见
+[configuration.md](configuration.md#设备互联组网的引擎选择)。
+
+```
+官方节点（follower）          自研引擎（master）              本机真实服务
+ 虚拟 10.x.x.2
+   │ TCP SYN ──────────────▶ ① 解密 Data 包 → ② 解析 IP 头
+   │                          ③ 用户态 TCP 状态机
+   │                          ④ 桥接 net.connect(127.0.0.1:8787)
+   │◀──────────── SYN-ACK ────┤
+   │ data ──────────────────▶ ⑤ socket.write()
+   │◀──────────── 响应数据 ────┤ ⑥ 封 IP 包 → 加密 → Data 包
+```
+
+关键点：
+
+- `PacketType.Data` 的载荷是**完整 IP 包**（`peer_manager.rs:462` 官方直接投给网卡或
+  smoltcp）。自研实现没有 Rust 依赖，所以自己实现了窄得多的路径：
+  [`ip.ts`](../server/src/networking/easytier/ip.ts)（IP/TCP 头编解码与校验和）+
+  [`tcpStack.ts`](../server/src/networking/easytier/tcpStack.ts)（TCP 状态机 + 桥接）。
+- **TCP 校验和必须覆盖载荷**（含伪首部）。只算头部会让所有带数据的段被对端静默丢弃，
+  症状是"握手正常、发数据没反应"。
+- 映射由配置 `portForwards` 决定（虚拟端口 → 本机端口），默认把 8787 映射到本机 8787，
+  即本服务自己的管理界面。
+- **能力边界**：只做 TCP。UDP（DNS）、ICMP（`ping`）、IP 分片重组、TCP 拥塞控制都没有；
+  需要这些请切 `engine: 'native'`。运行时遇到 UDP/ICMP 会记日志（指出协议与端口），
+  而不是静默丢弃。
+
 ## 存储布局
 
 ```
