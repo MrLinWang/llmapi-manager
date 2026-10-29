@@ -734,6 +734,74 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 - 令牌按租户分文件存放：当前只有默认租户，所以鉴权时直接查 `t_default`。
   做多租户需要一张全局 `hash → tenantId` 索引，否则得遍历所有租户。
 
+## 设备互联（组网）
+
+让两台没有公网 IP 的机器互相可达，从而直接访问对端的管理界面做配置同步。
+默认用自研 TS 引擎（`engine: 'builtin'`），原生模块保留为备用——能力差异与
+选择依据见 [configuration.md](./configuration.md#设备互联组网的引擎选择)。
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/networking/status` | `settings:read` | 配置（密钥打码）+ 运行状态 |
+| GET | `/api/networking/peers` | `settings:read` | 当前已连接的节点 |
+| PATCH | `/api/networking/config` | `settings:write` | 修改引擎 / 网络名 / 密钥 / 监听端口 / 端口映射 |
+| POST | `/api/networking/start` | `settings:write` | 启动组网 |
+| POST | `/api/networking/stop` | `settings:write` | 停止组网 |
+
+### 状态里的关键字段
+
+`status` 同时返回两个引擎的可用性与**实际**运行的引擎，因为"配置选的"和
+"实际跑的"可能不一致：
+
+```json
+{
+  "config": {
+    "engine": "builtin",
+    "enabled": true,
+    "networkName": "llmapi",
+    "networkSecret": "****abcd",
+    "networkSecretSet": true,
+    "peers": ["tcp://public.easytier.cn:11010"],
+    "hostname": "master",
+    "ipv4": "10.126.126.1",
+    "listenPort": 11011,
+    "portForwards": [{ "virtualPort": 8787, "localPort": 8787 }]
+  },
+  "status": {
+    "available": true,
+    "engine": "builtin",
+    "builtinAvailable": true,
+    "nativeAvailable": false,
+    "degradedFrom": null,
+    "enabled": true,
+    "running": true,
+    "virtualIpv4": "10.126.126.1",
+    "peerCount": 1,
+    "functional": true,
+    "functionalReason": null
+  }
+}
+```
+
+- **`engine` 是实际生效的引擎**，`degradedFrom` 非 null 表示发生了降级
+  （请求 `native` 但原生模块没编译时会退到 `builtin`）。不要忽略它：
+  降级到 `builtin` 后 NAT 穿透、UDP、端口转发都不生效。
+- **`functional` 的判据按引擎不同**：`native` 看"有没有拿到虚拟 IP"（没有说明
+  TUN 没建起来）；`builtin` 不建 TUN，所以看"有没有对端连上"。
+  `functionalReason` 分别解释各自的失败原因。
+- `networkSecret` 永远打码（只留末 4 位）。提交时若含 `*` 表示"不修改"。
+
+### PATCH /api/networking/config 的可改字段
+
+`engine`（`builtin` / `native`）、`enabled`、`networkName`、`networkSecret`、
+`peers`、`hostname`、`ipv4`、`listenPort`（1-65535）、`portForwards`。
+
+`portForwards` 每项是 `{ virtualPort, localPort }`：对端访问本机虚拟 IP 的
+`virtualPort` 时，连接被桥接到本机 `127.0.0.1:localPort`。**重复的
+`virtualPort` 会被拒绝**（后注册的会覆盖前面的，用户看不出为什么某条不生效）。
+
+改 `engine` 或 `listenPort` / `portForwards` 需要**重新启动组网**才生效。
+
 ## 配置同步
 
 多设备配置同步：一台机器当 master 导出配置，其余 follower 拉取。设计与取舍见
