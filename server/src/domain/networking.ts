@@ -73,6 +73,20 @@ export interface NetworkingConfig {
    * 默认 11011：避开官方的 11010，允许两者在同一台机器上并存。
    */
   listenPort: number;
+  /**
+   * 数据面端口转发（只对 `builtin` 引擎生效）。
+   *
+   * 每项表示"对端访问本机虚拟 IP 的 `virtualPort` 时，把连接桥接到本机
+   * `127.0.0.1:localPort`"。这是组网的实际用途：follower 通过虚拟 IP
+   * 访问 master 的管理界面。
+   *
+   * 默认 `[{ virtualPort: 8787, localPort: 8787 }]`——就是本服务自己的
+   * 管理界面端口，开箱即可被对端访问。
+   *
+   * 原生引擎忽略它（用官方的 `port_forwards`，语义不同：那边是
+   * "本机监听 → 转发到虚拟网内的目标"）。
+   */
+  portForwards: Array<{ virtualPort: number; localPort: number }>;
   /** 中继服务器列表。为空时 EasyTier 只能靠局域网发现 */
   peers: string[];
   /** 本节点在网络里显示的名字，便于在两台机器间辨认 */
@@ -95,6 +109,7 @@ export function defaultNetworkingConfig(): NetworkingConfig {
     hostname: 'llmapi-manager',
     ipv4: null,
     listenPort: 11011,
+    portForwards: [{ virtualPort: 8787, localPort: 8787 }],
   };
 }
 

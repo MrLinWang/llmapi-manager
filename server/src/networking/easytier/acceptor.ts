@@ -48,6 +48,7 @@ import {
 import { extractFrame, framePacket } from './framing';
 import { PacketType, PeerManagerHeaderFlags, decodeHeader } from './protocol';
 import { deriveTrafficKey, directionForSender, decryptPayload, encryptPayload } from './dataPlane';
+import { TcpStack } from './tcpStack';
 import {
   buildOspfSyncRouteRequest,
   buildWrappedRpcResponse,
@@ -127,6 +128,8 @@ export interface AcceptorCallbacks {
   onRouteAdvertised?(): void;
   onPingPong?(): void;
   onError?(err: Error): void;
+  /** 数据面的诊断日志（连接建立、桥接失败等） */
+  onDataPlaneLog?(message: string): void;
 }
 
 interface Connection {
@@ -176,6 +179,28 @@ export class EasyTierAcceptor {
   private readonly connections = new Set<Connection>();
   private readonly staticKeyPair: { privateKey: Buffer; publicKey: Buffer };
   private ospfAnswered = false;
+  /** 收到的各类包计数。数据面排查靠它回答"包到底有没有来"。 */
+  private readonly packetTypes = new Map<number, number>();
+
+  /** 各类包计数（键是包类型名，便于阅读）。 */
+  packetTypeCounts(): Record<string, number> {
+    const names: Record<number, string> = {
+      [PacketType.Data]: 'Data',
+      [PacketType.HandShake]: 'HandShake',
+      [PacketType.Ping]: 'Ping',
+      [PacketType.Pong]: 'Pong',
+      [PacketType.RpcReq]: 'RpcReq',
+      [PacketType.RpcResp]: 'RpcResp',
+      [PacketType.NoiseHandshakeMsg1]: 'NoiseMsg1',
+      [PacketType.NoiseHandshakeMsg2]: 'NoiseMsg2',
+      [PacketType.NoiseHandshakeMsg3]: 'NoiseMsg3',
+    };
+    const out: Record<string, number> = {};
+    for (const [type, count] of this.packetTypes) {
+      out[names[type] ?? `type-${type}`] = count;
+    }
+    return out;
+  }
   /**
    * 本节点在 OSPF 会话里的 session id（稳定，不随请求变化）。
    *
@@ -218,6 +243,8 @@ export class EasyTierAcceptor {
   }
 
   async close(): Promise<void> {
+    this.tcpStack?.close();
+    this.tcpStack = null;
     for (const conn of this.connections) conn.socket.destroy();
     this.connections.clear();
     await new Promise<void>((resolve) => {
@@ -387,6 +414,13 @@ export class EasyTierAcceptor {
     conn: Connection,
     responder: NoiseXXResponder | null,
   ): void {
+    // 统计必须放在**最前面**：放后面会漏掉早退的分支（Ping/未加密/其他类型），
+    // 而"某类包到底有没有来"正是排查数据面时的第一个问题。
+    this.packetTypes.set(
+      header.packetType,
+      (this.packetTypes.get(header.packetType) ?? 0) + 1,
+    );
+
     // Ping → Pong：把类型字节从 Ping 翻成 Pong，其余原样发回（`peer_conn.rs:1340`）。
     //
     // **注意 frame 里没有 4 字节长度前缀**——本类的收帧循环返回的是去掉前缀的
@@ -432,6 +466,20 @@ export class EasyTierAcceptor {
           );
         }
       }
+      return;
+    }
+
+    // ── 业务数据包（Data）：虚拟网络里的真实流量 ──
+    //
+    // `Data` 的载荷是**完整 IP 包**（`peer_manager.rs:462`：官方把它直接投给
+    // 网卡或 smoltcp）。这里把它交给用户态 TCP 栈，由栈把虚拟连接桥接到
+    // 本机真实端口——这是"follower 通过虚拟 IP 访问 master 管理界面"的关键。
+    //
+    // 注意 Data 包同样是加密的（`try_compress_and_encrypt`），所以要先解密。
+    // 与 RPC 不同的是：**顺序号也消耗**，且失败时不能静默丢弃——丢一个
+    // 数据包会让 TCP 看起来"卡住但不断"，比直接断开更难排查。
+    if (header.packetType === PacketType.Data) {
+      this.handleDataPacket(conn, header, frame);
       return;
     }
 
@@ -614,6 +662,127 @@ export class EasyTierAcceptor {
   }
 
   /** 加密并发送一个 RPC 包（nonce 序列号每连接从 0 递增）。 */
+  /**
+   * 处理一个加密的业务数据包（`PacketType.Data`）。
+   *
+   * 载荷是完整 IP 包。解密后交给用户态 TCP 栈；栈把虚拟连接桥接到本机端口，
+   * 于是对端在虚拟 IP 上访问本机服务时能真的连通。
+   *
+   * **解密失败的处置与 RPC 不同**：RPC 解不开就丢弃（可能是别的会话的包），
+   * 而 Data 包解不开说明这条连接的密钥/序号已经错位，继续用只会让对端看到
+   * "能连上但不通"的假象。这里记一条日志并丢弃——不主动断连，因为序号错位
+   * 也可能是我们有 bug，断连会掩盖它。
+   */
+  private handleDataPacket(
+    conn: Connection,
+    header: { flags: number },
+    frame: Buffer,
+  ): void {
+    if ((header.flags & PeerManagerHeaderFlags.ENCRYPTED) === 0) {
+      // 未加密的 Data 包只有非 secure 模式才有；本实现始终走 secure，
+      // 收到这种包说明对端配置不一致
+      this.callbacks.onError?.(
+        new Error('收到未加密的 Data 包——对端可能关掉了 secure mode'),
+      );
+      return;
+    }
+
+    const recvKey = deriveTrafficKey(
+      conn.rootKey,
+      0,
+      directionForSender(conn.remotePeerId, this.options.myPeerId),
+    );
+
+    let ipPacket: Buffer;
+    try {
+      ipPacket = decryptPayload({
+        key: recvKey,
+        ciphertextWithTail: frame.subarray(16),
+        algorithm: this.options.algorithm ?? 'aes-gcm',
+      });
+    } catch (e) {
+      this.callbacks.onError?.(
+        new Error(`Data 包解密失败：${(e as Error).message}`),
+      );
+      return;
+    }
+
+    this.tcpStack?.handleIpPacket(ipPacket);
+  }
+
+  /** 用户态 TCP 栈（懒创建：只有配置了端口转发才有意义）。 */
+  private tcpStack: TcpStack | null = null;
+
+  /**
+   * 启用数据面：把虚拟 IP 上的端口桥接到本机端口。
+   *
+   * 每个 `{ virtualPort, localPort }` 表示"对端访问我虚拟 IP 的 virtualPort
+   * 时，把连接转给本机 127.0.0.1:localPort"。这就是组网的实际用途——
+   * follower 通过虚拟 IP 访问 master 的管理界面（8787）。
+   */
+  enableDataPlane(
+    forwards: Array<{ virtualPort: number; localPort: number }>,
+  ): void {
+    if (forwards.length === 0) return;
+    if (this.tcpStack === null) {
+      this.tcpStack = new TcpStack({
+        localIp: this.options.virtualIpv4 ?? '0.0.0.0',
+        bridgeHost: '127.0.0.1',
+        sendIpPacket: (packet) => this.sendDataPacket(packet),
+        log: (message) => this.callbacks.onDataPlaneLog?.(message),
+      });
+      this.tcpStack.start();
+    }
+    for (const forward of forwards) {
+      this.tcpStack.listen(forward.virtualPort, forward.localPort);
+    }
+  }
+
+  /** 数据面连接数（诊断用）。 */
+  dataPlaneConnectionCount(): number {
+    return this.tcpStack?.connectionCount() ?? 0;
+  }
+
+  /**
+   * 把一个 IP 包加密后发给对端。
+   *
+   * 选哪个连接？当前实现只有单对端场景（组网就是两台机器），所以发给
+   * 第一个已连上的对端。多对端时应该按 IP 查路由表——那是 OSPF 的职责，
+   * README 里记为已知边界。
+   */
+  private sendDataPacket(ipPacket: Buffer): void {
+    const conn = [...this.connections][0];
+    if (conn === undefined) {
+      this.callbacks.onDataPlaneLog?.('发送数据包时没有可用连接，丢弃');
+      return;
+    }
+
+    const sendKey = deriveTrafficKey(
+      conn.rootKey,
+      0,
+      directionForSender(this.options.myPeerId, conn.remotePeerId),
+    );
+    const ciphertext = encryptPayload({
+      key: sendKey,
+      payload: ipPacket,
+      epoch: 0,
+      seq: conn.sendSeq,
+      algorithm: this.options.algorithm ?? 'aes-gcm',
+    });
+    conn.sendSeq += 1n;
+
+    const framed = framePacket(ciphertext, {
+      fromPeerId: this.options.myPeerId,
+      toPeerId: conn.remotePeerId,
+      packetType: PacketType.Data,
+      flags: PeerManagerHeaderFlags.ENCRYPTED,
+    });
+    this.callbacks.onDataPlaneLog?.(
+      `发送数据包 ${ipPacket.length}B → peer=${conn.remotePeerId} seq=${conn.sendSeq - 1n}`,
+    );
+    conn.socket.write(framed);
+  }
+
   private sendRpc(conn: Connection, packet: RpcPacket, packetType: PacketType): void {
     const sendKey = deriveTrafficKey(
       conn.rootKey,

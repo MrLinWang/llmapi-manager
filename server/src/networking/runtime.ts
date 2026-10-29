@@ -421,6 +421,9 @@ export class NetworkingRuntime {
           // 单个连接失败不该拖垮整个组网
           this.logger.warn('自研引擎连接出错', err);
         },
+        onDataPlaneLog: (message) => {
+          this.logger.info(`组网数据面：${message}`);
+        },
       },
     );
 
@@ -455,6 +458,17 @@ export class NetworkingRuntime {
         return;
       }
       throw cause;
+    }
+
+    // 数据面：把虚拟 IP 上的端口桥接到本机真实端口。
+    // 没有它，对端"连得上虚拟 IP"却没有任何服务可达——控制面通、数据面不通。
+    if (config.portForwards.length > 0) {
+      acceptor.enableDataPlane(config.portForwards);
+      this.logger.info(
+        `组网数据面已启用：${config.portForwards
+          .map((f) => `${f.virtualPort}→127.0.0.1:${f.localPort}`)
+          .join(', ')}`,
+      );
     }
 
     this.builtin = {
