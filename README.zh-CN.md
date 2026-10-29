@@ -11,8 +11,8 @@
 ## 能力范围
 
 - **供应商管理**：三种协议 —— OpenAI 兼容（Chat Completions）/ OpenAI 兼容（Responses）/ Anthropic 兼容（Messages）；API Key 加密落盘、列表脱敏、优先级排序、启用开关、连通性测试（请求上游 `/models`）、按表单当前值一键拉取上游模型列表并勾选启用；另有**逐档实测**：按思考档位逐个打一次极小请求，让 Codex 模型目录只列出上游真正接受的档位。
-- **模型聚合**：把启用供应商的模型发布为 `lam-<供应商key>/<模型>` 别名；另可配置"默认供应商 + 默认模型"承接不带别名的请求。
-- **统一网关**：`/v1/models`、`/v1/chat/completions`、`/v1/messages`、`/v1/responses`；支持 SSE 流式透传；默认路径失败时按优先级回退一次。
+- **模型聚合**：把启用供应商的**对话模型**发布为 `lam-<供应商key>/<模型>` 别名；另可配置"默认供应商 + 默认模型"承接不带别名的请求。**生图模型单独一个列表**，不会出现在 Codex 的 `/model` 选择器里。
+- **统一网关**：`/v1/models`、`/v1/chat/completions`、`/v1/messages`、`/v1/responses`，外加 `/v1/images/generations` 与 `/v1/images/edits`（Codex 内置生图工具可经网关使用，上游只给图片链接时网关会内联成 `b64_json`）；支持 SSE 流式透传；默认路径失败时按优先级回退一次。
 - **Agent 下发**：Codex CLI（`~/.codex/config.toml` + `auth.json` + `llmapi-model-catalog.json`，只接受 `responses` 供应商，`wire_api` 固定 `responses`）与 Claude Code（`~/.claude/settings.json`，需要 `anthropic`）；支持预览、应用、还原、结束 Codex 进程，写前备份，只改自己拥有的键。
 - **可观测**：请求日志与今日统计（请求数、成功率、平均耗时）。
 - **双语界面与双语报错**：控制台支持简体中文 / English 切换，语言偏好保存在服务端
@@ -91,9 +91,15 @@ GET  /v1/models
 POST /v1/chat/completions    # 需要 apiType=openai 的上游（OpenAI 兼容 · Chat Completions）
 POST /v1/messages            # 需要 apiType=anthropic 的上游（Anthropic 兼容 · Messages）
 POST /v1/responses           # 需要 apiType=responses 的上游（OpenAI 兼容 · Responses）
+POST /v1/images/generations  # 生图；需要 apiType 为 openai 或 responses 的上游
+POST /v1/images/edits        # 改图；需要 apiType 为 openai 或 responses 的上游
 ```
 
-三条 POST 路径都是**严格匹配**：协议不符返回 501，不会退化成正向直通。
+对话路径都是**严格匹配**：协议不符返回 501，不会退化成正向直通。两条生图路径是例外——
+它们同时接受 `openai` 与 `responses` 供应商，因为 `apiType` 描述的是对话协议，
+不描述"有没有实现 Images 端点"（实测 `responses` 类型的上游照样能生图，`openai` 类型的
+反而可能没有生图渠道）。上游若只返回 `data[].url`，网关会下载图片并内联成 `b64_json`，
+因为 Codex 只认这个字段。
 鉴权头按上游体系分组：`openai` 与 `responses` 用 `Authorization: Bearer`，
 `anthropic` 用 `x-api-key` + `anthropic-version`。
 
@@ -169,8 +175,10 @@ data/                                  # 实际落点由 DATA_DIR 决定，npm �
 
 - 协议默认严格匹配：`/v1/chat/completions` 要 `openai`、`/v1/messages` 要 `anthropic`、
   `/v1/responses` 要 `responses`，不匹配明确返回 501、不静默转发。
-  唯一例外是 `/v1/responses → openai`：开启「跨协议转发」（或协议不匹配时网关自动开启）后，
-  由网关双向转换请求、响应与流式事件。托管工具（如 `web_search`）没有 Chat 等价物会被丢弃。
+  例外有两个：`/v1/responses → openai` 在开启「跨协议转发」（或协议不匹配时网关自动开启）后，
+  由网关双向转换请求、响应与流式事件（托管工具如 `web_search` 没有 Chat 等价物会被丢弃）；
+  以及两条生图路径，它们同时接受 `openai` 与 `responses` 供应商，且**从不**做协议转换。
+  生图响应的 `url → b64_json` 内联是网关唯一会改写成功响应体的地方。
 - 不做计费、配额、多用户 UI、MCP/Skills/会话管理、桌面打包。
 - **日志语言与接口语言是两套设置**：接口响应跟随请求语言（租户设置 > `Accept-Language`），
   而运行日志、启动横幅与 CLI 输出跟随 `LOG_LANGUAGE`（默认中文）。日志的受众是部署者，

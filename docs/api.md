@@ -157,7 +157,7 @@
 | PUT | `/api/providers/order` | `providers:write` | `{ "ids": [...] }`，按数组顺序重排 `priority` |
 | POST | `/api/providers/:id/test` | `providers:write` | 请求上游 `/models`，10s 超时；结果写回 `lastTest` |
 | POST | `/api/providers/:id/probe-efforts` | `providers:write` | 逐档实测 reasoning effort，把上游接受的档位写回 `modelCapabilities` |
-| POST | `/api/providers/models` | `providers:write` | 按表单**临时值**拉取模型列表，不要求供应商已保存 |
+| POST | `/api/providers/models` | `providers:write` | 按表单**临时值**拉取模型列表（对话与生图分开返回），不要求供应商已保存 |
 | POST | `/api/providers/:id/default` | `providers:write` | 设为默认，可带 `{ "model": "..." }` |
 
 创建/更新请求体：
@@ -169,6 +169,7 @@
   "baseUrl": "https://api.example.com",
   "apiKey": "sk-...",
   "models": ["gpt-x", "gpt-x-mini"],
+  "imageModels": ["gpt-image-2"],
   "modelCapabilities": {
     "gpt-x": { "contextWindow": 400000, "maxOutputTokens": 64000 }
   },
@@ -181,12 +182,36 @@
 
 约束：`name` 非空；`apiType` ∈ `openai | anthropic | responses`（非法值返回
 400 `apiType 只能是 openai / anthropic / responses`）；`baseUrl` 必须是 http/https；
-`models` 去重后保持输入顺序；`priority` 越小越靠前。
+`models` / `imageModels` 去重后保持输入顺序；`priority` 越小越靠前。
+
+**两个模型列表是分开的两份数据**：
+
+| 字段 | 用途 |
+| --- | --- |
+| `models` | **对话模型**。发布成 `lam-<key>/<model>` 别名、进入 Codex 模型目录、参与对话路径选路 |
+| `imageModels` | **生图模型**。只服务 `/v1/images/*`（Codex 内置生图工具），**不**发布别名、**不**进 Codex 目录 |
+
+分开的理由：目录条目来自聚合别名，而 Codex 的 `/model` 列表来自目录。把 `gpt-image-2`
+放进 `models` 会让它出现在 Codex 的模型选择器里，用户选中后发出的是对话请求，
+上游（图像模型不接 Chat）必然报错。分开之后，"能生图"与"能聊天"互不污染。
+
+同一个名字在两处都出现时，服务端按**生图**处理（从 `models` 中剔除），
+不报错——用户意图明确，且不丢数据。只配生图模型是合法用法，前端只要求
+"两类模型至少有一个"；但 Agent 下发仍要求 `models` 非空（Codex 需要一个对话模型）。
+
+**`PUT /api/providers/:id` 的 `imageModels` 有"不传 = 不改"的语义**（与
+`modelCapabilities` 一致）：省略该字段表示保留已存值，传 `[]` 才表示清空。
+这很重要，因为有调用方只改部分字段（「逐档实测」写能力表、`registry:sync` 同步脚本）
+——若省略即清空，点一次逐档实测就会把用户配好的生图模型抹掉（真实缺陷）。
+注意 `create` 没有这个语义（新建时本来就没有"已存值"）。
+
+前端表单是**全量编辑器**，所以它总是显式提交 `imageModels`（哪怕空数组），
+否则"清空生图模型框再保存"这个操作会被服务端当成"不改"而静默失效。
 
 `modelCapabilities` 可省略，省略表示**保持已存值不变**（编辑态不必为了保留能力而重填）。
-服务端在落盘前会裁剪：只保留仍出现在 `models` 里的模型，非正整数的值整条丢弃
-（0 / 负数会被当成"窗口为 0"，比缺省更糟）。它的唯一用途是生成 Codex 目录里的
-`context_window` / `max_output_tokens`，见 `docs/agents.md`。
+服务端在落盘前会裁剪：只保留仍出现在 `models` **或** `imageModels` 里的模型，
+非正整数的值整条丢弃（0 / 负数会被当成"窗口为 0"，比缺省更糟）。它的唯一用途是
+生成 Codex 目录里的 `context_window` / `max_output_tokens`，见 `docs/agents.md`。
 
 `apiType` 不是展示字段，它决定这条上游只接哪条网关路径：
 
@@ -238,11 +263,27 @@
   "ok": true,
   "latencyMs": 42,
   "status": 200,
-  "models": ["gpt-5", "gpt-5-mini"],
+  "models": ["gpt-5", "gpt-6-luna"],
+  "imageModels": ["gpt-image-2", "seedream-5.0"],
   "capabilities": { "gpt-5": { "contextWindow": 400000, "maxOutputTokens": 64000 } }
 }
 { "ok": false, "latencyMs": 10003, "error": "请求超时（10s）" }
 ```
+
+`imageModels` 是**只输出图像、不能聊天**的模型，取自上游 `/models` 每条的
+`architecture.output_modalities`。判据是"输出模态里**没有** `text`"，而不是"含 `image`"：
+
+| 上游声明 | 归类 | 原因 |
+| --- | --- | --- |
+| `["image"]` | `imageModels` | 只能生图。实测 OpenDesign 的 `gpt-image-2` / `nano-banana-2` / `seedream-5.0` 等都是这一组 |
+| `["text", "image"]` | `models` | 多模态，仍能聊天。挪进生图列表会让用户在 Codex 的 `/model` 里看不到它 |
+| 没有 `architecture` | `models` | 不猜。上游没声明时由用户在生图模型框里手填 |
+
+两个数组**互斥**：同一个模型不会同时出现在两处，前端据此把候选分到两个框。
+一个生图模型都没识别出来时 `imageModels` 不出现（而不是空数组）——
+"上游没声明模态"与"上游不支持生图"对界面是同一件事：这一栏没东西可选。
+
+实测 OpenDesign：44 个模型 → 39 个对话 + 5 个生图，零重叠。
 
 `capabilities` 是可选字段：解析上游 `/models` 条目里的 `metadata`
 （`context_limit` / `context_window` / `context_length` 与 `output_budget` / `max_output_tokens`）
@@ -277,7 +318,11 @@
 
 权限 `providers:write`。对供应商的**每个模型 × 每个候选档位**真实发一次极小请求，
 只保留上游返回 2xx 的档位，并写回该供应商的 `modelCapabilities[model].reasoningEfforts`
-（同时把 `supportsReasoning` 置为 `true`）。前端「逐档实测」按钮调用它。
+（同时把 `supportsReasoning` 置为 `true`）。
+
+界面入口在**「编辑供应商」表单的「思考档位」一节**（新建态不可用：探测结果要写回一条
+已存在的记录，草稿没有 id）。结果就展示在同一节里，读的是 `modelCapabilities` 的落盘值，
+所以关掉页面再回来仍然可见，不必为了看一眼重测一次。
 
 候选档位就是 Codex 认识的 `none` / `minimal` / `low` / `medium` / `high` / `xhigh` /
 `max` / `ultra` / `persistent`；探测结果按强度升序返回。
@@ -309,6 +354,22 @@
 - 没有模型时 400 `providers.probe.noModels`；供应商不存在时 404 `providers.notFound`。
 - 请求可能较慢（模型数 × 9，并发 4、单请求 20s 超时），这是预期行为，不是挂起。
 - 写回的是供应商记录，**模型目录要重新 apply 才更新**。
+
+### 思考档位在界面上放在哪
+
+档位展示**只在「编辑供应商」里**，不在供应商列表的行内。原因是一个供应商可能声明十几个
+模型，每个模型还要带"接受哪些档位 / 被拒哪些"，塞进表格那一格会把整行撑坏，也挤掉
+名称、地址、Key 这些按行扫读的字段。档位属于"配这家供应商时关心一次"的详情信息。
+
+三处语义不能合并显示（合并会让用户误判）：
+
+| `reasoningEfforts` | 含义 | 界面文案 |
+| --- | --- | --- |
+| `undefined` | 没测过（或数据源没给）→ 目录回落默认三档 | `未实测（点「逐档实测」探测）` |
+| `[]` | 测过但一个档位都没被接受 → 目录写空数组，Codex 隐藏推理菜单 | `未探测到可用档位，已保留原配置` |
+| 非空数组 | 上游真正接受的档位，按强度升序 | 直接列出，如 `low / high` |
+
+对话模型与生图模型的档位都在同一节展示（两份模型清单都可能有档位数据）。
 
 ## 聚合与设置
 
@@ -622,10 +683,16 @@ Claude Code 恒为 0）。写成功不等于生效：这些进程内存里还是
 | POST | `/v1/chat/completions` | `openai` |
 | POST | `/v1/messages` | `anthropic` |
 | POST | `/v1/responses` | `responses` |
+| POST | `/v1/images/generations` | `openai` 或 `responses` |
+| POST | `/v1/images/edits` | `openai` 或 `responses` |
 
-三条 POST 路径默认严格匹配：供应商协议与路径不符时返回 501（`not_implemented`），
+对话路径默认严格匹配：供应商协议与路径不符时返回 501（`not_implemented`），
 不会退化成直通。比如 `/v1/responses` 打到 `openai` 供应商默认会被拦下 —— 早期它确实是不限协议的
 直通路径，结果把 Responses 请求发给了只支持 Chat 的上游。
+
+生图两条路径是**例外**，接受 `openai` 与 `responses` 两种协议：`apiType` 描述对话协议，
+不描述"有没有 Images 端点"，实测 `responses` 类型的上游照样能生图。选路与
+`url → b64_json` 的响应归一化见 [gateway.md](./gateway.md#生图直通v1images)。
 
 唯一的例外是设置项 `protocolConversion`：打开后 `/v1/responses → openai` 由网关做双向转换
 （其余组合仍 501）。遇到"打开就能解决"的协议不匹配时会**自动开启**并持久化，
@@ -781,7 +848,7 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 | 字段 | 说明 |
 | --- | --- |
 | `model` | 必填，非空字符串。别名（`lam-xxx/model`）或裸模型名都行 |
-| `path` | 可选，默认 `/responses`。可写 `/responses` 或 `/v1/responses`，也接受 `/chat/completions`、`/messages` |
+| `path` | 可选，默认 `/responses`。可写 `/responses` 或 `/v1/responses`，也接受 `/chat/completions`、`/messages`、`/images/generations`、`/images/edits` |
 | `body` | 仅 `/forward`：替换请求体（见下） |
 
 `path` 会先剥掉 `/v1` 前缀再校验，不在 `GATEWAY_PATHS` 里就返回 400 并列出可选值。
@@ -799,12 +866,17 @@ curl -X POST http://127.0.0.1:8787/api/diagnostics/route \
 - `ok`：**这次真实请求会不会成功**。它同时考虑"协议匹配"与"会不会转换"，
   不是简单的"选到了供应商"。
 - `primary.reason`：为什么选它。取值 `alias`（别名明确指向）/ `default-provider`（默认供应商）
-  / `approval-placeholder`（审批占位名被改写）/ `priority`（按协议优先 + priority 排序取第一）
+  / `approval-placeholder`（审批占位名被改写）/ `image-model`（生图：该供应商在自己的模型列表里
+  声明了这个模型名）/ `priority`（按协议优先 + priority 排序取第一）
+- `requiredApiType` / `acceptedApiTypes`：后者是该路径**实际**接受的协议集合。
+  对话路径两者相同；生图路径是 `["openai","responses"]`，此时不能拿 `requiredApiType`
+  做"是否会被拒"的判断。
 - `primary.convertResponsesToChat`：这次要不要做协议转换
 - `primary.wouldUseUpstreamUrl`：**上游实际会收到的 URL**。开启转换时它的路径部分是
   `/chat/completions` 而不是 `/responses` —— 这个字段错了就说明路径改写没生效
   （它由 `upstreamUrl(provider, upstreamPathFor(...))` 算出，与真实转发同一个函数）
-- `primary.apiTypeMatchesPath`：供应商协议是否与路径匹配。`false` 且没有转换，就必然 501
+- `primary.apiTypeMatchesPath`：供应商协议是否被该路径接受（走与网关同一个
+  `acceptsApiType`，生图路径下 `responses` 供应商也是 `true`）。`false` 且没有转换，就必然 501
 - `primary.authHeaderKind`：上游会用 `authorization: Bearer` 还是 `x-api-key`
 - `wouldAutoEnableConversion`：**这次真实请求会顺手打开 `protocolConversion`**。
   真实网关在"路径要 responses、没有启用的 responses 供应商、但有启用的 openai 供应商"时

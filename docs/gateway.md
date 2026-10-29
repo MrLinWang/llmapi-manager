@@ -78,6 +78,8 @@ lam-<providerKey>/<model>
 | `/v1/chat/completions` | `openai`（Chat Completions） |
 | `/v1/messages` | `anthropic`（Messages） |
 | `/v1/responses` | `responses`（OpenAI Responses API） |
+| `/v1/images/generations` | `openai` **或** `responses`（见「生图直通」） |
+| `/v1/images/edits` | `openai` **或** `responses`（见「生图直通」） |
 
 对应的前端文案统一为「<厂商> 兼容（<API 形态>）」：**OpenAI 兼容（Chat Completions）** /
 **OpenAI 兼容（Responses）** / **Anthropic 兼容（Messages）**。中文文案在
@@ -93,6 +95,9 @@ lam-<providerKey>/<model>
 的上游，表现为上游报参数错误。现在默认要求供应商协议就是 `responses`；
 反向同样被拦住：`responses` 供应商接不了 `/v1/chat/completions`——
 那个方向没有转换器，开着开关也仍然是 501。
+
+生图两条路径是**唯一**接受多家协议的地方，理由见下方「生图直通」：
+`apiType` 描述的是这家上游的**对话**协议，不是"它有没有 Images 端点"。
 
 ### 协议与鉴权头
 
@@ -149,8 +154,10 @@ baseUrl = https://api.example.com/v1/    → https://api.example.com/v1/chat/com
 - 不做计费与限流：每个请求都直接打上游。
 - 无熔断器：连续失败的供应商不会被自动摘除，只会因为 5xx 触发一次回退。
 - 不重写参数与模型映射：上游模型名只由别名、默认配置，以及「Approve for me」的
-  `approvalReviewModel` 映射决定。
+  `approvalReviewModel` 映射决定。生图路径连这个映射都不做，`model` 原样透传。
 - 单次请求最多两次上游尝试（主 + 一次回退）。
+- 生图响应可能会被网关下载并内联成 `b64_json`（见「生图直通」），这是唯一一处
+  网关会改写成功响应体内容的地方。
 
 ## 调用示例
 
@@ -191,6 +198,136 @@ curl http://127.0.0.1:8787/v1/responses \
 注意最后两例的区别：`/v1/messages` 只能用 `anthropic` 供应商、`/v1/responses` 只能用
 `responses` 供应商。拿 `openai` 供应商的别名去打 `/v1/responses` 会得到 501，而不是被当成
 Chat 请求转发出去。
+
+## 生图直通（`/v1/images/*`）
+
+Codex 的内置 `imagegen` 工具**不经过 Responses API**，而是直接打 OpenAI Images 协议
+（`codex-rs/codex-api/src/endpoint/images.rs`）：生图 `POST {base_url}/images/generations`、
+改图 `POST {base_url}/images/edits`，都是 **JSON** 请求体（不是 multipart）。
+
+模型名由 Codex **硬编码**为 `gpt-image-2`（`codex-rs/ext/image-generation/src/tool.rs` 的
+`IMAGE_MODEL`），没有任何配置项能改——所以网关照原样透传 `model`，只做选路。
+
+请求体形态（Codex 实际发的，全部原样透传、网关不校验 schema）：
+
+```json
+{ "prompt": "...", "background": "opaque", "model": "gpt-image-2", "quality": "auto", "size": "auto" }
+```
+
+改图时多一个 `images` 数组（元素是 `{image_url}` 或 `{file_id}`）。
+
+### 选路：**不按 `apiType` 过滤**
+
+这是本功能最容易写错的一处。`apiType` 描述的是这家上游的**对话**协议，
+不是"它有没有实现 Images 端点"——实测两者会分离：
+
+| 供应商 | `apiType` | `POST /v1/images/generations` |
+| --- | --- | --- |
+| OpenDesign | `responses` | **200**（真的能生图） |
+| 某 New API 聚合站 | `openai` | 503 `model_not_found`（没有生图渠道） |
+
+所以按 `apiType === 'openai'` 选路，恰好会把唯一能用的那家排除掉。
+可用集合定义在 `server/src/gateway/forward.ts` 的 `acceptedApiTypes()`：
+生图路径接受 **`openai` 与 `responses`**，`anthropic` 不接受（它用 `x-api-key`、没有 Images 端点）。
+
+三档优先级（档内按 `priority`）：
+
+1. `imageModels` 里**声明了该模型名**的供应商（`reason: "image-model"`）；
+2. 租户的**默认供应商**（`reason: "default-provider"`）；
+3. 其余按 `priority`（`reason: "priority"`）。
+
+注意第一档看的是 `imageModels` 而**不是** `models`——生图模型单独配置（见下节
+「生图模型不进 Codex 目录」）。第三档的存在是因为很多上游不把生图模型登记进
+自己的模型列表，只要它实现了 Images 端点就应当可用，成败由上游决定。
+
+选中的上游 5xx 时照常**回退一次**——实测里这条就是"默认供应商没生图渠道（503）→
+退到另一家成功"的路径。4xx 不换家，原样透传。
+
+生图**永不转换**：Images 协议没有 Chat 等价物，`protocolConversion` 对它无效。
+被拒时（别名指向 `anthropic`）返回 501，文案是
+`生图接口 … 需要 openai / responses 供应商…`，**不会**提示"开启跨协议转发"
+（那个开关解决不了，提示它只会把用户引向错误的方向）。
+
+### 生图模型不进 Codex 目录
+
+供应商记录里有**两份**模型清单（见 `ProviderRecord.models` / `imageModels`）：
+
+| 清单 | 用途 | 进 Codex `/model` |
+| --- | --- | --- |
+| `models` | 对话模型：发布 `lam-<key>/<model>` 别名、参与对话选路 | ✅ |
+| `imageModels` | 生图模型：只服务 `/v1/images/*` | ❌ |
+
+**为什么必须分开。** Codex 的 `/model` 列表来自我们生成的 `model_catalog_json`，
+而目录条目来自聚合别名。把 `gpt-image-2` 填进 `models` 的后果不是"多一个选项"，
+而是**用户能选中它去聊天**——那个请求走 `/v1/responses` 或 `/v1/chat/completions`，
+图像模型不接 Chat，上游必然报错，而错误信息来自上游、看起来像"模型不可用"。
+分到 `imageModels` 之后，它在 Codex 里根本不可见，只能被内置 `imagegen` 工具
+通过 `/v1/images/generations` 使用。
+
+别名也按路径查对应的那份清单：`lam-<key>/<model>` 在 `/v1/images/*` 下查
+`imageModels`、在对话路径下查 `models`。同一别名在两条路径下结论可以不同，
+这是预期行为。把一个只在 `models` 里的模型拿别名去打生图接口，会得到
+`gateway.alias.modelIsNotImageModel`——文案直接告诉用户"把它挪到生图模型列表"，
+而不是笼统的"未声明模型"（后者会让用户去 `models` 里找，那儿明明有）。
+
+前端是两个独立的模型框（「模型列表」/「生图模型」），**各自有「从上游获取」按钮**。
+点生图框那个按钮只列出上游的"只输出图像"模型（`architecture.output_modalities` 里
+没有 `text`），对话框那个只列剩下的——两个候选面板不交叉，用户不会在对话框里
+看到 `gpt-image-2` 然后误选进去。多模态模型（`["text","image"]`）归对话模型，
+因为它仍能聊天；上游没声明 `architecture` 时不猜，留在对话列表里由用户手填。
+
+同一个名字同时填进两处时，服务端按生图处理并从 `models` 中剔除：意图明确、
+不丢数据，也避免用户看到"保存后列表少了一项"的困惑。
+
+### 响应归一化：`url` → 内联 `b64_json`
+
+Codex 的 `ImageData.b64_json` 是**必填**字段（`codex-rs/codex-api/src/images.rs`），
+缺了整块响应解码失败。但上游经常只给 `data[].url`——实测 OpenDesign 对 Codex 原样请求体
+返回的就是 `data[0].keys = ["url","index"]`（阿里云 OSS 预签名链接）。
+
+所以网关在**非流式**生图响应上多做一步：发现某条 `data[]` 只有 `url` 没有 `b64_json` 时，
+下载该图片并内联成 `b64_json`（原始 `url` 保留，便于对照上游响应排查）。
+
+- 上游本来就返 `b64_json` 时**零额外开销**，不下载。
+- 下载失败、超时、或拿到的不是图片（预签名链接过期时常见"状态 200 + HTML 错误页"）
+  → **502** `image_inline_failed` 并带上原因。原样透传的话 Codex 只会报"缺 b64_json"，
+  排查方向会完全跑偏。
+- 单张上限 32 MiB，与 Codex 的 `MAX_EXECUTOR_GENERATED_IMAGE_BYTES` 对齐。
+
+**不要改成往请求里注入 `response_format: "b64_json"`。** 官方 `gpt-image-1` 明确不认
+这个参数、会 400 `unknown_parameter`（见 [Azure SDK #49965](https://github.com/Azure/azure-sdk-for-net/issues/49965)），
+而部分兼容上游又需要它才给 b64。两种上游行为相反，注入会把本来能用的官方上游打死；
+"注入 → 400 → 降级重试"还会平白多打一次（生图一次 40 秒以上）。只做响应侧归一化对两类
+上游都安全。
+
+### 验证配方（真实 OpenDesign）
+
+```bash
+# 前提：供应商已启用，且它的模型列表里包含 gpt-image-2
+#（没加也能通——会走"默认供应商 503 → 回退"，但多一次无谓请求）
+curl -s http://127.0.0.1:8787/v1/images/generations \
+  -H "Authorization: Bearer $LLMAPI_TOKEN" -H 'content-type: application/json' \
+  -d '{"model":"gpt-image-2","prompt":"a red fox in a field","background":"opaque","quality":"auto","size":"auto"}' \
+  | jq '.data[0] | {b64_len: (.b64_json | length), url: (.url // null)}'
+# 期望 b64_len > 0：上游返回的是 url，长度非零就证明网关完成了内联
+```
+
+也可以先用诊断接口预演选路，不消耗额度：
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/api/diagnostics/route \
+  -H "Authorization: Bearer $LLMAPI_API_TOKEN" -H 'content-type: application/json' \
+  -d '{"model":"gpt-image-2","path":"/images/generations"}' | jq '{ok, acceptedApiTypes, provider: .primary.providerName, reason: .primary.reason, url: .primary.wouldUseUpstreamUrl}'
+```
+
+### 已知限制
+
+- **上游必须真的实现 Images API。** 网关不探测能力，也不做任何内容改写；
+  能不能生图由上游决定，失败时是上游的状态码原样透传。
+- OpenDesign 实测**没有** `/v1/images/edits`（JSON 与 multipart 都是 404），
+  所以 Codex 的**改图**分支在本机这家上游上用不了，需要上游补齐。
+- 生图一次约 45–47 秒（实测），注意客户端与反代的超时设置。
+- 直连模式（`agentTargets.codex.mode = "direct"`）不经过网关，本功能不生效。
 
 ## 「Approve for me」的模型映射
 

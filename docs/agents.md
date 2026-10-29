@@ -102,6 +102,11 @@ Codex 的「切换模型」列表读的是模型目录，而不是把 `/v1/model
 后者是 `{ object, data: [{ id }] }`，而目录要求 `{ models: [{ slug, ... }] }`，结构不同。
 所以应用配置时会额外生成一份目录文件 `~/.codex/llmapi-model-catalog.json`，内容取自网关当前发布的全部别名。
 
+> 目录里**只有对话模型**。供应商记录里的 `imageModels`（生图模型）不发布别名，
+> 因此不会出现在目录、也就不会出现在 Codex 的 `/model` 列表里——图像模型在那里被选中
+> 只会得到一个"不能聊天"的上游报错。它们由 Codex 内置的 `imagegen` 工具
+> 通过 `/v1/images/generations` 使用，详见 `docs/gateway.md` 的「生图直通」。
+
 **`model_catalog_json` 必须是顶层键。** 写进 `[model_providers.llmapi]` 会被 Codex 显式忽略并告警，
 表现为 `/model` 里看不到我们的模型。`model_catalog_url` 则是 **provider 级**字段，写在表内指向网关的
 `/v1/models`：`model_catalog_json` 生效时 Codex 用本地目录（不再去拉 URL），
@@ -247,12 +252,16 @@ npm run registry:sync -w server -- --write --verify-efforts
 档位集合是模型特定的，不能跨模型推断。该开关会为每个模型声明的每个档位发一次极小请求
 （16 output tokens），只保留返回 2xx 的。**它默认关闭**，因为会真实消耗额度。
 
-**网页上的「逐档实测」按钮**（`POST /api/providers/:id/probe-efforts`）做的是更彻底的一件事：
+**网页上的「逐档实测」按钮**（在「编辑供应商」表单的「思考档位」一节；
+后端是 `POST /api/providers/:id/probe-efforts`）做的是更彻底的一件事：
 不依赖数据源声明，直接把 Codex 认识的**全部 9 个候选档位**各打一次上游，把 2xx 的写回
 `modelCapabilities`。数据源没有档位（如 `glm-5.3-flash` / `kimi-k2.7-code`）或对聚合上游
 不适用时，这是唯一能拿到真实档位的方式。两者共用 `services/effortProbe.ts` 的 `probeEffort()`，
 不要各写一份（否则会出现"CLI 说支持、网页说不支持"）。探测只改供应商记录，**目录要重新
 apply 才生效**。
+
+探测结果写回 `modelCapabilities`，就展示在同一节里（读落盘值，所以刷新后仍可见）。
+它**不放列表行内**：十几个模型各带"接受/被拒"的档位会把整行撑坏。
 
 一个供应商可能是「12 个模型 × 9 档 = 108 次请求」，所以接口回的是 **NDJSON 进度流**而不是
 一次性 JSON：先 `start`（带 `total`），每完成一次请求推一条 `progress`（`done` 单调递增），
@@ -595,7 +604,9 @@ Claude Code 没有常驻进程，该按钮只对 Codex 显示；直接调接口�
 | 预览返回 400「尚未生成网关令牌」 | 先去"模型聚合"页生成令牌 |
 | 预览返回 400「没有可用的 OpenAI 兼容（Responses） 供应商，请先添加并启用」 | 没有启用的 `responses` 供应商。Codex 只能绑 `responses`，把某家供应商的协议改为「OpenAI 兼容（Responses）」即可 |
 | 预览返回 400「没有可用的 Anthropic 兼容（Messages） 供应商」 | 没有启用的 `anthropic` 供应商（Claude Code 用） |
-| 预览返回 400「未声明任何模型」 | 供应商的 `models` 为空 |
+| 预览返回 400「未声明任何模型」 | 供应商的 `models`（**对话**模型）为空。只配了生图模型是不够的：Agent 下发需要一个对话模型 |
+| Codex 里看不到生图模型 | 预期行为。生图模型填在「生图模型」框里，不进目录；`/model` 里出现它反而说明填错框了 |
+| 生图返回 400 `modelIsNotImageModel` | 该模型在「模型列表」里，把它挪到「生图模型」框 |
 | Codex 启动报 `` `wire_api = "chat"` is no longer supported `` | 旧版本写出的配置已过时：Codex 只接受 `responses`。把供应商协议改为「OpenAI 兼容（Responses）」后重新应用配置 |
 | Codex 请求网关返回 501 | 供应商协议不是 `responses`：Codex 走 `/v1/responses`，需要 `responses` 类型的供应商 |
 | `/model` 里没有我们的模型 | 检查 `model_catalog_json` 是否被写进了 `[model_providers.llmapi]`（必须是顶层键），以及改完配置后是否重启了 Codex |

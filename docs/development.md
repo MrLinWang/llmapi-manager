@@ -47,10 +47,11 @@ npm run dev -w web        # vite，热更新
 
 | 文件 | 覆盖 |
 | --- | --- |
-| `server/test/aliases.test.ts` | providerKey 派生、脱敏、别名生成/解析的边界 |
+| `server/test/aliases.test.ts` | providerKey 派生、脱敏、别名生成/解析的边界，含「生图模型不发布别名」与按路径查不同清单 |
 | `server/test/config.test.ts` | 配置默认值（`ADMIN_USERNAME=admin`、日志目录与滚动参数）与非法值回落 |
 | `server/test/setup.test.ts` | 首次初始化：令牌校验、一次性、重放拒绝、重启幂等、`ADMIN_PASSWORD` 应急通道 |
-| `server/test/gateway.test.ts` | 上游 URL 拼接、三条路径的协议匹配、协议文案句式、令牌哈希比对 |
+| `server/test/gateway.test.ts` | 上游 URL 拼接、各路径的协议匹配（含生图路径接受 openai ∪ responses）、协议文案句式、令牌哈希比对 |
+| `server/test/selection.test.ts` | 选路纯函数：生图三档优先级（声明 → 默认 → priority）、别名不进回退、生图永不转换、对话路径不受影响 |
 | `server/test/convert.test.ts` | Responses ←→ Chat 的请求 / 响应 / 流式三向映射，含工具调用与有损字段 |
 | `server/test/apiToken.test.ts` | API 令牌生成与校验：`api_` 前缀区分、sha256 比对与 `timingSafeEqual`、空 scopes / 过期 / 吊销一律拒绝、`lastUsedAt` 60 秒节流、对外视图不含 hash |
 | `server/test/agents.test.ts` | JSON/TOML 补丁（含 `raw` 布尔）、Codex 模型目录生成（含按模型分化的推理档位与模态白名单）、备份、还原冲突、空壳文件清理 |
@@ -259,9 +260,12 @@ curl -s localhost:8787/api/health | jq      # 启动告警
 - 改了 Codex 模型目录 → `agents.test.ts`（目录结构）与 `smoke.test.ts`（顶层键 + 目录文件生成/还原）通过。
 - 改了进程识别规则 → `processes.test.ts` 覆盖新的命令行形态，且"不误伤"用例仍通过。
 - 改了存储 → `storage.test.ts` 覆盖原子写与损坏隔离。
-- 改了协议匹配或 `apiType` → `gateway.test.ts` 的 `requiredApiType` 断言 +
+- 改了协议匹配或 `apiType` → `gateway.test.ts` 的 `requiredApiType` / `acceptedApiTypes` 断言 +
   `smoke.test.ts` 的双向 501 用例（`/v1/responses` 打 `openai` 供应商、`responses` 供应商打
   `/v1/chat/completions`）通过。
+- 改了生图路径 → `selection.test.ts`（三档选路）、`gateway.test.ts`（接受 openai ∪ responses）、
+  `smoke.test.ts` 的「生图直通」用例组（url→b64 内联、上游已给 b64 时不下载、
+  responses 供应商可生图、anthropic 501 且文案不提协议转换、5xx 回退、坏链接 502）全部通过。
 - 改了鉴权 / 权限 → `apiToken.test.ts`（令牌生命周期）与 `smoke.test.ts` 的
   「令牌能调管理接口」「越权 403」「令牌不能改口令 / 建令牌」「吊销后失效」都通过。
 - 改了诊断接口 → `smoke.test.ts` 里「默认关闭返回 404」与「开启后路由预演/自检清单」通过，

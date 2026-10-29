@@ -19,11 +19,14 @@ implementation — neither project's source was copied.
   form values before you even save. A per-provider **effort probe** sends one minimal request per
   reasoning level, so the Codex model catalog advertises only the levels your upstream actually
   accepts.
-- **Model aggregation**: every enabled provider's models are published as
+- **Model aggregation**: every enabled provider's chat models are published as
   `lam-<provider-key>/<model>` aliases. You can also set a default provider + default model to
-  serve requests that carry no alias.
+  serve requests that carry no alias. Image models are configured in a **separate list**, so
+  they never show up in Codex's `/model` picker.
 - **Unified gateway**: `/v1/models`, `/v1/chat/completions`, `/v1/messages`, `/v1/responses`,
-  with SSE streaming pass-through and one priority-based fallback when the primary path fails.
+  plus `/v1/images/generations` and `/v1/images/edits` so Codex's built-in image tool works
+  through the gateway (image URLs are inlined as `b64_json`), with SSE streaming pass-through
+  and one priority-based fallback when the primary path fails.
 - **Agent provisioning**: Codex CLI (`~/.codex/config.toml` + `auth.json` +
   `llmapi-model-catalog.json`; requires a `responses` provider and pins `wire_api` to
   `responses`) and Claude Code (`~/.claude/settings.json`; requires `anthropic`). Preview,
@@ -107,10 +110,16 @@ GET  /v1/models
 POST /v1/chat/completions    # needs an apiType=openai upstream (OpenAI-compatible · Chat Completions)
 POST /v1/messages            # needs an apiType=anthropic upstream (Anthropic-compatible · Messages)
 POST /v1/responses           # needs an apiType=responses upstream (OpenAI-compatible · Responses)
+POST /v1/images/generations  # image generation; needs an openai OR responses upstream
+POST /v1/images/edits        # image edits;      needs an openai OR responses upstream
 ```
 
-All three POST paths match **strictly**: a protocol mismatch returns 501 rather than being
-silently forwarded. Auth headers are grouped by upstream family: `openai` and `responses` use
+The chat paths match **strictly**: a protocol mismatch returns 501 rather than being
+silently forwarded. The two image paths are the exception — they accept both `openai` and
+`responses` providers, because `apiType` describes the chat protocol, not whether the upstream
+implements the Images API (a `responses` provider can generate images; an `openai` one may not).
+The gateway downloads `data[].url` responses and inlines them as `b64_json`, which is the only
+field Codex reads. Auth headers are grouped by upstream family: `openai` and `responses` use
 `Authorization: Bearer`, `anthropic` uses `x-api-key` + `anthropic-version`.
 
 Example (create a token on the "Model aggregation" page):
