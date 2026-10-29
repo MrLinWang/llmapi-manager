@@ -11,6 +11,7 @@ export const enProviderForm: typeof zhProviderForm = {
     basic: 'Basics',
     connection: 'Connection',
     models: 'Models & notes',
+    efforts: 'Effort levels',
   },
   basic: {
     name: 'Name',
@@ -50,5 +51,14 @@ export const enProviderForm: typeof zhProviderForm = {
     website: 'Website (optional)',
     notes: 'Notes (optional)',
     requireOne: 'Enter at least one model name',
+    imageLabel: 'Image models (optional)',
+    imagePlaceholder: 'Enter an image model name, e.g. gpt-image-2',
+    imageRemove: 'Remove image model {{model}}',
+    imageFetchTitle:
+      'Query the upstream with the protocol and URL above; only image-output models are listed',
+    imageEmptyList:
+      'The upstream returned no image-only models (or does not declare output modalities) — enter names manually.',
+    imageHint:
+      'Image models only serve /v1/images/* (Codex built-in image generation). They publish no aliases and never appear in the Codex /model list. If the same name is in both lists, it is treated as an image model.',
   },
 };

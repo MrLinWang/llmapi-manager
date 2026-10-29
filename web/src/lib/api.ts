@@ -392,10 +392,13 @@ export interface ProviderInput {
   apiType: 'openai' | 'anthropic' | 'responses';
   baseUrl: string;
   apiKey?: string;
+  /** 对话模型：发布别名、进 Codex 模型目录 */
   models: string[];
+  /** 生图模型：只服务 /v1/images/*，不发布别名、不进 Codex 目录 */
+  imageModels?: string[];
   /**
    * 按模型名记录的上游能力（上下文窗口等）。
-   * 不传表示保持已存值不变；传了则整体替换（服务端按 models 裁剪）。
+   * 不传表示保持已存值不变；传了则整体替换（服务端按模型列表裁剪）。
    */
   modelCapabilities?: Record<string, ModelCapability>;
   enabled?: boolean;

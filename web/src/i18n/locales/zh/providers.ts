@@ -15,6 +15,7 @@ export const zhProviders = {
     create: '新增供应商',
     test: '测试',
     probe: '逐档实测',
+    probeTitle: '按思考档位逐个向上游发一次真实请求，确认哪些档位真的被接受',
     moveUp: '提高优先级',
     moveDown: '降低优先级',
     enable: '启用',
@@ -36,10 +37,19 @@ export const zhProviders = {
       '将对该供应商的 {{models}} 个模型 × {{requests}} 个档位发起真实请求（会消耗少量额度），可能耗时较长。继续？',
     progress: '正在逐档实测 {{done}} / {{total}}（{{model}} · {{effort}}）',
     running: '正在逐档实测，请稍候…',
-    title: '逐档实测结果',
     hint: '已写入模型能力；重新应用 Codex 配置后模型目录才会更新。',
-    close: '关闭',
     allRejected: '未探测到可用档位，已保留原配置',
+    /** 列表里「思考档位」列的占位：说明这一家还没测过，而不是功能没做 */
+    neverProbed: '未实测（点「逐档实测」探测）',
+    /** 被拒的档位：解释"为什么配了某档不生效" */
+    rejectedLabel: '被拒：{{efforts}}',
+    /** 按钮禁用时的 title */
+    disabledNoModels: '这家供应商还没有对话模型，先在上面添加模型再实测',
+    /** 新建态没有 id，探测接口按 id 写库，所以只能先保存 */
+    saveFirst: '先保存供应商，再逐档实测（探测结果要写回这条记录）',
+    runningShort: '实测中…',
+    /** 一个模型都没配时的占位 */
+    noModelsHint: '还没有模型可测。先在上面添加模型，再点「逐档实测」。',
   },
   removeConfirm: '确定删除供应商「{{name}}」？该操作不可撤销。',
   list: {
