@@ -61,17 +61,33 @@ export function registerNetworkingRoutes(
     { method: 'PATCH', url: '/api/networking/config', access: 'settings:write' },
     async (request) => {
       const body = (request.body ?? {}) as {
+        engine?: unknown;
         enabled?: unknown;
         networkName?: unknown;
         networkSecret?: unknown;
         peers?: unknown;
         hostname?: unknown;
         ipv4?: unknown;
+        listenPort?: unknown;
       };
       const settings = repos.settings.read();
       const current = readConfig(repos, ctx.secrets);
       const next = { ...current };
 
+      if (body.engine !== undefined) {
+        if (body.engine !== 'builtin' && body.engine !== 'native') {
+          throw badRequest('networking.engine.invalid');
+        }
+        // 切引擎必须重启组网才生效；这里只落配置，不改运行中的实例
+        next.engine = body.engine;
+      }
+      if (body.listenPort !== undefined) {
+        const port = body.listenPort;
+        if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) {
+          throw badRequest('networking.listenPort.invalid');
+        }
+        next.listenPort = port;
+      }
       if (body.enabled !== undefined) {
         if (typeof body.enabled !== 'boolean') throw badRequest('networking.enabled.mustBeBoolean');
         next.enabled = body.enabled;

@@ -2,22 +2,30 @@ import type { Logger } from '../logger';
 import type {
   NetworkingAvailability,
   NetworkingConfig,
+  NetworkingEngine,
   NetworkingPeer,
   NetworkingStatus,
 } from '../domain/networking';
+import { EasyTierAcceptor } from './easytier/acceptor';
+import { randomBytes } from 'node:crypto';
 
 /**
- * EasyTier 原生模块的加载与调用封装。
+ * 组网运行时：**双引擎**，自研为主、原生为备。
  *
- * 为什么要有这一层：原生模块是**可选**的（需要 Rust 工具链编译，Windows 还要
- * wintun.dll）。本仓库的默认安装路径里它并不存在，所以任何对它的引用都必须
- * 能优雅降级——同步功能本身不依赖组网，没编译原生模块时应该照常可用。
+ * | 引擎 | 实现 | 状态 | 覆盖 |
+ * | --- | --- | --- | --- |
+ * | `builtin`（默认） | 本仓库 TS（`easytier/`） | 主路径 | 握手/加密/RPC/OSPF 路由 |
+ * | `native` | `native/easytier-node/` | 备用 | 官方完整能力（NAT 穿透、端口转发等）|
+ *
+ * 为什么要两个：自研侧是本仓库自己的代码，出问题能读能改、不依赖 Rust 工具链；
+ * 但它的证据边界是"握手/加密/RPC/OSPF 路由"，**NAT 穿透、多跳中继、MTU 协商、
+ * 端口转发尚未实现**——那些场景必须能用官方的完整实现兜住。
  *
  * 三条约束：
- * 1. **不在模块顶层 `require`**：顶层 require 失败会让整个服务起不来。
- *    改成首次使用时惰性加载并缓存结果。
- * 2. **错误不外泄内部细节**：用户只需要知道"没编译/装不上"，不需要 Rust 栈。
- *    详细原因进日志。
+ * 1. **原生模块不在顶层 `require`**：它是可选依赖，顶层 require 失败会让整个
+ *    服务起不来。改成首次使用时惰性加载并缓存结果。
+ * 2. **降级必须显式**：请求的引擎不可用时改用另一个，要把 `degradedFrom` 报给
+ *    调用方。静默降级会让用户在"为什么 NAT 穿透不生效"上浪费大量时间。
  * 3. **`networkSecret` 不落日志**：它是网络的准入门槛。
  */
 
@@ -68,12 +76,55 @@ export interface NativeProtocolSelfCheck {
 
 const MODULE_NAME = '@llmapi/easytier-node';
 
+/**
+ * 自研引擎的默认监听端口，仅作领域层默认值的镜像（实际用的是
+ * `config.listenPort`）。留这个常量是为了让"默认 11011"这件事在运行时有
+ * 一处可读的定义，但**不要用它覆盖配置**——端口必须由用户可改。
+ */
+const BUILTIN_DEFAULT_PORT = 11011;
+void BUILTIN_DEFAULT_PORT;
+
+/** 自研引擎的运行实例。 */
+interface BuiltinInstance {
+  acceptor: EasyTierAcceptor;
+  hostname: string;
+  ipv4: string | null;
+  startedAt: number;
+}
+
 export class NetworkingRuntime {
   private module: NativeModule | null = null;
   private loadError: string | null = null;
   private loaded = false;
+  /** 自研引擎的实例；null 表示未启动 */
+  private builtin: BuiltinInstance | null = null;
+  /** 本次启动是否发生过降级（请求的引擎不可用） */
+  private degradedFrom: NetworkingEngine | null = null;
+  /**
+   * 本机在组网里的稳定身份（peer_id 与 Noise 静态私钥）。
+   *
+   * **必须持久化在进程级而不是每次启动随机生成**：对端会按
+   * `noise_static_pubkey` 钉扎本机身份，每次换密钥会让对端认为
+   * "这是另一个节点"（或直接拒绝）。这里用进程内缓存实现"本次运行内稳定"；
+   * 跨重启的持久化留给配置层（见 README 的已知边界）。
+   */
+  private identity: { peerId: number; staticPrivateKey: Buffer } | null = null;
 
   constructor(private readonly logger: Logger) {}
+
+  /** 取（或创建）本机稳定的组网身份。 */
+  private stableIdentity(): { peerId: number; staticPrivateKey: Buffer } {
+    if (this.identity === null) {
+      // peer_id 取 32 位随机数并避开 0 与广播地址
+      let peerId = 0;
+      while (peerId === 0 || peerId === 0xffffffff) {
+        peerId = randomBytes(4).readUInt32LE(0);
+      }
+      // X25519 私钥是 32 字节随机数（clamp 由实现负责）
+      this.identity = { peerId, staticPrivateKey: randomBytes(32) };
+    }
+    return this.identity;
+  }
 
   /**
    * 惰性加载原生模块。结果（含失败）会被缓存——反复尝试加载一个不存在的模块
@@ -89,12 +140,12 @@ export class NetworkingRuntime {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const loaded = require(MODULE_NAME) as NativeModule;
       this.module = loaded;
-      this.logger.info('EasyTier 原生模块已加载，设备互联功能可用');
+      this.logger.info('EasyTier 原生模块已加载（备用引擎可用）');
     } catch (cause) {
       // 把技术细节留给日志，返回给用户的是可操作的说明
       this.loadError = cause instanceof Error ? cause.message : String(cause);
       this.logger.info(
-        `EasyTier 原生模块不可用（设备互联将降级为"仅同步"）：${this.loadError}`,
+        `EasyTier 原生模块不可用（备用引擎缺失，自研引擎不受影响）：${this.loadError}`,
       );
       this.module = null;
     }
@@ -121,22 +172,49 @@ export class NetworkingRuntime {
     }
   }
 
-  availability(): NetworkingAvailability {
-    const mod = this.load();
-    if (mod) {
-      return { available: true, reason: null, version: null };
+  /**
+   * 决定本次用哪个引擎。
+   *
+   * 自研引擎视为"总是可选"——它没有编译依赖，只有启动失败（端口被占等）
+   * 才会真正不可用，而那要 start() 之后才知道。所以这里只在原生模块
+   * 缺失时把 `native` 降级到 `builtin`。
+   */
+  private resolveEngine(requested: NetworkingEngine): {
+    engine: NetworkingEngine | null;
+    degradedFrom: NetworkingEngine | null;
+    reason: string | null;
+  } {
+    const nativeOk = this.load() !== null;
+    if (requested === 'native') {
+      if (nativeOk) return { engine: 'native', degradedFrom: null, reason: null };
+      return {
+        engine: 'builtin',
+        degradedFrom: 'native',
+        reason:
+          '请求的是原生引擎，但原生模块未安装或加载失败，已降级到自研引擎。' +
+          '自研引擎不提供 NAT 穿透与端口转发；需要这些能力请先编译 native/easytier-node。',
+      };
     }
+    // requested === 'builtin'
+    return { engine: 'builtin', degradedFrom: null, reason: null };
+  }
+
+  availability(requested: NetworkingEngine = 'builtin'): NetworkingAvailability {
+    const nativeOk = this.load() !== null;
+    const resolved = this.resolveEngine(requested);
     return {
-      available: false,
-      reason:
-        '原生模块未安装或加载失败。设备互联需要先编译 native/easytier-node ' +
-        '（需要 Rust 工具链）。配置同步功能不受影响，可以手动填写 master 地址。',
+      available: resolved.engine !== null,
+      reason: resolved.reason,
       version: null,
+      engine: resolved.engine,
+      builtinAvailable: true,
+      nativeAvailable: nativeOk,
+      degradedFrom: resolved.degradedFrom,
     };
   }
 
   async status(config: NetworkingConfig): Promise<NetworkingStatus> {
-    const availability = this.availability();
+    const availability = this.availability(config.engine);
     if (!availability.available) {
       return {
         ...availability,
@@ -149,6 +227,16 @@ export class NetworkingRuntime {
       };
     }
 
+    if (availability.engine === 'native') {
+      return this.nativeStatus(config, availability);
+    }
+    return this.builtinStatus(config, availability);
+  }
+
+  private async nativeStatus(
+    config: NetworkingConfig,
+    availability: NetworkingAvailability,
+  ): Promise<NetworkingStatus> {
     try {
       const status = await this.load()!.nodeStatus();
       const virtualIpv4 = status.virtualIpv4 ?? null;
@@ -184,8 +272,45 @@ export class NetworkingRuntime {
     }
   }
 
+  private builtinStatus(
+    config: NetworkingConfig,
+    availability: NetworkingAvailability,
+  ): NetworkingStatus {
+    const instance = this.builtin;
+    const running = instance !== null;
+    const peerCount = instance === null ? 0 : instance.acceptor.connectionCount();
+    // 自研引擎**不创建 TUN 设备**，所以"functional"不能按"有虚拟 IP"判。
+    // 判据改成"有对端连上了"：它证明握手、加密与 OSPF 全链路都通了。
+    // 同时把 `virtualIpv4` 报成本机广播给对端的那个地址（配置里的 ipv4），
+    // 因为对端确实靠它把本节点装进路由表。
+    const functional = running && peerCount > 0;
+    return {
+      ...availability,
+      enabled: config.enabled,
+      running,
+      virtualIpv4: instance?.ipv4 ?? null,
+      peerCount,
+      functional,
+      functionalReason:
+        running && !functional
+          ? '自研引擎已监听，但还没有节点连上。请确认对端填的是本机真实地址与端口，' +
+            '并且网络名与密钥一致。'
+          : null,
+    };
+  }
+
   async peers(): Promise<NetworkingPeer[]> {
-    if (!this.availability().available) return [];
+    const nativeOk = this.load() !== null;
+    // 引擎按配置决定；status 里已解析过一次，这里按同一规则再取
+    if (this.builtin !== null) {
+      return this.builtin.acceptor.connectedPeers().map((peer) => ({
+        hostname: peer.hostname ?? `peer-${peer.peerId}`,
+        ipv4: peer.ipv4,
+        latencyMs: peer.latencyMs,
+        tunnel: 'tcp',
+      }));
+    }
+    if (!nativeOk) return [];
     try {
       const list = await this.load()!.listPeers();
       return list.map((item) => ({
@@ -207,35 +332,123 @@ export class NetworkingRuntime {
    * 而且失败信息在 EasyTier 侧往往不直观。提前拒绝能给出可操作的提示。
    */
   async start(config: NetworkingConfig): Promise<void> {
-    const availability = this.availability();
-    if (!availability.available) {
-      throw new Error(availability.reason ?? '原生模块不可用');
-    }
     if (config.networkName.trim() === '') throw new Error('网络名不能为空');
     if (config.networkSecret.trim() === '') {
       throw new Error('网络密钥不能为空——知道网络名和密钥的节点都能加入这个网络');
     }
 
+    const resolved = this.resolveEngine(config.engine);
+    if (resolved.engine === null) {
+      throw new Error(resolved.reason ?? '没有可用的组网引擎');
+    }
+    this.degradedFrom = resolved.degradedFrom;
+    if (resolved.degradedFrom !== null) {
+      this.logger.warn(`组网引擎降级：${resolved.degradedFrom} → ${resolved.engine}`, {
+        reason: resolved.reason,
+      });
+    }
+
     // 密钥不进日志；只记网络名与中继数量，够定位问题又不泄漏门槛
     this.logger.info(
-      `启动设备互联：network=${config.networkName} peers=${config.peers.length} ` +
-        `hostname=${config.hostname}`,
+      `启动设备互联：engine=${resolved.engine} network=${config.networkName} ` +
+        `peers=${config.peers.length} hostname=${config.hostname}`,
     );
 
-    await this.load()!.startNode({
-      networkName: config.networkName,
-      networkSecret: config.networkSecret,
-      peers: config.peers,
+    if (resolved.engine === 'native') {
+      await this.load()!.startNode({
+        networkName: config.networkName,
+        networkSecret: config.networkSecret,
+        peers: config.peers,
+        hostname: config.hostname,
+        // null → undefined：见上面 NativeModule.startNode 的说明。
+        // 配置层用 null 表示"让 EasyTier 自动分配"，而 napi 只接受省略。
+        ...(config.ipv4 === null ? {} : { ipv4: config.ipv4 }),
+      });
+      return;
+    }
+
+    // ── 自研引擎 ──
+    // 先停掉残留实例，避免端口被自己占着
+    await this.stopBuiltin();
+
+    const identity = this.stableIdentity();
+    // 监听端口从配置的 ipv4 推不出来，改用固定默认端口（与 native 侧一致）
+    const acceptor = new EasyTierAcceptor(
+      {
+        port: config.listenPort,
+        myPeerId: identity.peerId,
+        networkName: config.networkName,
+        networkSecret: config.networkSecret,
+        staticPrivateKey: identity.staticPrivateKey,
+        hostname: config.hostname,
+        virtualIpv4: config.ipv4 ?? undefined,
+        advertiseRoute: true,
+      },
+      {
+        onHandshake: (info) => {
+          this.logger.info(`组网对端已连接：peer=${info.remotePeerId}`);
+        },
+        onOspfAnswered: () => {
+          this.logger.info('已应答对端的 OSPF 路由同步');
+        },
+        onError: (err) => {
+          // 单个连接失败不该拖垮整个组网
+          this.logger.warn('自研引擎连接出错', err);
+        },
+      },
+    );
+
+    try {
+      await acceptor.start();
+    } catch (cause) {
+      // 自研引擎启动失败时尝试原生兜底：端口被占是常见原因，
+      // 而原生用随机端口，能绕开。
+      const fallback = this.load();
+      if (fallback !== null) {
+        this.degradedFrom = 'builtin';
+        this.logger.warn('自研引擎启动失败，降级到原生引擎', cause);
+        await fallback.startNode({
+          networkName: config.networkName,
+          networkSecret: config.networkSecret,
+          peers: config.peers,
+          hostname: config.hostname,
+          ...(config.ipv4 === null ? {} : { ipv4: config.ipv4 }),
+        });
+        return;
+      }
+      throw cause;
+    }
+
+    this.builtin = {
+      acceptor,
       hostname: config.hostname,
-      // null → undefined：见上面 NativeModule.startNode 的说明。
-      // 配置层用 null 表示"让 EasyTier 自动分配"，而 napi 只接受省略。
-      ...(config.ipv4 === null ? {} : { ipv4: config.ipv4 }),
-    });
+      ipv4: config.ipv4,
+      startedAt: Date.now(),
+    };
+  }
+
+  private async stopBuiltin(): Promise<void> {
+    const instance = this.builtin;
+    if (instance === null) return;
+    this.builtin = null;
+    try {
+      await instance.acceptor.close();
+    } catch (cause) {
+      this.logger.warn('关闭自研引擎时出错（已忽略）', cause);
+    }
   }
 
   async stop(): Promise<void> {
-    if (!this.availability().available) return;
     this.logger.info('停止设备互联');
-    await this.load()!.stopNode();
+    await this.stopBuiltin();
+    if (this.load() !== null) {
+      await this.load()!.stopNode();
+    }
+    this.degradedFrom = null;
+  }
+
+  /** 本次运行是否发生过引擎降级。 */
+  degradedEngine(): NetworkingEngine | null {
+    return this.degradedFrom;
   }
 }

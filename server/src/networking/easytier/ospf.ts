@@ -182,11 +182,13 @@ export class SecureChannel {
    *
    * 真要打通，必须让本实现充当**接受方**：自己监听端口等官方节点连进来，
    * 并用 Noise 握手的服务端方向（`do_noise_handshake_as_server`）。
-   * 那是另一套流程（还涉及 admission 校验），成本明显更高，而生产路径
-   * 走原生模块，没有实际需要。
    *
-   * 所以这个方法保留下来是为了**记录结论、方便日后验证**，不是可用功能。
+   * **这条路已经走通，但不在本文件**：见 `acceptor.ts`（它用
+   * `NoiseXXResponder` 实现服务端方向 + admission 校验 + OSPF 应答，
+   * 已用官方节点实测通过）。本方法保留下来是为了**记录结论**，不是可用功能。
    * 返回 `true` 只表示"识别到并尝试回应了"，不代表对端接受了它。
+   *
+   * 一句话：**生产用 `acceptor.ts`，这里的 `handleOspfRequest` 只是协议参考。**
    */
   handleOspfRequest(packet: ReceivedPacket): boolean {
     if (packet.header.packetType !== PacketType.RpcReq) return false;

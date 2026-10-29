@@ -117,6 +117,11 @@ export function generateKeyPair(): { privateKey: Buffer; publicKey: Buffer } {
   return { privateKey: raw, publicKey: x25519PublicFromPrivate(raw) };
 }
 
+/** 由 32 字节 X25519 私钥推导公钥。 */
+export function publicKeyFromPrivate(privateKey: Buffer): Buffer {
+  return x25519PublicFromPrivate(privateKey);
+}
+
 /** 计算 X25519 共享密钥。 */
 function dh(privateKey: Buffer, publicKey: Buffer): Buffer {
   return Buffer.from(diffieHellman({ privateKey: x25519PrivateKeyObject(privateKey), publicKey: x25519PublicKeyObject(publicKey) }));

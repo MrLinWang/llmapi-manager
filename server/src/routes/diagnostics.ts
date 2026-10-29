@@ -635,6 +635,9 @@ export function registerDiagnosticsRoutes(
       // 自检是纯计算：不启动实例、不联网，所以随时可以跑，也不会有副作用。
       const runtime = new NetworkingRuntime(ctx.logger);
       const report = runtime.protocolSelfCheck();
+      // 两个引擎的可用性是独立事实：自研引擎几乎总是可用，原生模块取决于是否编译。
+      // 必须一并报出来，否则"诊断说自检不可用"会被误读成"组网不可用"。
+      const availability = runtime.availability('builtin');
 
       if (report === null) {
         return {
@@ -645,6 +648,11 @@ export function registerDiagnosticsRoutes(
             '这**不代表协议有问题**——只是没有可检查的对象。' +
             '需要在 native/easytier-node 下编译（需 Rust 工具链）。',
           checks: [],
+          engines: {
+            builtinAvailable: availability.builtinAvailable,
+            nativeAvailable: availability.nativeAvailable,
+            defaultEngine: 'builtin',
+          },
         };
       }
 
@@ -652,6 +660,11 @@ export function registerDiagnosticsRoutes(
         available: true,
         ok: report.ok,
         version: report.version,
+        engines: {
+          builtinAvailable: availability.builtinAvailable,
+          nativeAvailable: availability.nativeAvailable,
+          defaultEngine: 'builtin',
+        },
         checks: report.checks.map((check: NativeLayerCheck) => ({
           name: check.layer,
           ok: check.ok,

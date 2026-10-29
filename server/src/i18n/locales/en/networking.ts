@@ -6,6 +6,12 @@ import type { zhNetworking } from '../zh/networking';
  * 声明成 `typeof zhNetworking`：漏译或多键会直接编译失败。
  */
 export const enNetworking: typeof zhNetworking = {
+  engine: {
+    invalid: 'engine must be either builtin (in-house) or native (native module)',
+  },
+  listenPort: {
+    invalid: 'listenPort must be an integer between 1 and 65535',
+  },
   enabled: {
     mustBeBoolean: 'enabled must be a boolean',
   },

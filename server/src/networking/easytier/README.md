@@ -1,12 +1,27 @@
 # TypeScript 版 EasyTier 协议实现
 
-**这是备用实现 + 协议参考，不是生产路径的主选。**
+**这是默认的主引擎（`engine: 'builtin'`）。**
 
-生产路径是 `native/easytier-node/`（Rust 库 + N-API），它直接复用官方实现，
-兼容性天然成立。这里的 TS 实现用于：
+`native/easytier-node/`（Rust 库 + N-API）保留为**备用引擎**
+（`engine: 'native'`），它不是被取代，而是分工不同：
 
-1. **备用**：原生模块不可用的平台可以走这条路
-2. **验证**：把"协议长什么样"变成可断言的测试（见下面的验证方式）
+| | `builtin`（本目录，默认主） | `native`（备用） |
+| --- | --- | --- |
+| 依赖 | 无（纯 TS） | 需 Rust 工具链编译 |
+| 本仓库可读可改 | ✅ | 需读 Rust |
+| 握手 / 加密 / RPC / OSPF 路由 | ✅ 已实测 | ✅ |
+| NAT 穿透 / 打洞 | ❌ 未实现 | ✅ |
+| 端口转发 | ❌ 未实现 | ✅ |
+| 多跳中继选路 | ❌ 未实现 | ✅ |
+| 虚拟网卡（TUN） | ❌ 不创建 | ✅ |
+
+**证据边界必须说清**：本实现的"已实测"指握手（双向角色）、数据面加解密、
+RPC 双向、OSPF 同步与路由广播都在真实官方节点上跑通了。但 NAT 穿透、
+MTU 协商、端口转发、多跳中继**没有实现**——这些场景请切 `engine: 'native'`。
+
+为什么把它做成默认：它是本仓库自己的代码，出问题能读能改，也不要求用户
+先装 Rust 工具链；而绝大多数"两台机器互连做配置同步"的场景只需要
+TCP 直连可达。
 
 ## 已实现并与官方对齐的部分
 
@@ -61,12 +76,15 @@ if from_peer_id != peer_id { return Some(Ok(data)); }  // 不解密，直接放�
 穷举 6 种（方向 × from × to）组合均失败；且 `rpc/client.rs:183` 的
 "Received non-response packet" 一次都没出现，说明包**从未到达 RPC 层**。
 
-官方把连接分为发起方/接受方，`RpcResp` 只由接受方回给发起方。本实现是
-**发起方**，去回 `RpcResp` 必然撞上那个检查。真要打通必须让本实现充当
-接受方（自己监听 + Noise 服务端方向 + admission 校验），成本远高于收益——
-生产路径走原生模块。
+官方把连接分为发起方/接受方，`RpcResp` 只由接受方回给发起方。
+`ospf.ts` 的 `SecureChannel` 是**发起方**视角，它去回 `RpcResp` 会撞上那个检查。
 
-**所以 `handleOspfRequest` 的返回值只表示"识别到并尝试回应了"，不代表对端接受。**
+**这个限制已经由 `acceptor.ts` 解决**：它实现 Noise 握手的服务端方向
+（`do_noise_handshake_as_server` 的镜像）、admission 校验与 OSPF 应答，
+站到了合法的应答方一侧，并已用官方节点实测通过（见下面"接受方方向的实测记录"）。
+
+所以：**生产用 `acceptor.ts`，`ospf.ts` 的 `handleOspfRequest` 只是协议参考。**
+它的返回值只表示"识别到并尝试回应了"，不代表对端接受。
 
 ## 接受方方向的实测记录（2026-10-29）
 
@@ -233,8 +251,9 @@ body: 12ab0108b49bfce00f10efa1ec8ee4dab8fed30118012a150a06...
 这需要实现 Noise 握手的**服务端**方向（`do_noise_handshake_as_server`），
 而不是现在的客户端方向。
 
-这条路成本明显更高（要重写握手为服务端角色、处理 admission 流程），
-而生产路径本来就走原生模块，所以这里停在此处，把结论记录清楚。
+**这条路后来走通了**：`noiseXX.ts` 的 `NoiseXXResponder` + `acceptor.ts`。
+过程中发现五个真实 bug（int64 精度、Pong 帧长前缀、`RpcRequest` 包装层、
+OSPF 会话语义、conn_info 缺失），详见"接受方方向的实测记录"一节。
 
 ## 还没实现
 

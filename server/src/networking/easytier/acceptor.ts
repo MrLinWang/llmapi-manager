@@ -36,7 +36,7 @@
 import type { Socket, Server } from 'node:net';
 import { createServer } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { NoiseXXResponder, generateKeyPair } from './noiseXX';
+import { NoiseXXResponder, generateKeyPair, publicKeyFromPrivate } from './noiseXX';
 import {
   decodeNoiseMsg1,
   decodeNoiseMsg3,
@@ -136,6 +136,12 @@ interface Connection {
   bConnId: Uint8Array;
   rootKey: Buffer;
   sendSeq: bigint;
+  /** 对端在 OSPF 请求里声明的主机名（首个非空的） */
+  hostname?: string;
+  /** 对端在 OSPF 请求里声明的虚拟 IPv4 */
+  ipv4?: string;
+  /** 最近一次 Ping/Pong 的往返时间（毫秒） */
+  latencyMs?: number;
 }
 
 /** 单帧解析循环的状态。 */
@@ -185,8 +191,14 @@ export class EasyTierAcceptor {
     private readonly options: AcceptorOptions,
     private readonly callbacks: AcceptorCallbacks = {},
   ) {
+    // 传了固定私钥时**必须从它推导公钥**，不能另外随机一对——
+    // 否则广播出去的 noise_static_pubkey 与握手实际使用的私钥不匹配，
+    // 对端钉扎校验会失败（或更糟：对端接受的公钥永远无法再复现）。
     this.staticKeyPair = options.staticPrivateKey
-      ? { privateKey: options.staticPrivateKey, publicKey: generateKeyPair().publicKey }
+      ? {
+          privateKey: options.staticPrivateKey,
+          publicKey: publicKeyFromPrivate(options.staticPrivateKey),
+        }
       : generateKeyPair();
   }
 
@@ -218,6 +230,31 @@ export class EasyTierAcceptor {
   /** 是否已成功应答过一次 OSPF 同步请求。 */
   hasAnsweredOspf(): boolean {
     return this.ospfAnswered;
+  }
+
+  /**
+   * 当前已建立的对端。
+   *
+   * 主机名与虚拟 IP 从对端的 OSPF 广播里取——它们不在握手包里，
+   * 所以刚握手完成时可能还没有，页面要能接受 `null`。
+   */
+  connectedPeers(): Array<{
+    peerId: number;
+    hostname: string | null;
+    ipv4: string | null;
+    latencyMs: number | null;
+  }> {
+    return [...this.connections].map((conn) => ({
+      peerId: conn.remotePeerId,
+      hostname: conn.hostname ?? null,
+      ipv4: conn.ipv4 ?? null,
+      latencyMs: conn.latencyMs ?? null,
+    }));
+  }
+
+  /** 已建立连接数。`status().peerCount` 用它。 */
+  connectionCount(): number {
+    return this.connections.size;
   }
 
   private async handleConnection(socket: Socket): Promise<void> {
@@ -437,14 +474,25 @@ export class EasyTierAcceptor {
     // body 是 RpcRequest 包装，业务消息在字段 2 里——直接解会得到全 0
     const innerBody = decodeRpcRequestWrapper(rpc.body);
     const request = decodeSyncRouteInfoRequest(innerBody);
+
+    // 采集对端身份：主机名与虚拟 IP 只出现在它的 RoutePeerInfo 里
+    // （`peer_infos` 中 peer_id 等于它自己的那条）。页面靠这些字段
+    // 显示"我连上了谁"。
+    const learned =
+      getBytes(decodeFields(innerBody), SyncRouteInfoRequestField.peerInfos) === null
+        ? []
+        : decodeRoutePeerInfos(
+            getBytes(decodeFields(innerBody), SyncRouteInfoRequestField.peerInfos)!,
+          );
+    const selfInfo = learned.find((r) => r.peerId === conn.remotePeerId);
+    if (selfInfo) {
+      if (selfInfo.hostname !== null && selfInfo.hostname !== '') {
+        conn.hostname = selfInfo.hostname;
+      }
+      if (selfInfo.ipv4Addr !== null) conn.ipv4 = selfInfo.ipv4Addr;
+    }
     if (process.env.EASYTIER_ACCEPTOR_DEBUG) {
       // 对端广播的 peer_infos 里有没有我们？有 = 它的 OSPF 图已经学到本节点
-      const innerFields = decodeFields(innerBody);
-      const peerInfosRaw = getBytes(
-        innerFields,
-        SyncRouteInfoRequestField.peerInfos,
-      );
-      const learned = peerInfosRaw === null ? [] : decodeRoutePeerInfos(peerInfosRaw);
       process.stdout.write(
         `[ts-acceptor] 对端 peer_infos: ${JSON.stringify(
           learned.map((r) => ({ id: r.peerId, host: r.hostname })),

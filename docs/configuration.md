@@ -233,3 +233,47 @@ npm start
 
 四个接口都要求 `settings:write` 权限，也就是说持有一个只读 API 令牌调不通它们。
 
+
+### 设备互联（组网）的引擎选择
+
+`GET/PATCH /api/networking/config` 里的 `engine` 决定用哪套实现做 EasyTier 组网。
+它存在租户设置里（与其它设置一起），密钥字段落盘前经 `ctx.secrets.encode()` 加密。
+
+| `engine` | 实现 | 适用场景 |
+| --- | --- | --- |
+| `builtin`（默认） | 本仓库 TS（`server/src/networking/easytier/`） | 两台机器 TCP 直连做配置同步；不想装 Rust 工具链 |
+| `native` | `native/easytier-node/`（Rust + N-API） | 需要 NAT 穿透、端口转发、多跳中继、虚拟网卡 |
+
+两者的能力边界不同，**默认值选 `builtin` 是因为它不依赖编译产物**，而不是因为它在所有场景都更强：
+
+- `builtin` 已实测：握手（发起方与接受方两个角色）、数据面加解密、RPC 双向、
+  OSPF 路由同步与广播。
+- `builtin` **未实现**：NAT 穿透/打洞、MTU 协商、端口转发、多跳中继、TUN 虚拟网卡。
+  它只做 TCP 隧道，拓扑是"对端主动连本机"。
+- `native` 复用官方完整实现，上述能力都有；代价是需要 Rust 工具链编译，
+  且本仓库改不动它的行为。
+
+#### `listenPort`
+
+只有 `builtin` 用它（默认 `11011`）。因为自研实现的是**接受方角色**——只监听、
+不主动外连——所以对端必须主动连到 `本机地址:listenPort`。`native` 忽略它
+（官方自己管理端口与打洞）。
+
+`11011` 而不是官方的 `11010`，是为了两个引擎能在同一台机器上并存。
+
+#### 降级是显式的
+
+请求的引擎不可用时会改用另一个，并把事实写进 `GET /api/networking/status`：
+
+- `engine`：实际生效的引擎
+- `degradedFrom`：发生降级时是被替换掉的那个，否则 `null`
+- `builtinAvailable` / `nativeAvailable`：两个引擎各自的可用性
+
+**不要忽略 `degradedFrom`**：选了 `native` 却跑在 `builtin` 上时，NAT 穿透不会生效，
+而这个问题在"两端都不报错、只是连不上"的表象下极难定位。
+
+#### 自研引擎的 `functional` 判据不同
+
+`native` 引擎的 `functional` 看"有没有拿到虚拟 IP"（没有 IP 说明 TUN 没建起来）。
+`builtin` 不创建 TUN，所以它看**"有没有对端连上"**——这证明握手、加密、
+OSPF 全链路都通了。两者的 `functionalReason` 也分别解释各自的失败原因。

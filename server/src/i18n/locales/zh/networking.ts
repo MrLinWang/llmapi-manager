@@ -8,6 +8,14 @@
  * 早先前端提交打码值表示"不修改"，这个语义在 `networking.ts` 里有注释说明。
  */
 export const zhNetworking = {
+  engine: {
+    /** 只有两个引擎，写错说明调用方拼错了枚举值 */
+    invalid: 'engine 只能是 builtin（自研）或 native（原生模块）',
+  },
+  listenPort: {
+    /** 自研引擎的 TCP 监听端口 */
+    invalid: 'listenPort 必须是 1-65535 之间的整数',
+  },
   enabled: {
     mustBeBoolean: 'enabled 必须是布尔值',
   },
