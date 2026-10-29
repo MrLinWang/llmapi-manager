@@ -51,6 +51,7 @@ import { deriveTrafficKey, directionForSender, decryptPayload, encryptPayload } 
 import { TcpStack, selectPeerForPacket } from './tcpStack';
 import { UdpStack } from './udpStack';
 import { buildIcmpEchoReply } from './icmp';
+import { IpReassembler } from './ipReassembly';
 import { IpProtocol, decodeIpv4Header } from './ip';
 import {
   buildOspfSyncRouteRequest,
@@ -242,6 +243,8 @@ export class EasyTierAcceptor {
 
   /** 开始监听。resolve 表示端口已绑定。 */
   async start(): Promise<void> {
+    // 分片组的超时清理：不清理会让半截包一直占内存
+    this.reassembler.start();
     const server = createServer((socket) => {
       void this.handleConnection(socket);
     });
@@ -260,6 +263,7 @@ export class EasyTierAcceptor {
     this.tcpStack = null;
     this.udpStack?.close();
     this.udpStack = null;
+    this.reassembler.close();
     for (const conn of this.connections) conn.socket.destroy();
     this.connections.clear();
     await new Promise<void>((resolve) => {
@@ -743,7 +747,13 @@ export class EasyTierAcceptor {
    * 顺序有讲究：**ICMP 先处理**——它是无状态的 echo 应答，不该因为
    * TCP/UDP 栈的会话状态而受影响（`ping` 要能随时通）。
    */
-  private dispatchIpPacket(ipPacket: Buffer): void {
+  private dispatchIpPacket(rawPacket: Buffer): void {
+    // 分片必须先重组：分片的重组结果才是能交给 TCP/UDP/ICMP 的完整包。
+    // 否则带分片的包会在各栈里被判"总长不对"而丢弃，症状是**大包静默消失**。
+    const reassembled = this.reassembler.accept(rawPacket);
+    if (reassembled === null) return; // 分片还没齐
+    const ipPacket = reassembled.packet;
+
     const header = decodeIpv4Header(ipPacket);
     if (header === null) return;
 
@@ -793,6 +803,15 @@ export class EasyTierAcceptor {
   private tcpStack: TcpStack | null = null;
   /** 用户态 UDP 转发（DNS 走它）。 */
   private udpStack: UdpStack | null = null;
+  /**
+   * IP 分片重组。
+   *
+   * 无条件创建（不受 portForwards 影响）：分片可能出现在任何协议上，
+   * 而且"分片没重组"的症状是大包静默消失，事后无法从日志看出原因。
+   */
+  private readonly reassembler = new IpReassembler({
+    log: (message) => this.callbacks.onDataPlaneLog?.(message),
+  });
 
   /**
    * 启用数据面：把虚拟 IP 上的端口桥接到本机端口。
@@ -853,10 +872,11 @@ export class EasyTierAcceptor {
   }
 
   /** 数据面会话数（诊断用）。 */
-  dataPlaneStats(): { tcp: number; udp: number } {
+  dataPlaneStats(): { tcp: number; udp: number; pendingFragments: number } {
     return {
       tcp: this.tcpStack?.connectionCount() ?? 0,
       udp: this.udpStack?.sessionCount() ?? 0,
+      pendingFragments: this.reassembler.pendingGroups(),
     };
   }
 

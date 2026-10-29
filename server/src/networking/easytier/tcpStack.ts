@@ -83,6 +83,31 @@ interface TcpConnection {
   /** 定时器句柄 */
   retransmitTimer: NodeJS.Timeout | null;
   lastActivityAt: number;
+
+  // ── 拥塞控制（见文件头的说明） ──
+  /** 拥塞窗口（字节）。限制"在途未确认数据"的总量 */
+  cwnd: number;
+  /** 慢启动阈值（字节）。cwnd 超过它就从慢启动切到拥塞避免 */
+  ssthresh: number;
+  /** 最大段长（字节） */
+  mss: number;
+  /**
+   * 收到重复 ACK 的次数。
+   *
+   * 连续 3 个重复 ACK 是"某个段丢了但后续段还在到达"的信号——这时
+   * **不该等超时**（RTO 往往是几百毫秒到几秒），应立即重传那一段。
+   * 这就是快速重传。
+   */
+  dupAckCount: number;
+  /** 已经从本机服务读出、但因窗口不足还没发出的数据 */
+  pendingSend: Buffer;
+  /**
+   * 已见过的最高确认号。
+   *
+   * 判断"这次 ACK 是新确认还是重复确认"必须有它：只看
+   * `unacked` 是否变化在边界情况下会误判（比如 ACK 覆盖了半个段）。
+   */
+  lastAckNumber: number;
 }
 
 export interface TcpStackOptions {
@@ -100,6 +125,19 @@ export interface TcpStackOptions {
   sendIpPacket: (packet: Buffer) => void;
   log?: (message: string) => void;
 }
+
+/**
+ * 拥塞控制常量。
+ *
+ * `MSS` 取 1340 = MTU 1380 − IP 头 20 − TCP 头 20，与我们广告的 MTU 对齐。
+ * `INITIAL_CWND` 用 4×MSS（保守值；RFC 6928 建议 10×MSS，但虚拟链路
+ * 的可用带宽未知，起小一点更安全）。`INITIAL_SSTHRESH` 取 64KB，
+ * 先跑一段慢启动再转拥塞避免。
+ */
+const MSS = 1340;
+const INITIAL_CWND = 4 * MSS;
+const MIN_CWND = MSS;
+const INITIAL_SSTHRESH = 64 * 1024;
 
 /** 把一个 32 位序列号按有符号差值比较（处理回绕）。 */
 function seqDiff(a: number, b: number): number {
@@ -297,6 +335,9 @@ export class TcpStack extends EventEmitter {
     // ── 第三次握手：ACK 确认我们的 SYN-ACK ──
     if (existing.state === 'synReceived' && hasTcpFlag(header.flags, TcpFlags.ACK)) {
       existing.state = 'established';
+      // 这个 ACK 确认了我们的 SYN-ACK。必须记下它，否则后续第一个数据 ACK
+      // 会被误判成"新确认"，导致重复 ACK 计数从 0 开始——快速重传永远不触发。
+      existing.lastAckNumber = header.ack;
       this.connectBridge(existing);
       if (payload.length > 0) this.acceptPayload(existing, payload);
       if (hasTcpFlag(header.flags, TcpFlags.FIN)) this.handleFin(existing, header);
@@ -322,6 +363,32 @@ export class TcpStack extends EventEmitter {
         // 保留"还没被完全确认"的段
         return seqDiff(header.ack, end) < 0;
       });
+
+      // 新确认 vs 重复确认：靠 lastAckNumber 判定
+      const newlyAcked = seqDiff(header.ack, existing.lastAckNumber);
+      if (newlyAcked > 0) {
+        const ackedBytes = newlyAcked;
+        existing.lastAckNumber = header.ack;
+        existing.dupAckCount = 0;
+        this.growWindow(existing, ackedBytes);
+      } else if (newlyAcked === 0 && existing.unacked.length > 0) {
+        // 重复 ACK：对端在说"我还是没收到某个段"
+        existing.dupAckCount += 1;
+        if (existing.dupAckCount === 3) {
+          // 快速重传：不等 RTO，立即重发最老的那一段。
+          // 这一步是吞吐的关键——RTO 往往几百毫秒，等它会让长连接明显卡顿。
+          const oldest = [...existing.unacked].sort((a, b) => seqDiff(a.seq, b.seq))[0];
+          if (oldest !== undefined) {
+            this.log(`快速重传：3 个重复 ACK，重发 seq=${oldest.seq}`);
+            this.resendSegment(existing, oldest.seq, oldest.flags, oldest.payload);
+            oldest.sentAt = Date.now();
+            this.onCongestionLoss(existing);
+          }
+        }
+      }
+
+      // 窗口可能因为确认而打开：把等着的数据发出去
+      this.flushPendingSend(existing);
     }
 
     // ── 数据与 ACK ──
@@ -359,6 +426,12 @@ export class TcpStack extends EventEmitter {
       unacked: [],
       retransmitTimer: null,
       lastActivityAt: Date.now(),
+      cwnd: INITIAL_CWND,
+      ssthresh: INITIAL_SSTHRESH,
+      mss: MSS,
+      dupAckCount: 0,
+      pendingSend: Buffer.alloc(0),
+      lastAckNumber: 0,
     };
     this.connections.set(this.key(conn), conn);
     this.portMap.set(header.dstPort, bridgePort);
@@ -386,8 +459,11 @@ export class TcpStack extends EventEmitter {
     });
 
     socket.on('data', (chunk: Buffer) => {
-      // 本机服务回数据 → 封成虚拟 TCP 段回给对端
-      this.sendSegment(conn, TcpFlags.PSH | TcpFlags.ACK, chunk);
+      // 本机服务回数据 → **先入队**，由 flushPendingSend 按窗口与 MSS 发出。
+      // 不能直接 sendSegment 整块发：那样拥塞窗口形同虚设，
+      // 一次把几 MB 全灌进网络，丢包后重传代价极大。
+      conn.pendingSend = Buffer.concat([conn.pendingSend, chunk]);
+      this.flushPendingSend(conn);
     });
 
     socket.on('end', () => {
@@ -534,6 +610,9 @@ export class TcpStack extends EventEmitter {
         if (conn.unacked.length > 0) this.scheduleRetransmit(conn);
         return;
       }
+      // 超时也意味着丢包：按拥塞处理收缩窗口
+      this.onCongestionLoss(conn);
+
       if (conn.unacked.length > this.options.maxRetransmits) {
         this.log(`重传次数超限，关闭 ${conn.remoteIp}:${conn.remotePort}`);
         this.teardown(conn);
@@ -570,6 +649,84 @@ export class TcpStack extends EventEmitter {
         identification: (Math.random() * 0xffff) & 0xffff,
       }),
     );
+  }
+
+  /**
+   * 当前可用的发送窗口（字节）。
+   *
+   * 取"对端通告的窗口"与"拥塞窗口"的**较小值**：
+   * - 对端窗口是接收方能力（他缓冲快满了就会缩小）
+   * - cwnd 是网络能力（我们对路径拥塞的估计）
+   *
+   * 只看对端窗口会让拥塞控制形同虚设（把网络灌满、丢包后重传雪崩）。
+   */
+  private effectiveWindow(conn: TcpConnection): number {
+    return Math.max(0, Math.min(conn.remoteWindow, conn.cwnd));
+  }
+
+  /** 在途未确认的字节数。 */
+  private inFlight(conn: TcpConnection): number {
+    return conn.unacked.reduce((sum, seg) => sum + seg.payload.length, 0);
+  }
+
+  /**
+   * 把 `pendingSend` 里能发的数据按 MSS 切成段发出去。
+   *
+   * 每次最多发到"窗口填满"为止，剩下的留在 `pendingSend` 等下一次 ACK
+   * 打开窗口。**这是拥塞控制真正生效的地方**——不按窗口限流的话，
+   * cwnd 只是个没人看的数字。
+   */
+  private flushPendingSend(conn: TcpConnection): void {
+    if (conn.state !== 'established' && conn.state !== 'closeWait') return;
+
+    for (;;) {
+      if (conn.pendingSend.length === 0) return;
+      const window = this.effectiveWindow(conn);
+      const canSend = window - this.inFlight(conn);
+      if (canSend <= 0) return; // 窗口满，等 ACK
+
+      const chunkSize = Math.min(conn.mss, conn.pendingSend.length, canSend);
+      if (chunkSize <= 0) return;
+      const chunk = conn.pendingSend.subarray(0, chunkSize);
+      conn.pendingSend = conn.pendingSend.subarray(chunkSize);
+      this.sendSegment(conn, TcpFlags.PSH | TcpFlags.ACK, chunk);
+    }
+  }
+
+  /**
+   * 确认到达时增长拥塞窗口。
+   *
+   * 两个阶段（RFC 5681）：
+   * - **慢启动**（cwnd < ssthresh）：每个 ACK 加一个 MSS，实际是每 RTT 翻倍。
+   *   名字里的"慢"是相对最初的"一次翻倍到对端窗口"而言。
+   * - **拥塞避免**（cwnd >= ssthresh）：每 RTT 只加一个 MSS（线性增长），
+   *   避免把网络压到丢包。
+   */
+  private growWindow(conn: TcpConnection, ackedBytes: number): void {
+    if (conn.cwnd < conn.ssthresh) {
+      // 慢启动：按确认的字节数增长（近似"每 ACK 加一个 MSS"）
+      conn.cwnd = Math.min(conn.cwnd + ackedBytes, 1024 * 1024);
+    } else {
+      // 拥塞避免：每 RTT 约增加一个 MSS，即每确认 cwnd 字节加一个 MSS
+      conn.cwnd = Math.min(
+        conn.cwnd + Math.max(1, Math.floor((conn.mss * ackedBytes) / conn.cwnd)),
+        1024 * 1024,
+      );
+    }
+  }
+
+  /**
+   * 检测到丢包时的窗口收缩。
+   *
+   * `ssthresh` 砍半、`cwnd` 退到 1 个 MSS 并重新慢启动——这是最保守的
+   * 反应（Reno 的做法）。虚拟链路通常是点对点，丢包多半是真的拥塞，
+   * 保守一点比激进重传好。
+   */
+  private onCongestionLoss(conn: TcpConnection): void {
+    conn.ssthresh = Math.max(Math.floor(conn.cwnd / 2), MIN_CWND);
+    conn.cwnd = MIN_CWND;
+    conn.dupAckCount = 0;
+    this.log(`拥塞：cwnd → ${conn.cwnd}B，ssthresh → ${conn.ssthresh}B`);
   }
 
   /** 清理一个连接的资源。 */
