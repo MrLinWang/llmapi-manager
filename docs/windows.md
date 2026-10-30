@@ -191,8 +191,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\install-service.ps1 `
 `%USERPROFILE%\.codex` 与 `.claude` 授予修改权限（`icacls` 继承 `(OI)(CI)M`），避免因
 用户目录 ACL 被收紧后 Agent 下发失败。
 
-安装器写入的 `AGENT_HOME_DIR` 是**执行安装的用户**的家目录（Inno 传 `{userprofile}`；
-手动运行取 `$env:USERPROFILE`）。如果服务后来换成另一个账号运行，它仍会写到这个目录。
+安装器写入的 `AGENT_HOME_DIR` 是**执行安装的用户**的家目录（Inno 传环境变量
+`{%USERPROFILE}`；手动运行取 `$env:USERPROFILE`）。如果服务后来换成另一个账号运行，
+它仍会写到这个目录。
 
 ### 自定义服务账号
 

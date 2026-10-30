@@ -139,7 +139,7 @@ begin
     ' -InstallDir "' + AppDir + '"' +
     ' -SkipCopy' +
     ' -Port ' + Port +
-    ' -AgentHomeDir "' + ExpandConstant('{userprofile}') + '"' +
+    ' -AgentHomeDir "' + ExpandConstant('{%USERPROFILE}') + '"' +
     ' -ResultFile "' + InstallResultFile + '"';
 
   if WizardIsTaskSelected('firewall') then
