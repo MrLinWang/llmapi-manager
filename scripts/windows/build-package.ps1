@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
 构建 llmapi-manager 的 Windows x64 发行包（便携 zip + 可选 Inno Setup 安装包）。
 
