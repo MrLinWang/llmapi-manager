@@ -1,9 +1,13 @@
 ﻿<#
 .SYNOPSIS
-卸载 llmapi-manager Windows 服务。
+[legacy] 卸载 llmapi-manager Windows 服务。
 
 .DESCRIPTION
-默认行为（与安装包卸载一致）：
+**本脚本已退役，仅用于清理旧版 WinSW 服务**；桌面版请用“设置 → 应用”卸载。
+从旧服务迁移数据请用 `scripts/windows/migrate-from-service.ps1`（它会停/删服务，
+默认保留数据）。
+
+默认行为（与旧安装包卸载一致）：
   * 停止并删除 Windows 服务；
   * 删除防火墙规则；
   * 把 .env 复制到 `%ProgramData%\llmapi-manager\.env` 后删除安装目录内容；

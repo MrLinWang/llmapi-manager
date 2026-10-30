@@ -10,10 +10,10 @@
 | [gateway.md](./gateway.md) | 别名格式、选路规则、三条路径的协议匹配与鉴权头、地址拼接、流式转发、限制与调用示例 |
 | [agents.md](./agents.md) | Codex / Claude Code 的写入内容、Codex 模型目录与 `web_search` 开关、三条硬约束、快照、还原、结束进程（含 Windows）、扩展方式、排错 |
 | [sync.md](./sync.md) | 多设备配置同步：`standalone` / `master` / `follower` / `peer`、双向手动拉取、同步范围、凭据为什么明文过网、`sync-state.json` 三方合并、冲突仲裁、Windows/局域网、接口与已知限制 |
-| [configuration.md](./configuration.md) | 环境变量（含 `LOG_LANGUAGE`、`TRUST_PROXY`、`SYNC_ALLOW_INSECURE`、`CODEX_BIN`）、两个密钥、数据目录、首次启动、生产部署、Windows 服务模式、迁移 |
-| [security.md](./security.md) | 两类凭据、口令与会话、令牌、权限矩阵、上游凭据、文件系统边界、同步快照与 `peer` 的威胁模型、Windows 服务与 `.env`、部署风险 |
+| [configuration.md](./configuration.md) | 环境变量（含 `LOG_LANGUAGE`、`TRUST_PROXY`、`SYNC_ALLOW_INSECURE`、`CODEX_BIN`）、两个密钥、数据目录、首次启动、生产部署、Windows 桌面应用默认值、迁移 |
+| [security.md](./security.md) | 两类凭据、口令与会话、令牌、权限矩阵、上游凭据、文件系统边界、同步快照与 `peer` 的威胁模型、Windows 桌面应用与 `desktop.env`、部署风险 |
 | [development.md](./development.md) | 本地开发、测试布局、Windows 开发/测试与 CI、如何加接口/供应商字段/Agent/网关路径、**如何加/改界面与接口文案**、代码约定、技术债 |
-| [windows.md](./windows.md) | Windows 安装包/便携包、WinSW 服务、安装/升级/卸载、服务账号与 `AGENT_HOME_DIR`、防火墙、`CODEX_BIN`、日志与故障排查 |
+| [windows.md](./windows.md) | Windows 桌面应用（Tauri 2）：安装/升级/卸载、托盘与退出、首次初始化、`%APPDATA%` 数据与日志、局域网/防火墙/同步、旧服务迁移、端口冲突、SmartScreen/WebView2、构建与 CI、验证边界 |
 
 ## 按问题找文档
 
@@ -21,10 +21,10 @@
 - 我同事的客户端报 401 → [security.md](./security.md)、[configuration.md](./configuration.md)
 - 模型别名怎么起名、为什么不能回落 → [gateway.md](./gateway.md)
 - 部署到服务器要注意什么 → [configuration.md](./configuration.md#生产部署)、[security.md](./security.md#部署风险清单)
-- **Windows 上怎么安装/升级/卸载、服务起不来、防火墙怎么放行** → [windows.md](./windows.md)
+- **Windows 桌面版怎么安装、窗口/托盘/退出、首次初始化、数据在哪、防火墙怎么放行、旧服务怎么迁移** → [windows.md](./windows.md)
 - **两台机器怎么互相同步、谁是 `peer`、为什么点一次只同步一个方向** → [sync.md](./sync.md#四种角色与双向语义)
 - **同步冲突怎么处理、`sync-state.json` 是什么** → [sync.md](./sync.md#冲突与仲裁)
-- **局域网 HTTP 同步要开什么开关、Windows 防火墙怎么配** → [sync.md](./sync.md#windows-与局域网)、[configuration.md](./configuration.md#windows-服务模式)
+- **局域网 HTTP 同步要开什么开关、Windows 防火墙怎么配** → [sync.md](./sync.md#windows-与局域网)、[configuration.md](./configuration.md#windows-桌面应用)
 - 我要加一个供应商字段 / 一个新 Agent → [development.md](./development.md)
 - 我要理解某个接口返回什么 → [api.md](./api.md)
 - 我要加一条界面文案 / 报错文案 → [development.md](./development.md#加改一条界面文案)、[development.md](./development.md#改服务端文案)
@@ -37,7 +37,7 @@
 - 改完配置后 Codex 没生效、要重启 → [agents.md](./agents.md#结束正在运行的进程)
 - 家里和服务器都要用同一套供应商配置 → [sync.md](./sync.md)
 - 为什么同步要开 HTTPS、快照里为什么会是明文 Key、`peer` 为什么危险 → [security.md](./security.md#同步快照的威胁模型)
-- Windows 服务写不进用户的 `.codex`、找不到 `codex` → [agents.md](./agents.md#windows-上的进程表)、[windows.md](./windows.md)
+- Windows 桌面版写不进用户的 `.codex`、找不到 `codex` → [agents.md](./agents.md#windows-上的进程表)、[windows.md](./windows.md)
 - 我要改网关转发逻辑 → [AGENTS.md](../AGENTS.md) 的「必须遵守的约束」+ [gateway.md](./gateway.md)
 
 ## 文档维护
@@ -51,7 +51,7 @@
 | 新增/修改 `apiType`（协议枚举、文案、鉴权头分组） | `gateway.md`、`api.md`、`README.md`、`AGENTS.md` |
 | Agent 写入字段、`wire_api` 规则或模型目录 | `agents.md`、`api.md` |
 | 同步角色（含 `peer`）、合并规则、`sync-state.json`、冲突判定、快照字段或 `sync:*` 权限 | `sync.md`、`api.md`、`security.md` |
-| Windows 运行时行为（进程、路径、编码、服务、安装包） | `windows.md`、`agents.md`、`configuration.md`、`README.md` |
+| Windows 桌面壳/运行时行为（进程、路径、编码、托盘、安装包、迁移） | `windows.md`、`agents.md`、`configuration.md`、`README.md`、`development.md` |
 | 逐档实测 / 推理档位来源（`probe-efforts`、NDJSON 进度流） | `api.md`、`agents.md`、`README.md` |
 | 环境变量或数据目录结构 | `configuration.md` |
 | 权限位、角色映射或权限的副作用（如结束进程） | `security.md`、`api.md` |

@@ -45,6 +45,16 @@ export default function SetupPage(): JSX.Element {
     })();
   }, [navigate]);
 
+  // Windows 桌面端从 sidecar 的 stdout 捕获一次性初始化令牌，用 URL hash 传进来。
+  // hash 不会发给服务端、也不会进访问日志；读完立即清掉，避免留在窗口历史里。
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (!hash.startsWith('#token=')) return;
+    const value = decodeURIComponent(hash.slice('#token='.length));
+    if (value !== '') setToken(value);
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  }, []);
+
   const minPassword = status?.rules.minPasswordLength ?? 8;
   const passwordTooShort = password.length > 0 && password.length < minPassword;
   const mismatch = confirm.length > 0 && confirm !== password;

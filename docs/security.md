@@ -30,17 +30,24 @@
 默认配置下首次启动**不创建账号**，而是生成一次性初始化令牌（`setup_…`）打印到控制台。
 设置页需要「令牌 + 自设用户名 + 自设口令」才能创建 `role=owner` 的管理员。
 
-- **作用**：服务刚启动、还没设密码时是一扇开着的门。令牌只出现在控制台，
-  因此只有能读到控制台的人（部署者本人）能完成认领，避免端口暴露时被陌生人抢注。
-- **只存哈希**：`data/setup.json` 里是 `sha256(token)`，会话日志与接口都不返回明文；
-  令牌也**不写入运行日志**（只打印到控制台）。
+- **作用**：服务刚启动、还没设密码时是一扇开着的门。令牌只交给启动它的部署者——
+  源码部署看控制台，Windows 桌面版由 launcher 自动带进初始化页。因此只有能操作这个
+  会话的人（部署者本人）能完成认领，避免端口暴露时被陌生人抢注。
+- **只存哈希**：`data/setup.json` 里是 `sha256(token)`，接口不返回明文，服务端日志器
+  也不会主动记录它。Windows 桌面壳会从 sidecar stdout 捕获令牌并把 stdout 写入
+  `%APPDATA%\llmapi-manager\log\desktop-server.log`；该日志要按当前用户敏感文件保护，
+  初始化完成后可以删除。
+- **Windows 桌面版自动带入令牌**：桌面 launcher 捕获令牌后直接打开
+  `/setup#token=...`，用户不需要从控制台抄。初始化中途退出时，下次启动会轮换
+  `setup.json` 并重新发放令牌——桌面版没有控制台也能继续。
 - **一次性**：初始化成功后令牌清空，`POST /api/setup` 一律 409，不会覆盖已有管理员。
 - **失败计数**：令牌校验失败会累加 `failedAttempts`，便于发现试探行为。
 - **无交互部署**：设置 `ADMIN_PASSWORD` 可跳过网页初始化直接建号；
   此时初始化接口保持关闭（状态里 `needsSetup: false`）。
 
-> 注意：这条通路的强度取决于"控制台只有你能看"。若把服务跑在共享机器、
-> 或把启动日志转发到公开的日志聚合平台，应改用 `ADMIN_PASSWORD` 并保管好环境变量。
+> 注意：这条通路的强度取决于“初始化页只有部署者能操作”。源码部署时是控制台，
+> Windows 桌面版是这个 Windows 用户会话。共享 Windows 账户会削弱这条边界（应改用独立
+> 用户），把启动日志转发到公开日志平台同样会（应改用 `ADMIN_PASSWORD` 并保管好环境变量）。
 
 ## 会话
 
@@ -131,6 +138,8 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 - 只有点击"应用配置"时才会写 `~/.codex/config.toml`、`~/.codex/auth.json`、
   `~/.codex/llmapi-model-catalog.json` 与 `~/.claude/settings.json`
   （或 `AGENT_HOME_DIR` 下的对应路径）。
+- Windows 桌面版还会读写 `%APPDATA%\llmapi-manager\`（`data` / `log`）与同级的
+  `desktop.env`（`DATA_ENCRYPTION_KEY`），sidecar 以当前登录用户身份运行。
 - 其中 `llmapi-model-catalog.json` 是 Codex 的模型目录，由我们从当前聚合别名**整份生成**
   （不做按键合并）；应用前若已存在会被备份，还原时按"是否由我们创建"决定删除或重置为 `{}`。
 - 写入前在**被改文件的同目录**留一份 `*.bak-<时间戳>`（如 `~/.codex/config.toml.bak-...`）——
@@ -250,34 +259,35 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 - **`sync-state.json` 含 API Key 明文的哈希**：不可逆但是指纹。拿到数据目录 + 候选 Key
   的人可离线比对；按数据目录同级敏感度保护。
 
-## Windows 服务与 `.env`
+## Windows 桌面应用与 `desktop.env`
 
-Windows 安装包把服务托给 WinSW，并以 **LocalSystem** 运行。这带来几处本仓库其它部署方式
-没有的风险，需要安装器与部署者共同处理：
+Windows 的发行形态是 **Tauri 2 桌面应用**：窗口内嵌 Web UI，后端 sidecar 随 App 启停，
+**以当前登录用户身份运行**。不再有 WinSW 服务、LocalSystem 服务账号或 `services.msc`
+条目。风险与收紧方式：
 
-- **`.env` 里有 `DATA_ENCRYPTION_KEY`**（以及首次安装期间短暂的 `ADMIN_PASSWORD`）。
-  这个文件必须限制 ACL：只允许服务账号与 Administrators 读取，不要让普通用户可读。
-  安装器负责创建并收紧权限；手动修改后要重新检查。
-- **`ADMIN_PASSWORD` 在健康检查通过后应从 `.env` 删除**。留着等于把管理员口令明文
-  放在磁盘上；已建号后它不再生效，但泄露面仍然存在。
-- **数据目录在 `C:\ProgramData\llmapi-manager\`**：`%ProgramData%` 默认允许普通用户
-  创建文件，但已有目录的 ACL 取决于安装器。确保 `data/` 不被其它用户遍历——`providers.json`
-  里只有 `apiKey` 字段是加密的，地址、模型清单等仍是明文；`sync-state.json` 另含如上的
-  内容哈希。
-- **LocalSystem 权限很大**：它能写系统目录、加载驱动、访问所有本地用户文件。
-  安装器只把 `AGENT_HOME_DIR\.codex` / `.claude` 的修改权限授予它，但这仍是
-  "让一个高权限账号去写用户家目录"。更稳妥的部署是改用专用低权限账号运行服务，
-  并只给它 `data/` 与 `AGENT_HOME_DIR` 的必要权限。
-- **防火墙规则（安装时可选，默认不加）只放行入站 TCP 8787 的 Private 配置档**。
-  把机器接入不受信任的网络、或网络被识别为 Public 时，要么规则不生效，要么端口在更大范围
-  暴露——两种都不理想。
-- **明文 HTTP 同步**：局域网里用 `SYNC_ALLOW_INSECURE=1` 时，快照（含全部上游 Key 明文）
-  会在链路上可被抓包。只在完全可信的网段这么做；否则用 HTTPS 反代 + `TRUST_PROXY=1`，
-  或只走回环/加密隧道。
-- **卸载默认保留数据**：`-Purge` 才删除。处置旧机器时若忘了 `-Purge`，`data/` 与 `.env`
-  会留在磁盘上。
+- **运行身份就是当前用户**：sidecar 能写该用户的 `~/.codex`、`~/.claude` 与 `%APPDATA%`，
+  也能结束该用户的 Codex 进程。这是“用户自己的工具”模型；需要隔离时用单独的 Windows
+  用户运行，而不是切换服务账号。
+- **数据在 `%APPDATA%\llmapi-manager\`**：`data\` 与 `log\` 位于用户 profile，默认 ACL
+  只允许该用户与管理员。`providers.json` 里只有 `apiKey` 加密，地址、模型清单等仍是明文；
+  `sync-state.json` 另含 Key 明文的哈希指纹。不要把该目录复制到共享位置。
+- **`desktop.env` 存 `DATA_ENCRYPTION_KEY`**：桌面壳生成
+  `%APPDATA%\llmapi-manager\desktop.env`，只保存这一个键并收紧到当前用户。不要外传、
+  提交或放进共享目录；丢失后旧密文无法解密。桌面版不落盘 `ADMIN_PASSWORD`。
+- **初始化令牌与日志**：令牌由桌面壳从 sidecar stdout 捕获；
+  `desktop-server.log` 是 stdout/stderr 的原样捕获，可能含令牌。按当前用户敏感文件保护，
+  初始化完成后删除该日志没有副作用。
+- **局域网开关是主要暴露面**：默认只监听 `127.0.0.1`。托盘开启「允许局域网访问」后监听
+  `0.0.0.0`，控制台、管理面与 `/v1` 网关都对局域网可达，且是**明文 HTTP**。
+  只在可信网络临时开启，防火墙只放行 Private 配置档的入站 TCP 8787，用完关闭。
+  `PUBLIC_BASE_URL` 仍是回环地址，不能当作“服务只在回环”的证据。
+- **卸载保留数据**：卸载器不会删除 `%APPDATA%\llmapi-manager\`。处置机器时要手动删除，
+  并清理迁移时保留的 `%ProgramData%\llmapi-manager\` 源数据——里面仍有旧 Key 密文。
+- **旧服务迁移**：`scripts/windows/migrate-from-service.ps1` 会停/删旧服务、复制
+  `%ProgramData%` 数据、导入 `DATA_ENCRYPTION_KEY` 并**保留源数据**。验证迁移成功后，
+  要按同样的敏感度处置源目录。
 
-> 本环境是 Linux，上述 Windows 行为未实测，需在 Windows CI 与用户机器上验证。
+> 本环境是 Linux，上述 Windows 桌面行为未实测，需在真实 Windows 机器上验收。
 
 ## 部署风险清单
 
@@ -294,8 +304,8 @@ Windows 安装包把服务托给 WinSW，并以 **LocalSystem** 运行。这带�
 | 反向代理缓冲 SSE | 关闭 `proxy_buffering`，否则流式响应被攒住 |
 | 同步配置为 `peer` | 两端都成为快照服务器：只在对端可信、网络隔离、令牌最小化（仅 `sync:read`、设过期、用完吊销）时启用 |
 | 同步走明文 HTTP | 仅可信内网 + 两端 `SYNC_ALLOW_INSECURE=1`；否则用 HTTPS 反代 + `TRUST_PROXY=1` |
-| Windows 服务以 LocalSystem 运行 | 收紧 `.env` 与 `data/` 的 ACL；只授予 `AGENT_HOME_DIR\.codex` / `.claude` 必要权限；更稳妥是换专用低权限账号 |
-| Windows 卸载残留数据 | 处置机器前用 `-Purge`（会删数据目录与 `.env`），或手动删除 |
+| Windows 桌面版开启局域网 | 默认只监听回环；仅在可信网络用托盘临时开启，防火墙只放行 Private 8787，用完关闭 |
+| Windows 卸载残留数据 | 卸载不删 `%APPDATA%\llmapi-manager\`；处置前手动删除，并清理旧 `%ProgramData%` 迁移源 |
 
 ## 不做的事
 

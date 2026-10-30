@@ -1,519 +1,376 @@
-# Windows 安装与运维
+# Windows 桌面应用
 
-本文档描述在 Windows 上使用 **安装包（Inno Setup）**、**便携包** 与 **WinSW 服务脚本** 部署
-llmapi-manager 的方式。源码运行方式（`npm run dev` / `npm start`）见
-[development.md](./development.md) 与根目录 README。
+Windows 上的发行形态是 **Tauri 2 桌面应用**：窗口内嵌现有 Web UI（没有地址栏），
+后端仍是本地 Node / Fastify sidecar，随 App 启动与停止。**不再安装 Windows 服务**，
+也没有 WinSW、`services.msc` 里的 `llmapi-manager`，或 LocalSystem 服务账号。
+
+本文档覆盖安装、启动与托盘、首次初始化、数据与日志、局域网访问、旧服务迁移、卸载、
+端口冲突、SmartScreen / WebView2、构建与 CI。源码方式（`npm run dev` / `npm start`）
+见 [development.md](./development.md) 与根目录 README。
 
 > **验证状态（请务必阅读）**
 >
-> 本仓库的脚本与安装器是在 Linux 环境里编写的，**没有在真实 Windows 上实测过**。
-> CI 的 `windows-smoke` 只覆盖“解压便携包 → 启动 node.exe → `/api/health` + 前端首页”
-> 这条最小路径；**服务安装、ACL 授权、防火墙规则、Inno 完成页、自定义服务账号**
-> 需要在 Windows CI 或用户机器上验证。`installer.iss` 也只能在 Windows 上由 Inno Setup
-> 编译（Linux 无法运行 ISCC）。
->
-> 首次在 Windows 上验证时，建议先用便携包跑通，再用 `install-service.ps1` 手动安装服务，
-> 最后才用安装器。
+> 本仓库的开发环境是 Linux，**没有在真实 Windows 上实测过桌面壳**。
+> CI 的 `windows-desktop`（构建）与 `windows-desktop-smoke`（最小冒烟：启动 sidecar、
+> 探测 `/api/health` 一类）只覆盖打包与启动，**不覆盖 GUI、托盘、首次初始化、局域网访问、
+> 防火墙与旧服务迁移**。这些路径需要在真实 Windows 机器上按本文档手工验收。
+> 不要因为 CI 通过就声称 Windows 桌面端已实测。
 
-## 1. 产物与系统要求
+## 1. 形态：桌面应用，不是服务，也不是浏览器标签页
 
-构建产物在 `dist/windows/`：
+| | 旧形态（已废弃） | 现形态 |
+| --- | --- | --- |
+| 分发 | Inno Setup 安装器 + 便携 zip | Tauri NSIS 安装包 + 便携 zip |
+| 进程 | WinSW 托管的 Windows 服务，开机常驻 | 桌面 App + 子进程 sidecar，随 App 启停 |
+| 界面 | 浏览器打开的 `http://127.0.0.1:8787` | App 窗口内嵌 Web UI，无地址栏 |
+| 监听 | 安装版默认 `0.0.0.0` | 默认 `127.0.0.1`，托盘显式开启后才监听局域网 |
+| 数据 | `%ProgramData%\llmapi-manager\` | `%APPDATA%\llmapi-manager\` |
+| 运行账号 | `LocalSystem`（或自定义服务账号） | 当前登录用户 |
+| 首次初始化 | 控制台/服务日志打印令牌，或安装器写 `ADMIN_PASSWORD` | 桌面 launcher 捕获一次性令牌并自动打开初始化页 |
+| 关闭行为 | 服务继续运行 | 窗口隐藏到托盘；托盘「退出」才停止网关 |
 
-| 文件 | 说明 |
-| --- | --- |
-| `llmapi-manager-<version>-win-x64.zip` | 便携包：解压即用，数据在包目录内 |
-| `llmapi-manager-setup-<version>-x64.exe` | Inno Setup 安装器（构建机装有 Inno Setup 6 时才会生成） |
-| `*.sha256` | 对应产物的 SHA256 校验文件 |
+因此：
+
+- 任务管理器里看到的是桌面 App 与它启动的 `node.exe` 子进程，**不是** Windows 服务；
+- `Get-Service llmapi-manager` / `sc.exe query llmapi-manager` 在新装机器上应当**查不到**；
+- 不再需要管理员权限运行日常使用，也不需要给服务账号授予用户目录权限。
+
+## 2. 系统要求与产物
 
 系统要求：
 
-- Windows 10 / Windows 11 / Windows Server 2016 及以上，**x64**（ARM64 可通过 x64 模拟运行，
-  但未验证）。
-- 安装服务需要管理员权限。
-- 默认监听 `0.0.0.0:8787`；端口被占用时可在安装时改端口，或编辑 `.env` 后重启服务。
+- Windows 10 / Windows 11，**x64**（ARM64 未验证）。
+- **WebView2 Runtime**。安装包内置 WebView2 bootstrapper，缺失时会尝试安装；
+  便携包不负责安装运行时，需要系统已有 WebView2（Windows 11 通常自带，
+  Windows 10 一般随 Edge 更新存在）。
+- 安装包按机器安装到 `Program Files`，安装时需要管理员确认；日常运行不需要管理员。
 
-运行时固定为 **Node.js 22 LTS x64**（构建时下载并校验，不依赖目标机器安装 Node）。
-服务 wrapper 为 **WinSW 2.12.0 x64**。
+构建产物：
 
-## 2. 安装（安装器）
+| 文件 | 说明 |
+| --- | --- |
+| `llmapi-manager-<version>-x64-setup.exe` | Tauri NSIS 安装包，安装桌面 App |
+| `llmapi-manager-<version>-win-x64-portable.zip` | 便携包：解压后直接运行，不写安装目录 |
+| `*.sha256` | 对应产物的 SHA256（若构建脚本生成） |
 
-1. 下载 `llmapi-manager-setup-<version>-x64.exe` 与同名 `.sha256`，在 PowerShell 里校验：
+桌面包自带 Node 运行时，目标机器**不需要预装 Node**。端口固定为 **8787**。
+
+安装包与 zip 都**没有代码签名**，SmartScreen 会提示“未知发布者”（见 §12）。
+
+## 3. 安装
+
+1. 下载 `llmapi-manager-<version>-x64-setup.exe` 与同名 `.sha256`（如有），先校验：
 
    ```powershell
-   Get-FileHash .\llmapi-manager-setup-<version>-x64.exe -Algorithm SHA256
+   Get-FileHash .\llmapi-manager-<version>-x64-setup.exe -Algorithm SHA256
    # 与 .sha256 文件内容比对
    ```
 
-2. 双击安装。安装包**没有代码签名**，Windows SmartScreen 可能提示“Windows 已保护你的电脑”：
-   点“更多信息”→“仍要运行”。企业环境请先用 SHA256 校验，再决定是否放行。
+2. 双击安装。SmartScreen 提示时点“更多信息”→“仍要运行”。
+3. 安装完成后从开始菜单或桌面快捷方式启动 **LLM API Manager**。
+4. 首次启动的初始化流程见 §5。
 
-3. 安装向导默认目录为 `C:\Program Files\llmapi-manager`。可选任务：
+安装**不会**注册 Windows 服务，也不会创建 `services.msc` 条目。如果机器上还留有
+旧版服务，请先按 §9 迁移或卸载。
 
-   - **在 Windows 防火墙中放行服务端口（仅专用网络）**：默认不勾选；需要其它设备访问时勾选。
-   - 端口、`PUBLIC_BASE_URL`、初始口令、`CODEX_BIN` 等可通过命令行参数覆盖（见 §9）。
+### 便携包
 
-4. 安装结束时，完成页会显示：
+1. 解压 `llmapi-manager-<version>-win-x64-portable.zip` 到任意可写目录。
+2. 运行解压目录里的 `llmapi-manager.exe`（便携包内统一用这个文件名）。
+3. 数据与日志**仍然写 `%APPDATA%\llmapi-manager\`**（不是包目录），所以便携包与安装版
+   共用同一份用户数据；换目录解压不会复制配置。
+4. 便携包不注册任何开机启动项或服务。
 
+## 4. 启动、窗口、托盘与退出
+
+- 启动后 App 先拉起本地 sidecar，等待 `/api/health` 通过，再在窗口里加载控制台。
+  启动失败时窗口会停在加载页或显示错误，详细原因见 `%APPDATA%\llmapi-manager\log\`（§6）。
+- 窗口**内嵌**控制台，没有地址栏、不能输入 URL。日常使用不需要浏览器；调试或需要
+  对照浏览器行为时，仍可用浏览器访问同一地址 `http://127.0.0.1:8787`（仅本机）。
+- **关闭窗口 = 隐藏到托盘**，默认不会退出：网关继续运行，已下发的 Agent 配置仍可用。
+  第一次关闭窗口时会提示“App 仍在托盘运行”。
+- 托盘菜单：
+  - **打开控制台**：重新显示窗口；
+  - **允许局域网访问**：切换 sidecar 的监听范围（见 §7），切换后会重启 sidecar；
+  - **退出**：停止 sidecar 并结束 App。**只有这里会真正停掉网关**。
+- 托盘图标还在说明 App 仍在运行；sidecar 是否健康以窗口能否加载与 `/api/health` 为准
+  （sidecar 崩溃时 App 可能仍在托盘并显示错误）。
+
+> 不要用“结束 `node.exe`”来退出 App：那会让桌面壳与 sidecar 状态不一致。需要停止时
+> 用托盘「退出」；App 异常无响应时再在任务管理器结束整个 App（含子进程）。
+
+## 5. 首次初始化
+
+首次启动（默认租户里还没有账号）：
+
+1. 桌面 launcher 启动 sidecar，并从 sidecar 的 stdout 捕获一次性初始化令牌
+   （形如 `setup_...`）。
+2. App 自动打开内嵌的 `/setup#token=...`，令牌已带入，不需要用户从控制台复制。
+3. 用户设置**自己的**管理员用户名与口令（口令至少 8 位），提交后进入控制台。
+4. 令牌立即作废，后续初始化接口一律拒绝，不会覆盖已有管理员。
+
+已有账号时：App 打开登录页/控制台，不再生成初始化令牌。
+
+**初始化中途退出**：下次启动时桌面 launcher 会让 sidecar 重新生成令牌（轮换
+`data/setup.json`），然后再次自动打开初始化页。桌面版**不需要**“从控制台抄令牌”这一步。
+
+> 桌面版没有控制台窗口。如果初始化页没有自动带令牌，先退出 App 再启动一次，
+> 不要手工编辑 `setup.json`。若账号其实已创建，重启后直接进入登录页是正常现象。
+
+`ADMIN_PASSWORD` 环境变量仍可用于 Linux/Docker 等无交互部署，但**不是 Windows 桌面的
+正常初始化路径**：桌面版不会替你写 `.env`，也不建议把口令放在环境变量里。
+
+## 6. 数据、日志与加密密钥
+
+桌面版的所有可变数据都在当前用户的 `%APPDATA%` 下：
+
+```
+%APPDATA%\llmapi-manager\
+├── data\            租户数据（供应商、设置、Agent 快照、请求日志、同步基线……）
+├── log\             运行日志（服务端 app.log 与桌面壳捕获的 sidecar 输出）
+├── desktop.env      只存 DATA_ENCRYPTION_KEY（仅当前用户可读）
+└── （桌面偏好，如 LAN 开关，也保存在此目录；非机密，可删除后重建）
+```
+
+- `%APPDATA%` 通常展开为 `C:\Users\<用户名>\AppData\Roaming`。
+- `desktop.env` 由桌面壳生成，内容是 `DATA_ENCRYPTION_KEY=...`。**不要删除或外传**：
+  丢失后已加密的上游 API Key / 网关令牌无法解密，只能重新填写。
+- 文件权限按当前用户收紧（`desktop.env` 只授予当前用户与 SYSTEM）。同一台机器的其它
+  标准用户默认读不到，但管理员可以。
+- 日志目录与数据目录分开，迁移 `data\` 时不会带走日志。
+- Agent 文件的写前备份仍落在被改文件的同目录（如 `~\.codex\config.toml.bak-<时间戳>`），
+  不在 `%APPDATA%` 下。
+- 旧服务时代的 `%ProgramData%\llmapi-manager\` **不会被桌面版读取**；需要旧数据时按 §9 迁移。
+
+日志排查：
+
+```powershell
+Get-Content "$env:APPDATA\llmapi-manager\log\app.log" -Tail 100 -Wait
+Get-ChildItem "$env:APPDATA\llmapi-manager\log"
+```
+
+`app.log` 由服务端日志器写入，会按 key 名与正则打码，不会主动写完整 API Key、
+网关令牌或口令。`desktop-server.log` 是桌面壳对 sidecar stdout/stderr 的原样捕获，
+可能包含启动横幅（含一次性初始化令牌）；请把它当作当前用户目录下的敏感文件，
+排查完可删除。初始化令牌在完成初始化后即作废。
+
+## 7. 局域网访问、防火墙与同步
+
+默认只监听 `127.0.0.1:8787`，**只有本机能访问**。当这台 Windows 机器要作为配置同步的
+`master` 或 `peer`（即其它设备要拉取它的快照）时，才需要开放局域网：
+
+1. 托盘菜单勾选 **允许局域网访问**。App 会重启 sidecar，把监听地址切到 `0.0.0.0:8787`；
+   取消勾选则切回 `127.0.0.1`。
+2. 在**管理员** PowerShell 里放行入站 TCP 8787（**专用网络 / Private**）：
+
+   ```powershell
+   New-NetFirewallRule -DisplayName "LLM API Manager (TCP 8787)" `
+     -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8787 `
+     -Profile Private
    ```
-   控制台地址：http://127.0.0.1:8787
-   管理员账号：admin
-   初始口令：<随机口令>
-   数据目录：C:\ProgramData\llmapi-manager\data
-   日志目录：C:\ProgramData\llmapi-manager\log
+
+3. 确认监听与规则：
+
+   ```powershell
+   Get-NetTCPConnection -LocalPort 8787 -State Listen
+   Get-NetFirewallRule -DisplayName 'LLM API Manager*' | Format-Table DisplayName,Enabled,Profile
    ```
 
-   **初始口令只显示这一次**。安装器在健康检查通过后会把 `ADMIN_PASSWORD` 从 `.env` 删除；
-   口令同时写入 `%ProgramData%\llmapi-manager\install-result.env` 供静默安装读取，
-   非静默安装会在完成页读取后删除该文件。
+4. 对端填 `http://<这台机器的局域网 IP>:8787`（例如 `http://192.168.1.20:8787`），
+   **不要填 `127.0.0.1`**——那是对端自己。
 
-5. 安装完成后登录控制台，在「设置」中修改口令。之后安装/升级**不会**再用 `ADMIN_PASSWORD`
-   覆盖已有账号（`server/src/bootstrap.ts` 只在“默认租户还没有账号”时建号）。
+`PUBLIC_BASE_URL` 在桌面版中默认**固定为 `http://127.0.0.1:8787`**，不会因为开了局域网
+而改变：本机 Agent 走回环最稳。只有“其它设备上的 Agent 也要经这台网关”时，才需要另行
+设置这个值（桌面版不引导这一步，属高级/手工场景）。
 
-安装结果：
+必须知道的边界：
 
-- 程序文件：`C:\Program Files\llmapi-manager\`
-- `.env`：`C:\Program Files\llmapi-manager\.env`（ACL 仅 Administrators + SYSTEM + 服务账号）
-- 数据/日志：`C:\ProgramData\llmapi-manager\data`、`...\log`
-- 服务名：`llmapi-manager`（WinSW 包装，自动启动，崩溃自动重启）
-- 服务账号：默认 `LocalSystem`
+- 开启局域网后，控制台、网关与管理接口都会对局域网可达，不只是同步快照。只在可信网络
+  临时开启，用完取消勾选。
+- 链路是**明文 HTTP**。局域网同步要么用 HTTPS 反向代理 + `TRUST_PROXY=1`，要么只在
+  完全可信的内网显式设置 `SYNC_ALLOW_INSECURE=1`（**两端都要设**）。快照里是上游 Key
+  明文，详见 [sync.md](./sync.md#凭据为什么必须明文过网) 与 [security.md](./security.md)。
+- Windows 把当前网络识别为 **公用（Public）** 时，上面的 Private 规则不生效，表现为
+  连接超时。把网络改成专用，或按需补一条对应配置档的规则——不要把规则开到公网。
+- 端口固定 8787，不能改成别的端口来“绕开”占用（见 §8）。
 
-## 3. 便携版
+## 8. 端口固定 8787，冲突时不自动换端口
 
-1. 解压 `llmapi-manager-<version>-win-x64.zip`，得到 `llmapi-manager-<version>-win-x64\` 目录。
-2. 双击 `start-portable.cmd`。
-3. 首次运行会在包目录生成 `.env`（数据目录、日志目录都在包内），并在控制台打印一次性
-   **初始化令牌**；打开 `http://127.0.0.1:8787`，按设置页提示创建管理员。
-4. 关闭控制台窗口（或 Ctrl+C）即停止；便携版不注册服务、不开机自启。
+桌面版把网关端口固定为 **8787**：`PUBLIC_BASE_URL`、已下发的 Agent 配置、同步地址都按
+这个端口写死。端口被其它进程占用时，App 会**启动失败并报错**，不会自动改用 8787 之外的
+端口（自动换端口会让旧 Agent 配置悄悄失效）。
 
-便携版与安装版的区别：
-
-| | 便携版 | 安装版 |
-| --- | --- | --- |
-| 数据位置 | 包目录 `data\` / `log\` | `%ProgramData%\llmapi-manager\` |
-| 监听地址 | `127.0.0.1`（仅本机） | `0.0.0.0`（局域网可访问，需防火墙） |
-| 管理员初始化 | 控制台打印一次性令牌 | 随机 `ADMIN_PASSWORD`，完成页显示 |
-| 开机自启 | 否 | 是（WinSW 服务） |
-| 端口/PublicBaseUrl | 改包内 `.env` | 安装参数或安装目录 `.env` |
-
-把便携包安装为服务（管理员 PowerShell）：
+处理：
 
 ```powershell
-# 在便携包根目录执行；默认复制到 C:\Program Files\llmapi-manager
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\install-service.ps1 -EnableFirewall
+netstat -ano | findstr :8787
+# 找到 PID 后确认是什么进程；确认可结束后：
+taskkill /PID <pid> /F
 ```
 
-## 4. 手动安装/升级服务
+如果占用者正是上一次残留的 sidecar（App 异常退出），先结束残留 `node.exe`，再重新启动 App。
+不要试图通过改端口解决：桌面版没有提供端口配置入口。
 
-`scripts\windows\install-service.ps1` 是安装器的实际执行者，也可以单独使用。
-所有参数都可省略，省略时使用下列默认值。
+## 9. 旧 Windows 服务迁移
 
-| 参数 | 默认 | 说明 |
-| --- | --- | --- |
-| `-SourceDir` | 脚本上两级目录 | 发行包根目录（含 `node.exe`、`server\`、`web\`、`llmapi-manager-service.exe`） |
-| `-InstallDir` | `C:\Program Files\llmapi-manager` | 安装目录 |
-| `-ServiceName` | `llmapi-manager` | Windows 服务名（同时用于 WinSW id） |
-| `-DisplayName` | `LLM API Manager` | 服务显示名 |
-| `-Port` | `8787` | 监听端口，写入 `.env` 的 `PORT` |
-| `-PublicBaseUrl` | `http://127.0.0.1:<Port>` | 写进 Agent 配置的网关地址（不带 `/v1`） |
-| `-AgentHomeDir` | 当前用户家目录 | `AGENT_HOME_DIR`；其下 `.codex` / `.claude` 会授权给服务账号 |
-| `-ProgramDataDir` | `%ProgramData%\llmapi-manager` | 数据/日志根目录 |
-| `-AdminUsername` | `admin` | 首次创建账号的用户名 |
-| `-AdminPassword` | 随机 | 首次创建账号的口令；已有账号时不会覆盖 |
-| `-CodexBin` | 自动探测 | `CODEX_BIN`，服务调用 codex 的绝对路径 |
-| `-SyncAllowInsecure` | 关闭 | 写入 `SYNC_ALLOW_INSECURE=1`（仅可信内网） |
-| `-EnableFirewall` | 关闭 | 添加入站 TCP 端口规则（Private profile） |
-| `-ServiceAccount` | `LocalSystem` | `LocalSystem` / `LocalService` / `NetworkService` / `DOMAIN\user` |
-| `-ServiceAccountPassword` | 空 | 自定义账号必填；会授予“作为服务登录” |
-| `-SkipCopy` | 关闭 | 文件已就位（安装器场景） |
-| `-SkipHealthCheck` | 关闭 | 只启动不轮询健康检查（排障用） |
-| `-HealthTimeoutSeconds` | 90 | 健康检查超时 |
-| `-ResultFile` | 空 | 写安装结果 key=value（安装器读取；含明文口令，注意 ACL） |
+只有从**旧版 WinSW 服务**升级过来的机器才需要这一节。新安装包不再注册服务，旧服务脚本
+也只保留为 legacy 迁移/卸载路径，**不再推荐**日常使用。
 
-示例：
+迁移脚本会：
+
+1. 停止并删除旧的 `llmapi-manager` Windows 服务（如果存在）；
+2. 把 `%ProgramData%\llmapi-manager\data` 复制到 `%APPDATA%\llmapi-manager\data`；
+3. 从旧 `.env` 导入 `DATA_ENCRYPTION_KEY` 到 `%APPDATA%\llmapi-manager\desktop.env`，
+   使旧的上游 Key 密文仍能解密；
+4. **保留源数据**（`%ProgramData%` 下的原目录不删除），便于回滚。
+
+迁移脚本在**仓库或构建机**的 `scripts\windows\` 下，**不会被打进便携 zip**。
+在首次启动桌面版之前，从仓库/构建机以管理员 PowerShell 运行：
 
 ```powershell
-# 升级：先解压新版本便携包，再用新包覆盖安装（保留 .env 与 ProgramData 数据）
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\install-service.ps1 `
-  -SourceDir . -EnableFirewall
-
-# 改端口 + 局域网访问地址
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\install-service.ps1 `
-  -Port 9000 -PublicBaseUrl http://192.168.1.20:9000 -EnableFirewall
-
-# 只允许本机访问（不监听 0.0.0.0 需要手工改 .env 的 HOST，再重启服务）
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\migrate-from-service.ps1
 ```
 
-脚本行为：
+迁移后：
 
-1. 检查管理员权限与发行包完整性；
-2. 停止并卸载已有同名服务（升级时）；
-3. 把旧文件移到安装目录下的 `.rollback-<时间戳>`，复制新文件；
-4. 生成/更新 `.env`（保留未知键与已有 `DATA_ENCRYPTION_KEY`）；
-5. 生成 `llmapi-manager-service.xml`（WinSW 配置）；
-6. 安装并启动服务，轮询 `http://127.0.0.1:<Port>/api/health`；
-7. 健康检查通过后从 `.env` 删除 `ADMIN_PASSWORD`，写 `console.url`；
-8. 失败时停服务、换回旧文件、恢复旧 `.env`，并输出日志路径。
+1. 启动桌面 App。若桌面数据目录还是空的，会直接使用迁移过来的数据；
+2. 用旧账号登录，确认供应商、模型、Agent 配置与请求日志都在；
+3. 用旧 `DATA_ENCRYPTION_KEY` 加密的供应商 Key 应能正常使用；若提示无法解密，
+   检查 `desktop.env` 是否成功写入；
+4. 验证无误后再手工删除 `%ProgramData%\llmapi-manager\`（脚本不会替你删源数据）。
 
-## 5. `.env` 与服务配置
+旧服务卸载（不迁移数据）时，使用 `scripts/windows/legacy-service/` 下保留的旧脚本，
+或先运行 `migrate-from-service.ps1` 再删除 `%ProgramData%`。新桌面版不需要、也不会再安装服务。
 
-安装版 `.env` 位于安装目录根（`C:\Program Files\llmapi-manager\.env`）。服务端按进程
-工作目录读取它；WinSW 的 `<workingdirectory>` 已设为安装目录。
+## 10. 升级
 
-| 键 | 安装器写入 | 说明 |
-| --- | --- | --- |
-| `HOST` | `0.0.0.0` | 监听所有网卡；只允许本机时改成 `127.0.0.1` |
-| `PORT` | `8787` | 监听端口 |
-| `PUBLIC_BASE_URL` | `http://127.0.0.1:8787` | **写进 Agent 配置**的地址，不带 `/v1`。其它设备要直连时改成 `http://<本机IP>:8787` 或域名 |
-| `DATA_DIR` | `%ProgramData%\llmapi-manager\data` | 租户数据 |
-| `LOG_DIR` | `%ProgramData%\llmapi-manager\log` | 运行日志与 WinSW 日志 |
-| `AGENT_HOME_DIR` | 安装用户家目录 | 其下 `.codex` / `.claude` 是 Agent 配置目标 |
-| `DATA_ENCRYPTION_KEY` | 随机 64 位十六进制 | **必须保留**。丢失后已加密的上游 API Key / 网关令牌无法解密 |
-| `ADMIN_USERNAME` | `admin` | 仅首次建号使用 |
-| `ADMIN_PASSWORD` | 随机（仅首次） | 健康检查通过后删除 |
-| `SYNC_ALLOW_INSECURE` | 仅 `-SyncAllowInsecure` 时 | 允许同步快照走明文 HTTP，仅可信内网 |
-| `CODEX_BIN` | 自动探测/手动 | codex 可执行文件的绝对路径（`.exe`/`.cmd`/`.bat`） |
-| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
-| `TRUST_PROXY` | 不写入 | 放在 HTTPS 反向代理后时设 `1`（只信任回环代理的转发头） |
+- **安装版**：先从托盘「退出」App，再运行新版本
+  `llmapi-manager-<version>-x64-setup.exe` 覆盖安装。安装程序替换程序文件；
+  `%APPDATA%\llmapi-manager\` 下的数据、日志与 `desktop.env` 默认保留，
+  `DATA_ENCRYPTION_KEY` 不会重新生成。
+- **便携包**：退出 App，解压新包覆盖旧程序文件。数据在 `%APPDATA%`，不受影响。
+- 升级后启动 App，登录确认供应商/模型/Agent 配置仍在即可；不需要 `Restart-Service`。
 
-`HOST=0.0.0.0` 与 `PUBLIC_BASE_URL=127.0.0.1` 的区别：
+需要回退版本时：退出 App 后重新安装旧版本安装包。数据与 `desktop.env` 不在程序目录里，
+不会被安装程序覆盖，旧版本仍可读取。
 
-- `HOST` 是**监听**地址，决定哪些网卡能连进来；
-- `PUBLIC_BASE_URL` 是**下发给 Agent** 的地址。安装器默认写 `127.0.0.1`，因为大多数用户
-  只在本机使用；若 Agent 在别的机器上，必须改成那台机器能访问到的地址，否则下发的
-  `base_url` 会指向 Agent 自己的回环地址。
-- 改动 `.env` 后重启服务生效：`Restart-Service llmapi-manager`。
+## 11. 卸载与数据保留
 
-## 6. 服务账号与 `AGENT_HOME_DIR`
+- “设置 → 应用 → 已安装的应用”（或控制面板 → 程序和功能）卸载 **LLM API Manager**。
+- 卸载器删除程序文件与快捷方式，**默认保留** `%APPDATA%\llmapi-manager\` 下的
+  `data`、`log` 与 `desktop.env`。以后重装会复用，旧数据仍可解密。
+- 保留的数据里仍可能有上游 Key 密文；不再需要时彻底删除：
 
-### 默认：LocalSystem
+  ```powershell
+  Remove-Item "$env:APPDATA\llmapi-manager" -Recurse -Force
+  ```
 
-服务以 `LocalSystem` 运行。LocalSystem 对用户目录通常已有完全控制权限，安装器仍会显式给
-`%USERPROFILE%\.codex` 与 `.claude` 授予修改权限（`icacls` 继承 `(OI)(CI)M`），避免因
-用户目录 ACL 被收紧后 Agent 下发失败。
+  这一步**不可恢复**，执行前确认已经备份或不再需要。
+- 若机器上还留着旧服务，先按 §9 迁移/卸载，再删除 `%ProgramData%\llmapi-manager\`。
+- 卸载**不会**删除已写入 Agent 的 `~\.codex` / `~\.claude` 配置；那些文件由 Agent 自己使用，
+  需要时在 App 里先「还原」或手工清理。
 
-安装器写入的 `AGENT_HOME_DIR` 是**执行安装的用户**的家目录（Inno 传环境变量
-`{%USERPROFILE}`；手动运行取 `$env:USERPROFILE`）。如果服务后来换成另一个账号运行，
-它仍会写到这个目录。
+## 12. SmartScreen 与 WebView2
 
-### 自定义服务账号
+- 安装包和 zip **未签名**。SmartScreen 的“Windows 已保护你的电脑”是预期行为：
+  先用 SHA256 校验来源可信，再点“更多信息”→“仍要运行”。企业环境请按内部策略放行。
+- 安装包内置 WebView2 bootstrapper；离线或被策略拦截时会安装失败，可先手工安装
+  [WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。
+- 便携包要求系统已有 WebView2；没有时窗口无法创建。
+- 只支持 Windows 10/11 x64；ARM64 未验证。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\install-service.ps1 `
-  -ServiceAccount 'CONTOSO\svc-llmapi' -ServiceAccountPassword '<口令>' `
-  -AgentHomeDir 'C:\Users\alice'
-```
+## 13. 构建与 CI
 
-- 脚本会把账号写进 WinSW 的 `<serviceaccount>` 并开启 `allowservicelogon`（授予“作为服务登录”）。
-- 给 `C:\ProgramData\llmapi-manager` 与 `AGENT_HOME_DIR\.codex` / `.claude` 授予修改权限。
-- 自定义账号还必须能**读取**安装目录（`C:\Program Files` 默认给 Users/Authenticated Users
-  读+执行；如果公司策略收紧了，需手工授权）。
-- 服务账号切换后，之前由 LocalSystem 创建的文件所有权不变，但 ACL 已包含新账号，通常可直接用。
+桌面壳在 `src-tauri/`（Rust + Tauri 2），加载页在 `desktop/`，构建脚本为
+`scripts/windows/build-desktop.ps1`。
 
-手工修正 ACL 示例：
+构建机需要：
 
-```powershell
-icacls "C:\Users\alice\.codex" /grant "CONTOSO\svc-llmapi:(OI)(CI)M"
-icacls "C:\ProgramData\llmapi-manager" /grant "CONTOSO\svc-llmapi:(OI)(CI)M"
-Restart-Service llmapi-manager
-```
-
-## 7. 防火墙
-
-安装器/脚本**不会默认放开端口**。需要在局域网访问时：
-
-- 安装向导里勾选“在 Windows 防火墙中放行服务端口（仅专用网络）”；或
-- 手动执行 `install-service.ps1 -EnableFirewall`；或
-- 手工添加规则：
-
-```powershell
-New-NetFirewallRule -DisplayName "LLM API Manager (TCP 8787)" `
-  -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8787 `
-  -Profile Private -Program "C:\Program Files\llmapi-manager\node.exe"
-```
-
-规则只对 **Private** 网络配置（家庭/公司内网）生效，公网配置不放开。改端口后要同步改规则
-（脚本会按“LLM API Manager (TCP <端口>)”重建）。验证：
-
-```powershell
-Get-NetFirewallRule -DisplayName 'LLM API Manager*' | Format-Table DisplayName,Enabled,Profile
-```
-
-> 服务本身是明文 HTTP。跨不可信网络请放在 HTTPS 反向代理之后，并设置 `TRUST_PROXY=1`
-> 与 `PUBLIC_BASE_URL=https://...`；不要把 8787 直接暴露到公网。
-
-## 8. `CODEX_BIN`
-
-服务以 LocalSystem（或其他服务账号）运行时，**看不到安装用户的 PATH**，直接执行 `codex` 会失败。
-安装器会尝试 `where.exe codex` 并挑选 `.exe`/`.cmd`/`.bat` 写入 `CODEX_BIN`；探测不到时
-可以手工指定：
-
-```powershell
-where.exe codex
-# C:\Users\alice\AppData\Roaming\npm\codex.cmd
-
-# 写入 .env 后重启
-notepad "C:\Program Files\llmapi-manager\.env"
-Restart-Service llmapi-manager
-```
-
-注意：
-
-- 必须是**绝对路径**，且指向 `.cmd` / `.exe` / `.bat`（服务端会用 `cmd.exe /d /s /c` 调 `.cmd`）。
-- 升级时保留已有 `CODEX_BIN`；文件不存在会在安装日志中告警，但不会擅自删除。
-- `AGENT_HOME_DIR` 决定写入哪个用户的 `.codex`/`.claude`，`CODEX_BIN` 决定结束哪个 codex 进程；
-  两者通常应指向同一个用户。
-
-## 9. 命令行参数（安装器）
-
-静默安装在 CI/批量部署里常用：
-
-```powershell
-llmapi-manager-setup-0.1.0-x64.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART `
-  /PORT=9000 /PUBLICBASEURL=http://192.168.1.20:9000 /ALLOWINSECURESYNC=1
-```
-
-| 参数 | 说明 |
-| --- | --- |
-| `/PORT=8787` | 覆盖端口（`PUBLIC_BASE_URL` 未指定时按它生成默认值） |
-| `/PUBLICBASEURL=...` | 覆盖 `PUBLIC_BASE_URL` |
-| `/ALLOWINSECURESYNC=1` | 写入 `SYNC_ALLOW_INSECURE=1` |
-| `/ADMINPASSWORD=...` | 指定初始管理员口令；不传则随机生成 |
-| `/CODEXBIN=...` | 指定 codex 可执行文件 |
-| `/NOSERVICE=1` | 只复制文件，不安装服务 |
-| `/SILENT`、`/VERYSILENT` | Inno 标准静默参数 |
-
-**静默安装没有完成页**，初始口令不会显示。口令写入
-`%ProgramData%\llmapi-manager\install-result.env`（ACL 收紧为管理员 / SYSTEM / 服务账号），读取后请立即删除该文件：
-
-```powershell
-Get-Content "C:\ProgramData\llmapi-manager\install-result.env"
-Remove-Item "C:\ProgramData\llmapi-manager\install-result.env"
-```
-
-如果静默安装失败，脚本会把错误写进同一个文件的 `error=` 行，并保留日志路径。
-注意：Inno 静默安装的进程退出码**不反映服务安装结果**；请检查 `install-result.env` 的
-`success=0` / `error=` 行，以及 `sc.exe query llmapi-manager`。
-
-## 10. 日志
-
-| 路径 | 内容 |
-| --- | --- |
-| `%ProgramData%\llmapi-manager\log\app.log` | 服务运行日志（启动、网关错误、未处理异常） |
-| `...\app.1.log` … | 滚动历史，默认最多 5 个、单文件 5MB（`LOG_MAX_BYTES` / `LOG_MAX_FILES`） |
-| `...\llmapi-manager-service.out.log` | 服务标准输出（WinSW 收集） |
-| `...\llmapi-manager-service.err.log` | 服务标准错误（启动失败优先看这里） |
-| `%ProgramData%\llmapi-manager\install-result.env` | 安装结果/失败原因/初始口令（安装器临时文件） |
-| Windows 事件查看器 → Windows 日志 → 系统 | 服务控制管理器错误（如“服务无法启动”） |
-
-```powershell
-Get-Content "C:\ProgramData\llmapi-manager\log\app.log" -Tail 100 -Wait
-Get-Service llmapi-manager | Format-List Name,Status,StartType
-```
-
-日志会按 key 名与正则打码，不会主动写完整 API Key、网关令牌或口令；初始化令牌只打印到
-服务首次启动的控制台（事件日志里看不到时，可删除数据重新初始化——见故障排查）。
-
-## 11. 升级
-
-推荐直接运行新版本安装器覆盖安装：
-
-1. 备份 `C:\Program Files\llmapi-manager\.env` 与 `%ProgramData%\llmapi-manager`；
-2. 运行新版本安装器（同一安装目录）。安装器会先停服务，再替换程序文件；
-3. `.env` 与 ProgramData 数据**默认保留**；`DATA_ENCRYPTION_KEY` 不会重新生成；
-4. 完成页会显示“沿用已有管理员账号，未生成新口令”；
-5. 验证：`Get-Service llmapi-manager`、`Invoke-RestMethod http://127.0.0.1:8787/api/health`、
-   登录控制台确认供应商/模型/Agent 配置还在。
-
-手动升级（便携包 → 已安装服务）：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\install-service.ps1 -SourceDir .
-```
-
-失败回滚：安装器/脚本会把旧程序文件暂存在安装目录的 `.rollback-<时间戳>`，失败时自动换回；
-如果进程被强杀导致残留，可手工把 `.rollback-*` 里的内容移回安装目录后重新运行脚本。
-数据目录与 `.env` 不在回滚范围内（它们始终保留）。
-
-## 12. 卸载
-
-### 安装版
-
-“设置 → 应用 → 已安装的应用”卸载，或“控制面板 → 程序和功能”。
-
-- 卸载器会停止并删除服务、删除防火墙规则、删除程序文件；
-- **默认保留** `%ProgramData%\llmapi-manager\data`、`log` 以及一份
-  `%ProgramData%\llmapi-manager\.env`（含 `DATA_ENCRYPTION_KEY`）。以后重装会自动复用，
-  旧数据仍可解密；
-- 保留的 `.env` 也意味着旧的上游 Key 密文还在；不再需要时请用下面的“彻底删除”。
-
-### 彻底删除
-
-先（在卸载前）用管理员 PowerShell 运行：
-
-```powershell
-& "C:\Program Files\llmapi-manager\scripts\windows\uninstall-service.ps1" -Purge
-```
-
-或者卸载后手工删除 `%ProgramData%\llmapi-manager`。`-Purge` 会删除数据、日志与保留的 `.env`，
-**不可恢复**。
-
-### 只用脚本卸载
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\uninstall-service.ps1
-# 只停服务/删防火墙、保留安装目录：-KeepFiles
-# 连数据一起删：-Purge
-```
-
-## 13. 故障排查
-
-### 服务装上了但启动失败
-
-1. 看 `%ProgramData%\llmapi-manager\log\llmapi-manager-service.err.log` 与 `app.log`；
-2. `sc.exe query llmapi-manager` 看状态；
-3. 事件查看器 → Windows 日志 → 系统，找服务控制管理器错误；
-4. 常见原因：
-   - 端口被占用：`netstat -ano | findstr :8787`，改端口或结束占用进程；
-   - `.env` 第一行带 BOM：用记事本“另存为 UTF-8（无 BOM）”或重新运行安装脚本；
-   - 安装目录下缺少 `server\node_modules`（发行包不完整）；
-   - `DATA_DIR` / `LOG_DIR` 无写权限（检查 ProgramData ACL）；
-   - `node.exe` 被杀软隔离。
-
-### 健康检查一直失败
-
-安装器/脚本会轮询 `http://127.0.0.1:<Port>/api/health`，90 秒超时。依次检查：
-
-- 端口是否真的在监听：`Get-NetTCPConnection -LocalPort 8787 -State Listen`；
-- 服务是否 Running；
-- `app.log` 末尾的启动错误；
-- `PUBLIC_BASE_URL` 只影响下发给 Agent 的地址，不影响本机健康检查（健康检查固定用 127.0.0.1）；
-- 如果 `.env` 里之前残留 `ADMIN_PASSWORD` 且账号已存在，服务不会报错——这是正常的，
-  口令不会覆盖已有账号。
-
-### 其它设备访问不了
-
-1. 确认 `HOST=0.0.0.0` 并已重启服务；
-2. 确认防火墙规则存在且 Profile 为 Private（当前网络是否被识别为“公用”）；
-3. 用 `http://<本机IP>:8787/api/health` 在本机测，再用另一台机器测；
-4. 需要给 Agent 下发地址时，把 `PUBLIC_BASE_URL` 改成对端可达地址并重启。
-
-### 忘记管理员口令
-
-`ADMIN_PASSWORD` 只在“默认租户还没有账号”时生效，**不能用来重置已有口令**。可选：
-
-- 如果还能登录其它管理员账号：在「设置」中重置；
-- 否则只能停止服务、备份并删除 `%ProgramData%\llmapi-manager\data` 后重新初始化
-  （会丢供应商/模型/Agent 配置，且旧 API Key 密文无法恢复）。删除前务必备份。
-
-### Agent 配置下发失败
-
-- 确认 `AGENT_HOME_DIR` 指向**运行 Codex 的用户**家目录，而不是服务账号的家目录；
-- 用 `icacls` 检查 `.codex` / `.claude` 是否有服务账号的修改权限；
-- 确认 `CODEX_BIN` 存在且服务账号可执行；
-- 服务端进程探测在 Windows 上用 `Get-CimInstance Win32_Process`，失败会产生
-  `agents.process.tableUnavailable` 告警（见 `/api/health` 的 warnings）。
-
-### 安装/升级失败
-
-- 看 `%ProgramData%\llmapi-manager\install-result.env` 的 `error=` 与日志路径；
-- 安装目录下 `.rollback-<时间戳>` 是失败时保留的旧文件；
-- 用管理员 PowerShell 重新运行：
-  `"<安装目录>\scripts\windows\install-service.ps1" -SourceDir "<安装目录>" -InstallDir "<安装目录>" -SkipCopy`
-- 若提示“无法删除服务”，用 `sc.exe delete llmapi-manager` 后重试（先确认服务已停止）。
-
-### PowerShell 执行策略 / 中文乱码
-
-- 脚本统一用 `powershell.exe -ExecutionPolicy Bypass -File ...` 调用；
-- 脚本文件保存为 UTF-8 **with BOM**；如果你手工改过编码，中文输出可能乱码，但不影响逻辑；
-- `.env` 必须是 UTF-8 **无 BOM**（安装脚本会保证）。
-
-### 下载失败（构建/CI）
-
-`build-package.ps1` 需要访问 nodejs.org 与 github.com。代理环境请设置
-`HTTP_PROXY` / `HTTPS_PROXY` 后重试，或事先下载好：
-
-```powershell
-# 离线构建：指定本地文件（仍会校验 SHA256）
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\build-package.ps1 `
-  -NodeZipPath D:\cache\node-v22.23.4-win-x64.zip `
-  -WinSwExePath D:\cache\WinSW-x64.exe
-```
-
-## 14. 构建发行包
-
-在 **Windows** 构建机上（Linux 不能生成 Windows 安装器；CI 用 `windows-latest`）：
+- Node.js 22 LTS x64（与仓库其它构建一致）；
+- Rust 工具链（stable）与 MSVC Build Tools（Tauri 的 Windows 目标）；
+- WebView2 Runtime（本机运行安装包时也需要）；
+- 能访问 npm / crates.io 的网络（或预先配置镜像）。
 
 ```powershell
 npm ci
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\build-package.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\build-desktop.ps1
 ```
 
-可选参数：
+脚本会先构建 `web/dist` 与 `server/dist`，再调用 Tauri 打包 NSIS 安装包，并组装便携 zip；
+默认输出到 `dist\windows\`。具体参数以脚本输出为准。
 
-| 参数 | 说明 |
-| --- | --- |
-| `-Version` | 版本号；默认读根 `package.json` |
-| `-OutputDir` | 输出目录；默认 `dist\windows` |
-| `-NodeVersion` | 运行时 Node 版本；默认 `22.23.4` |
-| `-NodeZipPath` / `-NodeSha256` | 离线 Node zip / 自定义版本校验值 |
-| `-WinSwExePath` | 离线 WinSW（仍校验固定 SHA256） |
-| `-SkipNpmCi` / `-SkipBuild` | 复用已有依赖/产物（CI 已执行 npm ci 时用） |
-| `-NoInstaller` | 只出便携 zip |
-| `-NoZip` | 只出安装器 |
+开发时不要每次都打包：
 
-脚本会：
+```bash
+npm run desktop:dev
+```
 
-1. 组装 stage：`node.exe`、`server\dist`、`server\package.json`、仅 server 的生产依赖
-   `server\node_modules`、`web\dist`、WinSW 可执行文件、`scripts\windows`、`docs\windows.md`、
-   `.env.example`、`LICENSE`；
-2. 校验 Node zip 与 WinSW 的 SHA256；
-3. 生成便携 zip 与对应 `.sha256`；
-4. 找到 `ISCC.exe` 时生成 Inno 安装包与 `.sha256`，否则只出 zip 并告警。
+它会启动 Vite + server 并打开 Tauri 开发窗口（需要 Rust/WebView2）。生产使用安装包，
+不要用 `desktop:dev` 当部署方式。
 
-服务端运行时依赖通过 `npm ls --omit=dev --parseable --all -w @llmapi/server` 的安装闭包复制，
-因此 **需要先 `npm ci`**；`-SkipNpmCi` 只适合 CI 中已经装好依赖的场景。
+CI 的 **`windows-desktop`**（构建）与 **`windows-desktop-smoke`**（冒烟）job 在
+`windows-latest` 上运行；它们**不启动 GUI**，也不验证托盘、首次初始化、防火墙或迁移脚本。
+Windows 桌面端最终以真实机器验收为准。
 
-## 15. 上游来源与 SHA256
+## 14. 故障排查
 
-| 组件 | 版本 | 来源 | SHA256 |
-| --- | --- | --- | --- |
-| Node.js 运行时 | 22.23.4（win-x64 zip） | `https://nodejs.org/dist/v22.23.4/node-v22.23.4-win-x64.zip` | `cbc74b5e0982c9dbb41525fd8fb5dcd32fbee237863f7829072f4639a1ce5f20` |
-| WinSW | 2.12.0（WinSW-x64.exe） | `https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe` | `05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da` |
-| Inno Setup | 6.x（构建机安装） | `https://jrsoftware.org/isinfo.php` | 上游安装包，未在仓库内固定 |
+### App 启动后窗口空白 / 一直加载
 
-说明：
+sidecar 没起来或健康检查失败。看：
 
-- Node 的校验值有两种保证：脚本内置默认版本的固定值，并可选地对照 nodejs.org 的
-  `SHASUMS256.txt`；自定义 `-NodeVersion` 时必须从 `SHASUMS256.txt` 读取（或显式传
-  `-NodeSha256`）。
-- WinSW 的 GitHub Release **没有官方校验文件**，上表哈希是 2026-10-29 从官方 release
-  资产下载后计算的。升级 WinSW 时必须重新计算并同时更新 `build-package.ps1` 中的
-  `$WinSwSha256` 与本节，二者保持一致。
-- Inno Setup 由构建机自行安装（CI 通过 `choco install innosetup`），版本不固定；
-  `installer.iss` 只使用 Inno 6 的通用语法与 `{autopf}`、`LoadStringsFromFile` 等 6.x 能力。
-- 仓库 CI（`.github/workflows/ci.yml`）的 `windows-package` job 在 `windows-latest` 上构建
-  zip（并尝试安装 Inno Setup 生成 exe），`windows-smoke` job 解压 zip 启动 `node.exe` 做
-  `/api/health` 与前端首页冒烟。**CI 不安装 Windows 服务**（需要管理员与真实服务控制管理器），
-  所以服务相关路径仍需用户机验证。
+```powershell
+Get-Content "$env:APPDATA\llmapi-manager\log\desktop-server.log" -Tail 100
+Get-Content "$env:APPDATA\llmapi-manager\log\app.log" -Tail 100
+```
 
-## 16. 未签名与安全提示
+常见原因：8787 被占用（§8）、安装包缺少 Node 运行时、`desktop.env` 权限异常、
+杀软隔离了 `node.exe`。
 
-- 安装包与 zip 都**没有代码签名**。Windows SmartScreen 会拦截“未知发布者”，这是预期行为；
-  请先用 SHA256 校验来源可信，再选择“仍要运行”。
-- 安装目录的 `.env` 含 `DATA_ENCRYPTION_KEY` 与（首次安装时）`ADMIN_PASSWORD`，ACL 已收紧为
-  Administrators + SYSTEM + 服务账号；不要把 `.env` 复制到共享目录或提交到版本库。
-- 服务默认监听 `0.0.0.0`，但防火墙规则只对 Private profile 放行；不要把 8787 直接暴露到公网，
-  对外请使用 HTTPS 反向代理（并设置 `TRUST_PROXY=1`、`PUBLIC_BASE_URL=https://...`）。
-- 多设备同步的快照里是明文上游 Key（见 [sync.md](./sync.md)）；在 Windows 上启用同步且
-  需要跨机访问时，优先使用 HTTPS；仅可信内网才考虑 `SYNC_ALLOW_INSECURE=1`。
+### 初始化页没有令牌 / 反复要求初始化
 
-## 17. 已知限制
+- 先退出 App 再启动一次：桌面 launcher 会重新生成令牌。
+- 确认 `%APPDATA%\llmapi-manager\data\setup.json` 可写；损坏时看 `app.log`。
+- 如果账号已经创建，正常表现是打开登录页而不是初始化页。
 
-- **Node 22 生命周期**：安装包固定 Node 22 LTS x64（Jod，维护到 2027-04）。
-  升级运行时只需改 `build-package.ps1` 的默认版本与哈希，并同步 §15。
-- **EasyTier 原生模块未包含**：`native/easytier-node`（可选备用引擎）只有 Linux 构建产物，
-  Windows 包不包含它。没有它时使用内置自研引擎，NAT 穿透/端口转发等能力不可用。
-- **未在真实 Windows 实测**：见文首“验证状态”。CI 能覆盖的解压启动/健康检查路径之外，
-  服务安装、ACL、防火墙、Inno 完成页、自定义服务账号都需要 Windows 环境验证。
-- **服务账号与用户目录**：默认 LocalSystem + 安装用户家目录的组合已按最小必要授权；
-  如果企业策略禁止 SYSTEM 写用户目录，请改用专用服务账号并手工核对 ACL。
+### 托盘图标不见了 / 关不掉
+
+- 托盘图标被折叠时，点任务栏的“^”展开。
+- 用托盘「退出」停止网关；App 无响应时在任务管理器结束 **LLM API Manager** 及其
+  `node.exe` 子进程，再重新启动。
+
+### 其它设备访问不了
+
+1. 托盘是否勾选「允许局域网访问」（勾选后 sidecar 会重启）；
+2. 防火墙规则是否存在且 Profile 为 Private；当前网络是否被识别为“公用”；
+3. 用 `http://<本机IP>:8787/api/health` 在本机与对端各测一次；
+4. 同步还要满足 HTTPS / `SYNC_ALLOW_INSECURE=1` 的协议检查，见 [sync.md](./sync.md#windows-与局域网)。
+
+### 旧数据没有出现
+
+- 确认迁移脚本是在首次启动桌面版**之前**运行的，且复制到了
+  `%APPDATA%\llmapi-manager\data`；
+- 确认 `desktop.env` 里有 `DATA_ENCRYPTION_KEY`；没有它时旧密文无法解密；
+- 看 `app.log` 是否有 `credential_decrypt_failed` 告警。
+
+### 端口被占用
+
+见 §8。桌面版没有换端口选项。
+
+### SmartScreen 拦截 / WebView2 缺失
+
+见 §12。
+
+## 15. 验证边界与已知限制
+
+- **未在真实 Windows 实测**：本仓库开发环境是 Linux。CI 的 `windows-desktop` /
+  `windows-desktop-smoke` 只构建与冒烟；GUI、托盘、首次初始化、局域网、防火墙、迁移脚本
+  都需要在真实 Windows 上验收。
+- **端口固定 8787**：没有自动换端口，也没有图形化端口配置。
+- **未签名**：SmartScreen 提示是预期行为，没有代码签名证书。
+- **Windows 没有 headless/服务模式**：桌面版必须由用户登录会话启动；服务器/无人值守部署
+  请继续用 Linux + `npm start`（服务模式不变）。
+- **局域网是明文 HTTP**：开启后控制台与网关都在局域网上可达；同步快照里是上游 Key 明文，
+  只在可信网络临时开启，优先 HTTPS。
+- **EasyTier 原生模块**：`native/easytier-node` 只有 Linux 构建产物，Windows 包不包含它；
+  同局域网 HTTP 同步不依赖它，继续用 `builtin` 引擎。
+- 旧服务数据不会自动出现，必须显式运行迁移脚本；源数据默认保留，需手工清理。

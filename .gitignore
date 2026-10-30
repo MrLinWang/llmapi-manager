@@ -104,3 +104,12 @@ Desktop.ini
 # 编译出的原生二进制（各平台各自构建，不入库）
 /native/*/*.node
 # Cargo.lock 对二进制 crate 应当提交（锁定依赖版本），所以不忽略它
+
+# ── Tauri 桌面构建产物与 sidecar stage ──────────────────────────────
+/src-tauri/target/
+/src-tauri/gen/
+/src-tauri/runtime/
+
+# 本地构建缓存（Tauri CLI/PowerShell 解析器）
+/.npm-cache/
+/.tmp-pwsh/

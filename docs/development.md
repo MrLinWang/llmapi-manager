@@ -4,9 +4,11 @@
 
 - Node.js >= 18.18（`package.json` 的 `engines`）。开发机上验证过 22.23.1。
 - npm 9+（使用 workspaces）。
-- 无需数据库、无需 Go/Rust 工具链（可选的 `native/easytier-node/` 才需要 Rust）。
-- Windows 上建议用 **Node 22 LTS x64**：安装包/便携包固定带这个运行时，
-  开发环境与产物保持一致能少一类"本机能跑、装完不能跑"的问题。
+- 无需数据库、无需 Go 工具链。Rust 只在两处需要：可选的 `native/easytier-node/`，
+  以及 Windows 桌面壳 `src-tauri/`（Tauri 2）。只改 server/web 不需要 Rust。
+- Windows 上建议用 **Node 22 LTS x64**：桌面包固定带这个运行时，开发环境与产物保持一致
+  能少一类"本机能跑、装完不能跑"的问题。构建桌面壳还需要 Rust stable、MSVC Build Tools
+  与 WebView2（见 [windows.md](./windows.md)）。
 
 ## 起步
 
@@ -44,17 +46,19 @@ npm run dev -w web        # vite，热更新
 | `npm run typecheck` | 两个 workspace 各跑一次 `tsc --noEmit` |
 | `npm test` | server（vitest）→ web（vitest + jsdom） |
 | `npm run registry:sync -w server` | 用 modelinfo.dev / models.dev 校准模型上下文与推理档位（默认演练，`-- --write` 落盘） |
+| `npm run desktop:dev` | 起 Vite + server 并打开 Tauri 开发窗口（需 Rust / WebView2；仅开发用，生产用安装包） |
 
-Windows 打包与服务脚本（**需在 Windows 上运行**，Linux 上不可执行）：
+Windows 桌面构建与旧服务迁移脚本（**需在 Windows 上运行**，Linux 上不可执行）：
 
 | 脚本 | 作用 |
 | --- | --- |
-| `scripts/windows/build-package.ps1` | 构建便携 zip；本机有 Inno Setup 时同时生成安装包 |
-| `scripts/windows/install-service.ps1` | 写入 `.env`、注册 WinSW 服务、配置目录权限；防火墙规则可选（默认不加） |
-| `scripts/windows/uninstall-service.ps1` | 停止并删除服务；默认保留数据，`-Purge` 才删除 |
+| `scripts/windows/build-desktop.ps1` | 构建 Tauri NSIS 安装包与便携 zip |
+| `scripts/windows/migrate-from-service.ps1` | 从旧 WinSW 服务迁移数据到 `%APPDATA%`；在仓库/构建机运行，**不打进便携 zip** |
+| `scripts/windows/legacy-service/` | 旧服务安装/卸载脚本，仅保留用于迁移或清理，不再推荐 |
 
-用法与前置依赖见 [windows.md](./windows.md)。这些脚本的验证依赖 Windows CI 或用户机器，
-本仓库的 Linux 开发环境跑不了。
+桌面壳在 `src-tauri/`（Rust + Tauri 2），加载页在 `desktop/`。用法与前置依赖见
+[windows.md](./windows.md)。这些脚本的验证依赖 Windows CI 或真实 Windows 机器，
+本仓库的 Linux 开发环境跑不了；GUI 不能自动测。
 
 ## 测试布局
 
@@ -102,13 +106,16 @@ Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真
 - **POSIX-only 用例显式跳过**：用 `it.skipIf(process.platform === 'win32')`，不要靠 `if`
   直接 return——那样在 Windows 上会显示「通过」，掩盖根本没跑。
 - **`/tmp` 一律换成 `os.tmpdir()`**：Windows 没有 `/tmp`，写死会让整个文件在 CI 上失败。
-- **PowerShell/服务脚本不在 Linux 上执行**：`scripts/windows/**` 与
-  `.github/workflows/ci.yml` 的打包、安装步骤只能在 Windows runner 或用户机器上验证。
+- **PowerShell/桌面打包脚本不在 Linux 上执行**：`scripts/windows/**` 与
+  `.github/workflows/ci.yml` 的打包步骤只能在 Windows runner 或用户机器上验证。
   本机若装了 `pwsh`，最多做语法解析，不要声称已实测。
 - **CI 矩阵**：Ubuntu 与 Windows 都跑 `npm ci` + `npm run typecheck` + `npm test`；
-  另有 Windows 打包 job（有 Inno Setup 就出 EXE，否则出便携 zip）与解压 zip 跑
-  `/api/health` 的冒烟 job。改到 Windows 运行时逻辑后要看 Windows runner 的结果，
-  而不是只本地 Linux 绿。
+  另有 `windows-desktop` job 在 `windows-latest` 上构建 Tauri NSIS 安装包与便携 zip，
+  `windows-desktop-smoke` job 做最小冒烟。它们**不启动 GUI**，也不验证托盘、首次初始化、
+  局域网、防火墙或迁移脚本。
+  改到 Windows 运行时逻辑后要看 Windows runner 的结果，而不是只本地 Linux 绿。
+- **桌面 GUI 不能自动测**：窗口、托盘、关闭到托盘、首次令牌捕获、防火墙提示与安装器
+  都要在真实 Windows 上手工验收；CI 通过只代表构建与冒烟通过。
 
 测试基线：数量以 `npm test` 的**实际输出为准**（server + web 两段都算）。文档不写死具体
 数字，避免每加一个用例就过期；Lead 终检时如需回填，以当次完整输出为准。
@@ -286,9 +293,10 @@ curl -s localhost:8787/api/health | jq      # 启动告警
 - 想看模型目录：应用 Codex 配置后读 `~/.codex/llmapi-model-catalog.json`；
   `codex debug models` 可导出官方目录作为结构参照。
 - 会话问题：`data/instance.json` 被换了会导致所有会话失效。
-- **Windows 服务**：日志在 `C:\ProgramData\llmapi-manager\log\app.log`，用
-  `Get-Content -Wait` 跟踪；`Get-Service` 看服务状态，`Restart-Service` 让改过的
-  `.env` 生效。安装/卸载脚本失败时先看它输出的日志路径与 `.env` 内容。
+- **Windows 桌面版**：日志在 `%APPDATA%\llmapi-manager\log\`（`app.log` 与
+  `desktop-server.log`），用 `Get-Content -Wait` 跟踪；`Get-Process` 看 App 与它启动的
+  `node.exe`。改配置或局域网开关后用托盘「退出」再启动，没有 `Restart-Service`。
+  端口固定 8787；安装/迁移失败时先看日志与 `desktop.env`。
 - **Windows 明文 HTTP 同步**：两端都设 `SYNC_ALLOW_INSECURE=1`，否则一侧会以
   `sync.snapshot.mustUseHttps` / `sync.masterUrl.insecure` 拒绝；确认 Windows 防火墙
   放行了入站 TCP 8787（Private 配置档）。
@@ -317,8 +325,12 @@ curl -s localhost:8787/api/health | jq      # 启动告警
 - 改了 Windows 平台分支（进程、路径、BOM/CRLF、原子写重试、SPA fallback、SIGBREAK、DNS）→
   纯函数单测在 Linux 通过，POSIX-only 用例用 `skipIf(win32)`，并看 Windows CI 的结果；
   **不要因为本地 Linux 绿了就声称 Windows 已验证**。
-- 改了安装包/服务脚本 → 在 Windows runner 上构建并用解压后的产物跑 `/api/health` 冒烟；
-  Linux 上只能做静态检查。
+- 改了 Windows 桌面壳 / 打包 / 迁移脚本 → 在 Windows runner 上构建并跑冒烟；
+  GUI、托盘、首次初始化、局域网、防火墙、迁移脚本需真实 Windows 验收。Linux 上只能做
+  静态检查，**不要声称已实测**。
+- 改到桌面 sidecar 生命周期（启动、健康检查、托盘退出、首次令牌、LAN 开关）→ 确认端口
+  固定 8787、退出会停掉 sidecar、首次令牌能自动带入、数据落在 `%APPDATA%`、迁移脚本
+  不会覆盖已有数据。
 - 改了行为 → `docs/` 对应章节同步更新。
 - 没有把 `data/`、`.env`、`node_modules/`、`dist/` 加进版本库。
 
@@ -333,6 +345,6 @@ curl -s localhost:8787/api/health | jq      # 启动告警
 | 协议转换 | 只支持 `/v1/responses → openai`（Chat）一个方向 | 其余组合（如 `/v1/messages`）仍 501；需要时按 `gateway/convert/` 的结构补转换器 |
 | Codex 模型目录 | 上下文/输出上限与推理档位来自 `modelCapabilities`（上游 → modelinfo → models.dev → 默认），但缺逐模型手工编辑入口 | 需要时补一个"覆盖单模型能力"的编辑 UI，而不是改目录生成逻辑 |
 | 结束进程 | POSIX 用 `ps` + 信号，Windows 用 PowerShell `Get-CimInstance` + `taskkill /PID /T /F`；Windows 路径只有纯函数测试 | 在 Windows CI/用户机器验证进程表探测、pid 兜底与结束进程树的实际效果 |
-| Windows 安装包 | 脚本只能在 Windows 上执行，Linux 开发环境跑不了 | 依赖 Windows CI 的打包/冒烟 job；不要在本机声称已实测 |
+| Windows 桌面壳 | Tauri 窗口、托盘、首次初始化与安装器只能真实 Windows 验收；CI 只构建/冒烟 | 维护 Windows 手工验收清单；不要在本机声称已实测 |
 | 同步并发 | 两次 `pull` 同时触发时谁后写谁生效，没有锁 | 需要时加进程内互斥与"正在同步"状态 |
 | 前端数据层 | 自写 `useAsync` | 页面规模变大后再评估引入查询库，不要提前抽象 |

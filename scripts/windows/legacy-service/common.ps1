@@ -1,11 +1,15 @@
 ﻿<#
 .SYNOPSIS
-llmapi-manager Windows 安装/卸载/便携启动脚本的共用函数。
+[legacy] 旧版 Windows 服务安装/卸载脚本的共用函数。
 
 .DESCRIPTION
-由 install-service.ps1、uninstall-service.ps1、start-portable.ps1 通过点源（dot-source）引用：
+由 legacy-service/ 下的旧服务脚本通过点源（dot-source）引用：
 
     . (Join-Path $PSScriptRoot 'common.ps1')
+
+**这是冻结的旧服务代码**，只保留给旧版机器做卸载/修复。桌面版（Tauri）不再安装
+Windows 服务，构建脚本使用 `../build-common.ps1`，不要引用本文件，也不要把这里的
+服务专用函数（ACL、WinSW、ProgramData、robocopy 等）搬回 build-common.ps1。
 
 约束：
   * 只使用 Windows PowerShell 5.1 自带的语法与 cmdlet（不依赖 PowerShell 7 专有语法，

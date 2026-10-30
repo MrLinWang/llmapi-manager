@@ -37,8 +37,10 @@ web/                  React 18 + Vite + Tailwind
   src/pages/          Login / Setup / Layout / Overview / Providers / Models / Agents / Sync / Settings
   src/components/     ui 基础件、ProviderForm、CopyButton、LanguageSelect
   test/               页面装配测试 + 字典契约 + 硬编码扫描（jsdom + testing-library）
-scripts/windows/      Windows 便携包/Inno 安装器/WinSW 服务脚本（需在 Windows 运行）
-.github/workflows/    Ubuntu + Windows CI、Windows 打包与便携包冒烟
+scripts/windows/      Windows 桌面打包/旧服务迁移脚本（Tauri 壳在 src-tauri/，需在 Windows 运行）
+src-tauri/            Tauri 2 桌面壳：窗口、托盘、sidecar 生命周期、NSIS 打包配置（Rust）
+desktop/              桌面加载页（Tauri 窗口在 sidecar 就绪前显示）
+.github/workflows/    Ubuntu + Windows CI、Windows 桌面构建/冒烟
 ```
 
 ## 常用命令
@@ -50,9 +52,13 @@ npm run build               # 先 web（tsc --noEmit + vite build）再 server�
 npm start                   # 单进程提供服务端 API、网关与前端静态资源
 npm run typecheck           # 两个 workspace 都跑 tsc --noEmit
 npm test                    # server（vitest + 假上游）→ web（jsdom）
+npm run desktop:dev         # Vite + server + Tauri 开发窗口（需 Rust/WebView2；生产用安装包）
 ```
 
 单侧调试：`npm run dev -w server`、`npm test -w server`、`npm run test -w web`。
+
+Windows 的生产形态是 Tauri 桌面安装包（`scripts/windows/build-desktop.ps1`），
+`npm start` 仍是 Linux / 服务端模式；不要把 `npm start` 当 Windows 部署方式。
 
 ## 用规划与子 Agent 提高效率
 
@@ -190,6 +196,8 @@ npm test                    # server（vitest + 假上游）→ web（jsdom）
   首次初始化时用户名由用户自填，可能不等于默认值；按用户名判断会导致重启后误判为未初始化、
   重新发放令牌（等于开后门）。这一点被测试 `server/test/setup.test.ts` 固定住。
 - 初始化令牌只打印到控制台，**不要写进日志文件**；落盘只存 `sha256(token)`。
+  Windows 桌面壳会从 sidecar stdout 捕获令牌（自动带入 `/setup`），因此它落盘的
+  `desktop-server.log` 要按当前用户敏感文件保护，排查完可删除。
 - 完成后令牌必须作废，`POST /api/setup` 对已初始化的实例一律 409，绝不覆盖已有管理员。
 - `POST /api/setup` 与 `GET /api/setup/status` 是 `public` 路由（此时还没有账号可用），
   门禁是令牌本身；新增此类接口要同样想清楚"凭什么只有部署者能调用"。
@@ -468,21 +476,39 @@ Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities
 误判成"本地更新"。首次兜底的判据是**本地不早于远端（含相等）且内容不同 → 冲突**；
 时间戳相同但内容不同也必须判冲突，让远端静默覆盖等于丢掉本地改动。
 
-### 19. Windows 端是正式支持，但不要假装已实测
+### 19. Windows 端是正式支持（Tauri 桌面应用），但不要假装已实测
 
-- **进程**：`agents/processes.ts` 在 `win32` 用 PowerShell `Get-CimInstance Win32_Process`
+- **形态**：Windows 发行物是 **Tauri 2 桌面应用**，窗口内嵌现有 Web UI（不是浏览器标签页）；
+  后端是本地 Node / Fastify sidecar，随 App 启动与停止。**不再注册 `llmapi-manager`
+  Windows 服务**，没有 WinSW、`services.msc` 条目或 LocalSystem 服务账号。
+- **sidecar 生命周期**：桌面壳启动自带 Node 运行时执行 `server/dist/index.js`，等
+  `/api/health` 通过再加载窗口；关闭窗口默认隐藏到托盘（首次提示），托盘「退出」才停
+  sidecar。端口**固定 8787**，被占用时报错，不自动换端口。首次初始化时桌面壳从 sidecar
+  stdout 捕获一次性 `setup_...` 令牌并打开 `/setup#token=...`；中途退出会在下次启动轮换
+  `data/setup.json`。不要把 sidecar 的 `node.exe` 当独立服务管理，也不要留下孤儿进程。
+- **数据/迁移**：数据与日志在 `%APPDATA%\llmapi-manager\{data,log}`；`desktop.env` 只存
+  `DATA_ENCRYPTION_KEY`（当前用户 ACL）。桌面版以当前用户运行，`AGENT_HOME_DIR` 默认即
+  当前用户家目录。旧服务数据用 `scripts/windows/migrate-from-service.ps1` 迁移（在仓库/
+  构建机运行，**不打进便携 zip**）：停/删旧服务、把 `%ProgramData%\llmapi-manager\data`
+  复制到 APPDATA、导入加密密钥，并保留源数据。
+- **平台分支**：`agents/processes.ts` 在 `win32` 用 PowerShell `Get-CimInstance Win32_Process`
   取进程表（UTF-8 + `ConvertTo-Json -Compress`），探测失败要产生
   `agents.process.tableUnavailable` 告警，不能静默当"没有进程"；结束进程用
   `taskkill /PID <pid> /T /F`；`codex` 通过 `CODEX_BIN` 或 `cmd.exe /d /s /c` 调用，pid 文件兜底保留。
-- **文件/路径**：JSON/TOML 解析前 `stripBom`；`writeFileAtomic` 的 rename 在
-  `EPERM/EBUSY/EACCES` 重试；SPA fallback 用 `path.join`；`SIGBREAK` 关闭钩子；
-  `udpStack` 的 DNS 在 Windows 用 `Get-DnsClientServerAddress`。
-- **安装包/服务**：`scripts/windows/` 是 Windows 专属（Inno Setup + WinSW + 自带 Node 22 x64）。
-  `.env` 必须收紧 ACL；`ADMIN_PASSWORD` 只在首次启动建号、健康检查通过后从 `.env` 删除；
-  LocalSystem 服务必须显式 `AGENT_HOME_DIR` 并给 `.codex` / `.claude` 授权；防火墙默认不勾选。
-- **验证边界**：本仓库开发环境是 Linux，**不能声称 Windows 服务/安装器已实测**。改 Windows
-  逻辑时：纯函数测试要在 Linux 能跑；POSIX-only 用例用 `it.skipIf(process.platform === 'win32')`；
-  Windows 行为最终看 `windows-latest` CI / 用户机器。临时文件用 `os.tmpdir()`，不要写死 `/tmp`。
+  JSON/TOML 解析前 `stripBom`；`writeFileAtomic` 的 rename 在 `EPERM/EBUSY/EACCES` 重试；
+  SPA fallback 用 `path.join`；`SIGBREAK` 关闭钩子；`udpStack` 的 DNS 在 Windows 用
+  `Get-DnsClientServerAddress`。
+- **局域网**：默认只监听 `127.0.0.1:8787`。托盘「允许局域网访问」切到 `0.0.0.0` 并重启
+  sidecar，同时要在 Windows 防火墙放行入站 TCP 8787（Private / 专用网络）。
+  `PUBLIC_BASE_URL` 保持 `http://127.0.0.1:8787`。这台机器作为同步 `peer` / `master`
+  时必须走这个开关；开启后控制台与网关也对局域网可达，别长期开着。
+- **构建/安装**：`scripts/windows/build-desktop.ps1` 产出 Tauri NSIS 安装包与便携 zip；
+  CI job 是 `windows-desktop`（只构建/冒烟）。`npm run desktop:dev` 只用于开发。
+  安装包/zip **未签名**，SmartScreen 提示是预期行为；安装器带 WebView2 bootstrapper。
+- **验证边界**：本仓库开发环境是 Linux，**不能声称 Windows GUI / 托盘 / 首次初始化 /
+  安装器 / 局域网 / 防火墙 / 迁移已实测**。改 Windows 逻辑时：纯函数测试要在 Linux 能跑；
+  POSIX-only 用例用 `it.skipIf(process.platform === 'win32')`；Windows 行为最终看
+  `windows-desktop` CI 与真实 Windows 机器。临时文件用 `os.tmpdir()`，不要写死 `/tmp`。
 - Windows 原生 EasyTier 模块不编译；同局域网 HTTP 同步不依赖它，继续用 `builtin` 引擎。
 
 ## 改动后的自检清单
@@ -497,8 +523,10 @@ Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities
 - 改到 Windows 平台分支（进程、路径、BOM/CRLF、原子写重试、SPA fallback、SIGBREAK、DNS）→
   纯函数测试在 Linux 通过；POSIX-only 用例 `skipIf(win32)`；临时文件用 `os.tmpdir()`；
   Windows 实际行为最终看 `windows-latest` CI，**不要本地 Linux 绿了就声称 Windows 已验证**。
-- 改安装包/服务脚本 → 在 Windows runner 上构建并用解压后的便携包跑 `/api/health` 冒烟；
-  服务安装、ACL、防火墙、Inno 完成页需在真实 Windows 验证。
+- 改 Windows 桌面壳 / 打包 / 迁移脚本 → 在 Windows runner 上构建（`windows-desktop`）并
+  跑冒烟；GUI、托盘、首次初始化、局域网、防火墙、迁移脚本需在真实 Windows 验收，
+  **不要声称已实测**。改 sidecar 生命周期时确认：端口固定 8787、托盘退出停 sidecar、
+  首次令牌自动带入、数据在 `%APPDATA%`、LAN 开关会重启 sidecar、迁移不覆盖已有数据。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
 - 修改存储 → 补 `server/test/storage.test.ts`（原子写、损坏隔离、未来版本隔离）。
@@ -538,8 +566,9 @@ Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities
 - 不做**任意**协议互转：只有 `/v1/responses → openai`（Chat）这一个方向有转换器。
   `/v1/messages`、`/v1/chat/completions` 等其余组合一律 501，
   即便 `protocolConversion` 开着也不会转换——别偷偷转发到错误路径。
-- 不做计费、配额、多用户 UI、MCP/Skills/会话管理、桌面应用（托盘/GUI）打包；
-  Windows 服务安装包在 `scripts/windows/` 下提供，不属于桌面打包。
+- 不做计费、配额、多用户 UI、MCP/Skills/会话管理。Windows 的正式发行形态是 Tauri 2
+  桌面 App（窗口内嵌 Web UI + 本地 sidecar）；不提供 macOS/Linux 桌面打包，Linux 继续用
+  `npm start` 服务模式。
 - 同步不做**自动后台/定时/推送**，只做接收方手动拉取；不做删除传播（无 tombstone）；
   不做多 peer 网状同步。`peer` 两端都暴露快照，按高敏接口对待。
 - 不把 JSON 文件存储换成数据库，除非任务明确要求；Repository 接口已就位，替换时不要改路由契约。
@@ -556,7 +585,7 @@ Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities
 - `docs/gateway.md` 别名、选路、转发
 - `docs/agents.md` Agent 配置下发
 - `docs/sync.md` 多设备同步（peer、三方合并、冲突、Windows/局域网）
-- `docs/windows.md` Windows 安装包/服务/防火墙/排错
+- `docs/windows.md` Windows 桌面应用（Tauri）：安装/托盘/首次初始化/APPDATA/局域网/旧服务迁移/构建与排错
 - `docs/configuration.md` 环境变量与数据目录
 - `docs/security.md` 鉴权、权限、凭据与安全边界
 - `docs/development.md` 开发、测试、扩展方式

@@ -1,8 +1,13 @@
 ﻿<#
 .SYNOPSIS
-把 llmapi-manager 安装为 Windows 服务（WinSW 2.12 wrapper），并完成首次初始化。
+[legacy] 把 llmapi-manager 安装为 Windows 服务（WinSW 2.12 wrapper），并完成首次初始化。
 
 .DESCRIPTION
+**本脚本已退役，仅保留给旧版机器做修复/回滚，不再随桌面版发布。**
+桌面版（Tauri 2）不再安装 Windows 服务；从旧服务升级请改用
+`scripts/windows/migrate-from-service.ps1`。本脚本依赖旧版 `build-package.ps1`
+产出的发行包布局（该脚本已从仓库删除），不要用于新安装。
+
 适用于两种场景：
 
   1. Inno Setup 安装包：文件已经解压到 {app}，安装器调用
@@ -191,7 +196,7 @@ function Assert-Payload {
     }
     $serverModules = Join-Path $Root 'server\node_modules'
     if (-not (Test-Path -LiteralPath $serverModules -PathType Container)) {
-        throw "发行包缺少服务端依赖目录：$serverModules（请先用 build-package.ps1 构建发行包）"
+        throw "发行包缺少服务端依赖目录：$serverModules（请使用旧版 build-package.ps1 产出的发行包；该脚本已从仓库删除）"
     }
 }
 

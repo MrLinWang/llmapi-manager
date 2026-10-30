@@ -15,10 +15,13 @@
     "build": "npm run build -w web && npm run build -w server",
     "start": "npm run start -w server",
     "typecheck": "npm run typecheck -w server && npm run typecheck -w web",
-    "test": "npm run test -w server && npm run test -w web"
+    "test": "npm run test -w server && npm run test -w web",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build"
   },
   "devDependencies": {
-    "concurrently": "^9.0.1"
+    "concurrently": "^9.0.1",
+    "@tauri-apps/cli": "^2.0.0"
   },
   "engines": {
     "node": ">=18.18"

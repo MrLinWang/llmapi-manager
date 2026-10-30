@@ -9,7 +9,7 @@
 | `codex` | Codex CLI | `~/.codex/config.toml`、`~/.codex/auth.json`、`~/.codex/llmapi-model-catalog.json`（整份生成） | `responses` |
 | `claude-code` | Claude Code | `~/.claude/settings.json` | `anthropic` |
 
-路径由 `AgentPathResolver` 解析：优先取 `AGENT_HOME_DIR`，否则用服务进程所属 OS 用户的家目录。
+路径由 `AgentPathResolver` 解析：优先取 `AGENT_HOME_DIR`，否则用运行进程的 OS 用户家目录。
 它按 `{ tenantId, userId }` 计算，`registerTenantWorkspace()` 已预留为"每租户独立工作区"的入口。
 结束进程时服务端还会读 `CODEX_HOME`（若设置）来定位 Codex 的配置目录。
 
@@ -20,11 +20,10 @@ Windows 上同一组文件落在 `C:\Users\<用户名>\` 下：
 | Codex CLI | `C:\Users\<用户名>\.codex\config.toml`、`auth.json`、`llmapi-model-catalog.json` |
 | Claude Code | `C:\Users\<用户名>\.claude\settings.json` |
 
-Windows 服务默认以 **LocalSystem** 运行，它自己的家目录是
-`C:\Windows\system32\config\systemprofile`。所以安装器会把 `AGENT_HOME_DIR` 显式设为
-`C:\Users\<安装用户>`，并给服务账号授予该目录下 `.codex` / `.claude` 的修改权限——
-否则文件会写进系统配置目录，用户自己的 Codex 永远读不到（表现为"应用成功但配置没生效"）。
-重装、换用户或手动改过权限后，这是第一个要检查的地方。
+Windows 桌面版以**当前登录用户**运行，sidecar 继承该用户身份，所以默认家目录就是
+`C:\Users\<用户名>`；写 `.codex` / `.claude` 与读 `%APPDATA%` 都是同一个用户权限，
+不需要额外的服务账号授权。只有显式覆盖了 `AGENT_HOME_DIR`、或用另一个 Windows 用户启动
+App 时，才需要核对目标目录是否真的是该用户的家目录。
 
 ## 选哪个供应商
 
@@ -598,8 +597,8 @@ POSIX 上 `codex` 前面只能是行首或 `/`、后面只能是空白或结束�
 定位配置目录时优先用环境变量 `CODEX_HOME`，否则用 `AGENT_HOME_DIR`（再否则 OS 家目录）下的 `.codex`；
 该目录不存在时不会强行设 `CODEX_HOME`（codex 会对不存在的路径报错，但那只是"本机还没配过"）。
 
-**Windows 上 `codex` 可能不在 PATH 里。** 服务以 LocalSystem 运行时，PATH 通常不含
-npm 全局安装目录（`%AppData%\npm`），`codex app-server daemon stop` 会直接失败。
+**Windows 上 `codex` 可能不在 PATH 里。** 桌面 App 从资源管理器/开始菜单启动时，PATH
+通常不含 npm 全局安装目录（`%AppData%\npm`），`codex app-server daemon stop` 会直接失败。
 用 `CODEX_BIN` 指向可执行文件的绝对路径（如 `C:\Users\me\AppData\Roaming\npm\codex.cmd`）；
 服务端会通过 `cmd.exe /d /s /c` 调用它——`.cmd` 是批处理包装，不能像可执行文件那样直接 exec。
 
@@ -657,7 +656,7 @@ Claude Code 没有常驻进程，该按钮只对 Codex 显示；直接调接口�
 | 应用后 Agent 仍走旧配置 | Agent 进程需要重启 |
 | 还原时出现 conflicts | 被写入的键后来被手动改过，按提示自行处理 |
 | 预览报「字段 xxx 不是对象」 | 目标 JSON 里该路径是标量，无法下钻；需手动整理 |
-| Windows 服务下应用配置提示成功，但用户自己的 Codex 没变化 | 文件可能写进了 `C:\Windows\system32\config\systemprofile`：`AGENT_HOME_DIR` 没有指向安装用户目录，或安装器授予的 `.codex` 修改权限丢失 |
-| Windows 下「退出 Codex 进程」提示找不到 `codex` | LocalSystem 的 PATH 通常不含 npm 全局安装目录：用 `CODEX_BIN` 指向 `codex.cmd` 的绝对路径，然后重启服务 |
+| Windows 桌面版应用配置提示成功，但用户自己的 Codex 没变化 | 文件可能写到了别的用户家目录：检查 `AGENT_HOME_DIR` 是否被覆盖，或 App 是否以另一个 Windows 用户运行 |
+| Windows 下「退出 Codex 进程」提示找不到 `codex` | 桌面 App 的 PATH 通常不含 npm 全局安装目录：用 `CODEX_BIN` 指向 `codex.cmd` 的绝对路径，然后重启 App |
 | 结束进程的 `warnings` 里出现「无法读取进程表」 | PowerShell 进程探测失败（被策略禁用、编码/权限问题）。它不会被当成"没有进程"：`killed` 可能偏低，按提示手动清理 |
 | Windows 上 `config.toml` / `settings.json` 突然解析失败 | 编辑器可能加了 UTF-8 BOM 或改成了 CRLF。服务会先剥离 BOM、归一 CRLF；仍失败说明文件本身不是合法 TOML/JSON |

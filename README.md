@@ -40,11 +40,13 @@ implementation — neither project's source was copied.
   **three-way**: "only the other machine changed" converges automatically, while genuine
   divergence becomes a conflict that keeps both versions for you to arbitrate. Deletions are
   not propagated, and the pull token is supplied per request and never persisted.
-- **Windows service and installer**: an Inno Setup installer
-  (`llmapi-manager-setup-<version>-x64.exe`) plus a portable zip. A WinSW-managed service ships
-  its own Node 22 LTS x64, writes into the installing user's `.codex` / `.claude` through
-  `AGENT_HOME_DIR`, can open inbound TCP 8787 on the Private firewall profile (opt-in), and
-  supports `CODEX_BIN` for `codex` installed outside the service account's PATH.
+- **Windows desktop app (Tauri 2)**: the Windows installer ships a native desktop app instead
+  of a Windows service. The window embeds the existing web console (no address bar) and
+  starts/stops a bundled local Node/Fastify sidecar with the app. Closing the window hides it
+  to the tray (with a first-time hint); “Quit” in the tray stops the gateway. Data and logs
+  live under `%APPDATA%\llmapi-manager\`, and `desktop.env` keeps `DATA_ENCRYPTION_KEY` for
+  the current user. LAN access is opt-in from the tray when this machine acts as a sync
+  `peer` / `master`.
 - **Observability**: request log plus today's stats (request count, success rate, average
   latency).
 - **Bilingual UI and bilingual errors**: the console switches between Simplified Chinese and
@@ -70,22 +72,35 @@ npm run build
 npm start               # http://127.0.0.1:8787
 ```
 
-On Windows, use the installer or the portable zip instead of the source checkout:
+On Windows, install the Tauri desktop app instead of running from source:
 
-1. Run `llmapi-manager-setup-<version>-x64.exe` (Inno Setup) or unpack the portable zip and run
-   `scripts/windows/install-service.ps1` as Administrator.
-2. The installer writes `.env` (`HOST=0.0.0.0`, `PORT=8787`,
-   `PUBLIC_BASE_URL=http://127.0.0.1:8787`, data/log under `C:\ProgramData\llmapi-manager\`),
-   registers a WinSW service, grants that service account write access to the installing user's
-   `.codex` / `.claude`, and can add an inbound TCP 8787 rule for the Private profile (the
-   installer option is off by default; tick it when other devices must reach this machine).
-3. Open http://127.0.0.1:8787 and finish setup with the one-time token printed in the service
-   log. The temporary `ADMIN_PASSWORD` is removed from `.env` once the health check passes.
+1. Run `llmapi-manager-<version>-x64-setup.exe` (or unpack the portable zip and launch the app).
+   The package is unsigned, so SmartScreen may warn — verify the SHA256 first and choose
+   “More info” → “Run anyway” if you trust the source.
+2. First launch starts the bundled sidecar, captures the one-time `setup_...` token from its
+   stdout and opens `/setup#token=...` in the embedded window. Create your own admin username
+   and password; an existing account opens the login/console instead. If setup is interrupted,
+   the next launch issues a fresh token.
+3. Closing the window hides the app to the tray; choose “Quit” in the tray to stop the gateway.
+   Data and logs live in `%APPDATA%\llmapi-manager\`; `desktop.env` holds
+   `DATA_ENCRYPTION_KEY`.
+4. To let other devices pull from this machine (sync `peer` / `master`), enable
+   “Allow LAN access” in the tray (this restarts the sidecar) and allow inbound TCP 8787 on the
+   Private firewall profile. `PUBLIC_BASE_URL` stays `http://127.0.0.1:8787`; other devices use
+   `http://<LAN-IP>:8787` as the peer URL.
 
-Upgrade, uninstall, firewall and troubleshooting details: [docs/windows.md](./docs/windows.md).
+The port is fixed at **8787**; if it is occupied the app fails to start rather than switching
+ports. Machines upgrading from the old WinSW service can run
+`scripts/windows/migrate-from-service.ps1` from the repo or build machine (it is not shipped in
+the portable zip) to stop the old service, copy `%ProgramData%` data into `%APPDATA%` and
+import the encryption key (the source data is kept).
 
-> The Windows installer/service scripts are not exercised in this repository's Linux
-> development environment. Verify them on Windows CI or on a real machine before relying on them.
+Upgrade, uninstall, firewall, WebView2 and troubleshooting details:
+[docs/windows.md](./docs/windows.md).
+
+> The Windows desktop shell (Tauri window, tray, sidecar lifecycle, installer) is not exercised
+> in this repository's Linux development environment. CI's `windows-desktop` jobs only build
+> and smoke-test the package; verify the GUI on a real Windows machine before relying on it.
 
 Other commands: `npm run typecheck`, `npm test`.
 
@@ -100,7 +115,7 @@ Full docs live in [docs/](./docs/README.md) (written in Chinese):
 | [docs/gateway.md](./docs/gateway.md) | Aliases, routing, protocol matching, streaming |
 | [docs/agents.md](./docs/agents.md) | Codex / Claude Code provisioning details (including Windows paths and process handling) |
 | [docs/sync.md](./docs/sync.md) | Multi-device sync: roles (`master` / `follower` / `peer`), bidirectional manual pull, three-way merge, conflicts, Windows/LAN |
-| [docs/windows.md](./docs/windows.md) | Windows installer/portable package, WinSW service, upgrade/uninstall, service account, firewall, `CODEX_BIN` |
+| [docs/windows.md](./docs/windows.md) | Windows desktop app (Tauri 2): install, tray, first-run setup, `%APPDATA%` data, LAN/firewall, legacy service migration, uninstall, port conflicts, SmartScreen/WebView2, build/CI |
 | [docs/configuration.md](./docs/configuration.md) | Environment variables, data directory, deployment, migration |
 | [docs/security.md](./docs/security.md) | Auth, permission matrix, credentials and security boundaries |
 | [docs/development.md](./docs/development.md) | Development, testing, extension guide |
@@ -185,25 +200,26 @@ See [.env.example](.env.example). The common ones:
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `HOST` | `127.0.0.1` | Listen address; put an HTTPS reverse proxy in front if exposed. The Windows installer sets `0.0.0.0` so the LAN can reach the console; the firewall and network profile bound that exposure |
-| `PORT` | `8787` | Listen port |
-| `PUBLIC_BASE_URL` | derived from HOST:PORT | Gateway URL written into Agent config; must be set explicitly behind a proxy or in a container. The Windows installer pins `http://127.0.0.1:8787` so local Agents use loopback; change it only when other devices' Agents must also go through this gateway |
+| `HOST` | `127.0.0.1` | Listen address; put an HTTPS reverse proxy in front if exposed. The Windows desktop app binds loopback by default; the tray “Allow LAN access” switch changes it to `0.0.0.0` and restarts the sidecar |
+| `PORT` | `8787` | Listen port. The Windows desktop app pins it to 8787 and does not fall back to another port |
+| `PUBLIC_BASE_URL` | derived from HOST:PORT | Gateway URL written into Agent config; must be set explicitly behind a proxy or in a container. The Windows desktop app pins `http://127.0.0.1:8787` so local Agents use loopback; change it only when other devices' Agents must also go through this gateway |
 | `TRUST_PROXY` | off | Set to `1` behind an HTTPS reverse proxy so `X-Forwarded-Proto` is trusted (only from loopback). Do **not** enable it for direct LAN HTTP — there is no proxy to trust, and a forged header would bypass the sync HTTPS check |
 | `SYNC_ALLOW_INSECURE` | off | Set to `1` to allow sync snapshots/pulls over plain HTTP. Trusted LAN or tunnel only, and **both ends** must set it; the snapshot carries plaintext upstream keys |
-| `DATA_DIR` | `data` | Data directory; relative paths resolve against the process cwd (i.e. `server/data` under npm scripts). Set `../data` to pin it to the repo root. The Windows installer uses `C:\ProgramData\llmapi-manager\data` |
+| `DATA_DIR` | `data` | Data directory; relative paths resolve against the process cwd (i.e. `server/data` under npm scripts). Set `../data` to pin it to the repo root. The Windows desktop app uses `%APPDATA%\llmapi-manager\data` |
 | `ADMIN_USERNAME` | `admin` | Initial admin username, used only when first creating the account |
-| `ADMIN_PASSWORD` | none | Escape hatch: skips web setup and creates the account with this password directly (handy for Docker/systemd). The Windows installer generates a temporary one and removes it from `.env` after the health check |
-| `DATA_ENCRYPTION_KEY` | none | Key used to encrypt provider keys and gateway tokens at rest; if unset they are stored in plaintext and a warning is shown. Sync transmits plaintext keys on the wire because this key is per-machine |
+| `ADMIN_PASSWORD` | none | Escape hatch for headless deployments (Docker/systemd): skips web setup and creates the account with this password directly. The Windows desktop app does not use it — first launch captures the setup token automatically |
+| `DATA_ENCRYPTION_KEY` | none | Key used to encrypt provider keys and gateway tokens at rest; if unset they are stored in plaintext and a warning is shown. The Windows desktop app generates it into `%APPDATA%\llmapi-manager\desktop.env` (current-user ACL). Sync transmits plaintext keys on the wire because this key is per-machine |
 | `LOG_LANGUAGE` | `zh` | Language (`zh` / `en`) of runtime logs, the startup banner and CLI output. Separate from the UI language: the API follows the request language, logs follow this setting |
-| `LOG_DIR` | repo-root `log/` | Runtime log directory; set to `off` for console-only. The Windows installer uses `C:\ProgramData\llmapi-manager\log` |
+| `LOG_DIR` | repo-root `log/` | Runtime log directory; set to `off` for console-only. The Windows desktop app uses `%APPDATA%\llmapi-manager\log` |
 | `LOG_MAX_BYTES` / `LOG_MAX_FILES` | `5242880` / `5` | Rotation threshold and number of retained files |
-| `AGENT_HOME_DIR` | OS home | Root for Agent config (holds `.codex` / `.claude`). The Windows service runs as LocalSystem, so the installer points this at the installing user's profile and grants the service account write access; otherwise files land in the system profile |
-| `CODEX_BIN` | `codex` on PATH | Absolute path to the Codex executable. The LocalSystem service PATH usually lacks the npm global bin directory, so stopping Codex processes needs this on Windows |
+| `AGENT_HOME_DIR` | OS home | Root for Agent config (holds `.codex` / `.claude`). The Windows desktop app runs as the current user, so its default (that user's profile) is already correct — no service-account override is needed |
+| `CODEX_BIN` | `codex` on PATH | Absolute path to the Codex executable. A desktop app launched from Explorer may not inherit the shell PATH, so set this if stopping Codex processes cannot find `codex` |
 
 ## Data and security boundaries
 
 ```
-data/                                  # actual location is DATA_DIR; server/data under npm scripts
+data/                                  # actual location is DATA_DIR (server/data under npm scripts;
+                                       # %APPDATA%\llmapi-manager\data in the Windows desktop app)
 ├── identity.json                       # tenants and accounts (passwords stored as scrypt hashes only)
 ├── instance.json                       # session signing secret (rebuildable; also the sync masterId)
 ├── setup.json                          # first-run setup token (hashed), cleared once completed
@@ -293,8 +309,10 @@ from the `Principal`. The domain model and API contracts do not need to change.
   (or account) can export every upstream key in plaintext. Grant a dedicated token with
   `expiresAt`, revoke it after use, and only enable `peer` on machines you are willing to expose
   to each other.
-- No billing, quotas, multi-user UI, MCP/Skills/session management, or desktop packaging.
-  (Windows service/installer is supported; macOS/Linux packaging is not.)
+- No billing, quotas, multi-user UI, MCP/Skills/session management. The Windows release is a
+  Tauri 2 desktop app; macOS/Linux desktop packaging is not provided, and Linux keeps the
+  `npm start` service mode. Windows GUI behaviour and the installer need real Windows
+  acceptance; CI only builds and smoke-tests them.
 - **Log language and API language are two separate settings**: API responses follow the request
   language (tenant setting > `Accept-Language`), while runtime logs, the startup banner and CLI
   output follow `LOG_LANGUAGE` (Chinese by default). Logs are read by whoever deploys the
@@ -330,8 +348,10 @@ web/
   src/lib/                api, auth, useAsync, types, labels (enum message keys)
   src/i18n/               i18next init, language detection, date localisation, locales/{zh,en}/
   test/                   Page assembly tests + dictionary contract + hardcoded-text scan (jsdom)
-scripts/windows/          PowerShell installer/service/packaging scripts (run on Windows)
-.github/workflows/        CI: Ubuntu + Windows test matrix, Windows package/smoke jobs
+scripts/windows/          PowerShell desktop packaging + legacy service migration (run on Windows)
+src-tauri/                Tauri 2 desktop shell: window, tray, sidecar lifecycle, NSIS config
+desktop/                  Desktop loading screen served by the Tauri window
+.github/workflows/        CI: Ubuntu + Windows test matrix, Windows desktop build/smoke jobs
 ```
 
 ## Credits
