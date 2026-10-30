@@ -173,10 +173,9 @@ fn spawn_server(app: AppHandle, state: Arc<AppState>) {
                 if let Ok(mut guard) = state.server.lock() {
                     *guard = Some(server);
                 }
-                let url = if setup_needed {
-                    format!("{ADDRESS}/setup#token={}", token.unwrap_or_default())
-                } else {
-                    format!("{ADDRESS}/")
+                let url = match token {
+                    Some(token) if setup_needed => format!("{ADDRESS}/setup#token={token}"),
+                    _ => format!("{ADDRESS}/"),
                 };
                 navigate(&app, url);
             }

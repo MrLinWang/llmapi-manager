@@ -24,6 +24,42 @@ impl Sidecar {
         lan_access: bool,
         setup_needed: bool,
     ) -> Result<(Self, Option<String>), String> {
+        let mut last_error = String::new();
+        for attempt in 0..2 {
+            let (mut server, token) = Self::start_once(paths, runtime, lan_access, setup_needed)?;
+            if !setup_needed || token.is_some() {
+                return Ok((server, token));
+            }
+            // ADMIN_PASSWORD can create the owner during bootstrap, in which case
+            // there is intentionally no setup token and the app should open the
+            // login page directly.
+            if paths.has_users() {
+                return Ok((server, None));
+            }
+
+            server.stop();
+            if attempt == 1 {
+                last_error = format!(
+                    "服务已启动，但连续两次都没有捕获到初始化令牌。请查看 {} 后重试。",
+                    paths.log.join("desktop-server.log").display()
+                );
+                break;
+            }
+            // A stale setup.json makes the server reuse a token hash and skip
+            // printing the token. Remove it and give the server one clean start.
+            fs::remove_file(paths.setup_file()).map_err(|error| {
+                format!("无法清理旧的初始化状态 {}: {error}", paths.setup_file().display())
+            })?;
+        }
+        Err(last_error)
+    }
+
+    fn start_once(
+        paths: &DesktopPaths,
+        runtime: &Path,
+        lan_access: bool,
+        setup_needed: bool,
+    ) -> Result<(Self, Option<String>), String> {
         let node = runtime.join("node.exe");
         let entry = runtime.join("server").join("dist").join("index.js");
         if !node.is_file() {
@@ -38,6 +74,7 @@ impl Sidecar {
         fs::create_dir_all(&paths.log)
             .map_err(|error| format!("无法创建日志目录 {}: {error}", paths.log.display()))?;
         let log_path = paths.log.join("desktop-server.log");
+        let log_offset = fs::metadata(&log_path).map(|meta| meta.len()).unwrap_or(0);
         let token = Arc::new(Mutex::new(None::<String>));
         let stderr_tail = Arc::new(Mutex::new(String::new()));
 
@@ -100,20 +137,23 @@ impl Sidecar {
 
         let mut captured = None;
         if setup_needed {
-            for _ in 0..15 {
+            for _ in 0..25 {
                 if let Some(value) = token.lock().ok().and_then(|guard| guard.clone()) {
                     captured = Some(value);
                     break;
                 }
                 thread::sleep(Duration::from_millis(200));
             }
+            // Belt-and-braces: if the stdout reader thread missed the line but
+            // the log did receive it, recover the token from bytes appended by
+            // this launch only (never from a previous launch's log).
             if captured.is_none() {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(
-                    "服务已启动，但没有捕获到初始化令牌。请删除 data/setup.json 后重试。"
-                        .to_string(),
-                );
+                if let Ok(bytes) = fs::read(&log_path) {
+                    if bytes.len() as u64 > log_offset {
+                        let text = String::from_utf8_lossy(&bytes[log_offset as usize..]);
+                        captured = text.lines().rev().find_map(parse_setup_token);
+                    }
+                }
             }
         }
 
