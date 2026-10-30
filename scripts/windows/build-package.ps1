@@ -426,15 +426,21 @@ if (-not $NoInstaller.IsPresent) {
             Remove-Item -LiteralPath $setupPath -Force
         }
 
-        # 把绝对路径写进一个临时 .iss 再 #include 原脚本，避免命令行 /D 参数在含空格路径上的引号问题
+        # 直接把 installer.iss 拼到临时 wrapper 里，避免 ISPP 的 #include 在 Windows
+        # 绝对路径（含空格/反斜杠）上解析失败。原脚本里的 #ifndef 默认值仍保留，
+        # 但前面的 #define 会先命中。
         $includePath = Join-Path $PSScriptRoot 'installer.iss'
+        $installerBody = [System.IO.File]::ReadAllText($includePath)
+        if ($installerBody.Length -gt 0 -and $installerBody[0] -eq [char]0xFEFF) {
+            $installerBody = $installerBody.Substring(1)
+        }
         $generatedIss = Join-Path $OutputDir ('build-installer-' + $Version + '.iss')
         $generatedContent = @(
             '; 由 build-package.ps1 自动生成，请勿提交',
             '#define AppVersion "' + $Version + '"',
             '#define StageDir "' + $stageDir + '"',
             '#define OutputDir "' + $OutputDir + '"',
-            '#include "' + $includePath + '"'
+            $installerBody
         ) -join "`r`n"
         Write-TextFileUtf8 -Path $generatedIss -Text ($generatedContent + "`r`n") -WithBom
 
