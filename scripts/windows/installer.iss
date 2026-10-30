@@ -1,7 +1,6 @@
 ﻿; llmapi-manager Inno Setup 6 安装脚本
 ;
-; 由 build-package.ps1 自动调用 ISCC 编译。构建脚本会把 AppVersion / StageDir / OutputDir
-; 定义写进一个临时 wrapper .iss，再 #include 本文件（避免命令行 /D 参数在含空格路径上的引号问题）。
+; 由 build-package.ps1 通过命令行 /D 传入 AppVersion / StageDir / OutputDir 后调用 ISCC。
 ;
 ; 安装流程：
 ;   1. 复制 stage 到 {app}；

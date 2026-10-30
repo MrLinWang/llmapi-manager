@@ -426,28 +426,13 @@ if (-not $NoInstaller.IsPresent) {
             Remove-Item -LiteralPath $setupPath -Force
         }
 
-        # 直接把 installer.iss 拼到临时 wrapper 里，避免 ISPP 的 #include 在 Windows
-        # 绝对路径（含空格/反斜杠）上解析失败。原脚本里的 #ifndef 默认值仍保留，
-        # 但前面的 #define 会先命中。
+        # 直接用命令行 /D 传入三个路径变量，让 Inno 读取仓库里的 installer.iss。
+        # PowerShell 会把每个参数作为单独 argv 传给 ISCC；值里的反斜杠/空格由 ISCC 处理。
         $includePath = Join-Path $PSScriptRoot 'installer.iss'
-        $installerBody = [System.IO.File]::ReadAllText($includePath)
-        if ($installerBody.Length -gt 0 -and $installerBody[0] -eq [char]0xFEFF) {
-            $installerBody = $installerBody.Substring(1)
-        }
-        $generatedIss = Join-Path $OutputDir ('build-installer-' + $Version + '.iss')
-        $generatedContent = @(
-            '; 由 build-package.ps1 自动生成，请勿提交',
-            '#define AppVersion "' + $Version + '"',
-            '#define StageDir "' + $stageDir + '"',
-            '#define OutputDir "' + $OutputDir + '"',
-            $installerBody
-        ) -join "`r`n"
-        Write-TextFileUtf8 -Path $generatedIss -Text ($generatedContent + "`r`n") -WithBom
 
         Write-Host "调用 ISCC：$iscc"
-        & $iscc $generatedIss
+        & $iscc "/DAppVersion=$Version" "/DStageDir=$stageDir" "/DOutputDir=$OutputDir" $includePath
         $isccCode = $LASTEXITCODE
-        Remove-Item -LiteralPath $generatedIss -Force -ErrorAction SilentlyContinue
         if ($isccCode -ne 0) {
             throw "ISCC 编译失败（退出码 $isccCode）。请查看上方输出。"
         }
