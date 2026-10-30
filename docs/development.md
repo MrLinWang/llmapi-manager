@@ -80,6 +80,7 @@ Windows 打包与服务脚本（**需在 Windows 上运行**，Linux 上不可�
 | `server/test/storage.test.ts` | 原子写、Windows 下 `rename` 遇 `EPERM` / `EBUSY` / `EACCES` 的重试、损坏隔离、未来版本隔离 |
 | `server/test/logger.test.ts` | 运行日志落盘、级别阈值、打码、按大小滚动与保留个数 |
 | `server/test/smoke.test.ts` | 端到端：登录、供应商（含三种 `apiType` 与拉取模型列表）、网关令牌、API 令牌（生命周期 / 收窄 403 / 不能改口令与建令牌 / 吊销即失效）、转发（含流式/回退/501 双向/4xx 透传/自动开启转换）、诊断接口（默认 404、开启后路由预演与自检清单、只读令牌 403）、Agent（含模型目录与 `web_search` 开关、结束进程）、界面语言设置（默认 null / 落盘 / 非法值 400 / 读路径降级 / 只读令牌 403）、越权、持久化 |
+| `server/test/easytierNoise.test.ts` / `easytierInterop.test.ts` | 与真实 EasyTier 节点握手；只有编译出 `native/easytier-node/*.node` 时才跑。干净检出（含 CI）没有 Rust 产物时整组 `skip`，这是预期行为，不是失败 |
 | `web/test/pages.test.tsx` | 页面装配：登录、首次设置、供应商（含获取模型与标签片段编辑）、模型（含三种协议选项与文案）、Agent、概览、设置页语言切换（落盘 PATCH + 刷新身份 + 无权限只读）（jsdom + 假 fetch） |
 | `web/test/i18n.test.tsx` | 字典契约：中英键集一致、复数后缀成对、无空文案、插值变量一致、关键键存在 |
 | `web/test/i18n-guard.test.tsx` | 界面文案硬编码扫描（除字典与白名单外 `web/src` 不得出现中文字面量）、语言切换与 `<html lang>` 同步 |

@@ -336,10 +336,25 @@ function localIPv4ForNoise(): string | null {
   return null;
 }
 
-const NATIVE_MODULE_PATH = path.join(
-  __dirname, '..', '..', 'native', 'easytier-node', 'index.js',
-);
-const sessionAvailable = fs.existsSync(NATIVE_MODULE_PATH) && localIPv4ForNoise() !== null;
+const NATIVE_DIR = path.join(__dirname, '..', '..', 'native', 'easytier-node');
+const NATIVE_MODULE_PATH = path.join(NATIVE_DIR, 'index.js');
+
+/**
+ * 原生模块是否可用。
+ *
+ * 必须检查平台二进制（`.node`）：`index.js` 只是加载器，未编译时照样存在，
+ * 真正 `require` 时才会抛错。CI 没有 Rust 产物，只看 `index.js` 会把
+ * 本应 skip 的用例变成失败。
+ */
+function nativeModuleAvailable(): boolean {
+  try {
+    return fs.readdirSync(NATIVE_DIR).some((name) => name.endsWith('.node'));
+  } catch {
+    return false;
+  }
+}
+
+const sessionAvailable = nativeModuleAvailable() && localIPv4ForNoise() !== null;
 
 interface RealNode {
   stop(): Promise<void>;

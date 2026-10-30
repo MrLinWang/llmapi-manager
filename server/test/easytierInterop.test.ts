@@ -51,10 +51,16 @@ function localIPv4(): string | null {
 const NATIVE_DIR = path.join(__dirname, '..', '..', 'native', 'easytier-node');
 const NATIVE_MODULE = path.join(NATIVE_DIR, 'index.js');
 
-/** 原生模块是否可用（编译过才有 .node 文件）。 */
+/**
+ * 原生模块是否可用。
+ *
+ * 必须检查平台二进制（`.node`），不能只检查 `index.js`：后者是手写加载器，
+ * 仓库里总是存在；未编译时它会在 `require` 阶段抛错。CI 是干净检出，
+ * 没有 Rust 构建产物，只看 `index.js` 会让本应 skip 的用例直接失败。
+ */
 function nativeModuleAvailable(): boolean {
   try {
-    return fs.existsSync(NATIVE_MODULE);
+    return fs.readdirSync(NATIVE_DIR).some((name) => name.endsWith('.node'));
   } catch {
     return false;
   }
