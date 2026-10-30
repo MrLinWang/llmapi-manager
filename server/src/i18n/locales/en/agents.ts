@@ -67,6 +67,8 @@ export const enAgents: typeof zhAgents = {
     allExited: 'Confirmed that all related processes have exited',
     noneForAgent: '{{agent}} has no resident process to stop',
     noneRunning: 'No Codex process is running on this machine',
+    tableUnavailable:
+      'Could not read the local process table, so running Codex processes could not be detected. Check that PowerShell is available, or stop the processes manually',
   },
   catalog: {
     providedBy: '{{model}} provided by {{provider}}',

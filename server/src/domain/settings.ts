@@ -60,6 +60,15 @@ export interface AgentTargetPreference {
   directProviderId: string | null;
   /** 直连时指定用哪个模型；null 表示用该供应商的第一个模型 */
   directModel: string | null;
+  /**
+   * 最后一次改动时间。
+   *
+   * 同步需要按 Agent 做三方合并与冲突判定，而 `settings.updatedAt` 是整份设置的
+   * 时间，改语言这类无关设置也会让它变化——拿它当 AgentTarget 的"谁更新"依据
+   * 会产生假冲突。老数据没有这个字段，读出来当作"未知"：合并时给不了更强的
+   * 时间证据，就把远端当作更新（同步的目标是收敛）。
+   */
+  updatedAt?: string;
 }
 
 /**

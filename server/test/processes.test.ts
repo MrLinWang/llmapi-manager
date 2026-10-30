@@ -65,7 +65,12 @@ describe('Codex 进程识别', () => {
     expect(parseElapsedSeconds('1-02:03:04')).toBe(93784);
   });
 
-  it('daemon stop 失败时按 pid 文件兜底结束守护进程', async () => {
+  // 这条用例会真的 spawn 进程并发 SIGTERM：用 bash/setsid 造两个 sleep 进程，
+  // 而 Windows 上没有 bash/setsid，进程结束路径走 taskkill（另由进程表/命令组的纯函数
+  // 用例覆盖）。POSIX-only 的用例必须显式 skip，否则 Windows CI 上会红。
+  it.skipIf(process.platform === 'win32')(
+    'daemon stop 失败时按 pid 文件兜底结束守护进程',
+    async () => {
     // 真实场景：~/.codex 只读时 `codex app-server daemon stop` 会立刻失败
     // （打不开 daemon.lock），daemon 却还活着。用户点"退出进程"后 Codex 依然可用，
     // 只能自己去 pkill —— 所以必须读 daemon 自己写的 pid 文件兜底。
@@ -107,5 +112,6 @@ describe('Codex 进程识别', () => {
     expect(alive(updaterPid)).toBe(false);
 
     fs.rmSync(home, { recursive: true, force: true });
-  });
+    },
+  );
 });

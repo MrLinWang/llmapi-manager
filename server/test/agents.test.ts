@@ -13,6 +13,7 @@ import {
   applyAgentWrites,
   applyJsonWrites,
   buildPreviewEntries,
+  isEmptyDocument,
   revertAgentWrites,
   type DesiredWrites,
 } from '../src/agents/patch';
@@ -67,6 +68,94 @@ describe('JSON 补丁', () => {
     // 这条守的是最危险的一种"看似容错"的写法：解析失败就当成空文件继续写。
     // 那样用户的整个 Claude Code 配置会被一个 {} 覆盖掉，且无法恢复。
     expect(() => applyJsonWrites('{ broken', [{ path: 'a', value: 'b' }])).toThrow();
+  });
+});
+
+describe('UTF-8 BOM 兼容', () => {
+  // Windows 记事本旧版 / PowerShell `Out-File` 默认会给文件加 BOM。
+  // 不剥 BOM 的后果分两级：JSON.parse 直接抛错（配置压根读不出来）；
+  // TOML 首行键匹配不到（看起来"解析成功"，其实把我们自己的键写重复了）。
+  // 最糟的是"解析失败就当成空文件"——那会把用户整份配置覆盖掉。
+
+  it('JSON：带 BOM 也能读取当前值、改写后输出不带 BOM', () => {
+    const withBom = `\uFEFF${JSON.stringify({ env: { ANTHROPIC_MODEL: 'old', KEEP: '1' } }, null, 2)}`;
+    const next = applyJsonWrites(withBom, [
+      { path: 'env.ANTHROPIC_MODEL', value: 'lam-a/gpt-x' },
+    ]);
+    expect(next.charCodeAt(0)).not.toBe(0xfeff);
+    const parsed = JSON.parse(next) as {
+      env: { ANTHROPIC_MODEL: string; KEEP: string };
+    };
+    expect(parsed.env.ANTHROPIC_MODEL).toBe('lam-a/gpt-x');
+    expect(parsed.env.KEEP).toBe('1');
+  });
+
+  it('JSON：预览能读到带 BOM 文件的当前值（否则差异永远显示为空）', () => {
+    const withBom = `\uFEFF${JSON.stringify({ env: { ANTHROPIC_MODEL: 'old' } })}`;
+    const entries = buildPreviewEntries(AGENT_DEFINITIONS['claude-code'], 'config', withBom, [
+      { path: 'env.ANTHROPIC_MODEL', value: 'new' },
+    ]);
+    expect(entries[0].current).toBe('old');
+    expect(entries[0].differs).toBe(true);
+  });
+
+  it('TOML：带 BOM 时应用/还原都保留用户其余内容，且不残留 BOM', () => {
+    const dir = tempDir();
+    const configPath = path.join(dir, '.codex', 'config.toml');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(
+      configPath,
+      `\uFEFF${[
+        '# 用户自己的注释',
+        'model = "old"',
+        '',
+        '[mcp_servers.demo]',
+        'command = "demo"',
+        '',
+      ].join('\n')}`,
+    );
+
+    const results = applyAgentWrites({
+      agentId: 'codex',
+      definition: AGENT_DEFINITIONS.codex,
+      paths: { config: configPath, auth: undefined },
+      writes: { config: [{ path: 'model', value: 'lam-a/gpt-x' }] },
+    });
+
+    const applied = fs.readFileSync(configPath, 'utf8');
+    expect(applied.charCodeAt(0)).not.toBe(0xfeff);
+    expect(readTomlScalar(applied, 'model')).toBe('lam-a/gpt-x');
+    expect(applied).toContain('# 用户自己的注释');
+    expect(applied).toContain('[mcp_servers.demo]');
+
+    // 还原同样要能在带/不带 BOM 的内容上定位我们写入的键
+    const revert = revertAgentWrites(AGENT_DEFINITIONS.codex, [
+      {
+        role: 'config',
+        path: configPath,
+        values: results[0].values,
+        created: results[0].created,
+      },
+    ]);
+    expect(revert.conflicts).toHaveLength(0);
+    const after = fs.readFileSync(configPath, 'utf8');
+    expect(readTomlScalar(after, 'model')).toBeNull();
+    expect(after).toContain('[mcp_servers.demo]');
+  });
+
+  it('TOML：预览能读到带 BOM 文件的当前值', () => {
+    const entries = buildPreviewEntries(AGENT_DEFINITIONS.codex, 'config', '\uFEFFmodel = "old"\n', [
+      { path: 'model', value: 'new' },
+    ]);
+    expect(entries[0].current).toBe('old');
+    expect(entries[0].differs).toBe(true);
+  });
+
+  it('isEmptyDocument 容忍 BOM（否则还原时会留下空壳文件）', () => {
+    expect(isEmptyDocument('\uFEFF{}', 'json')).toBe(true);
+    expect(isEmptyDocument('\uFEFF', 'toml')).toBe(true);
+    expect(isEmptyDocument('\uFEFF# only comments\n', 'toml')).toBe(true);
+    expect(isEmptyDocument('\uFEFF{"keep":1}', 'json')).toBe(false);
   });
 });
 

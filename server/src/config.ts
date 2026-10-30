@@ -89,6 +89,14 @@ export interface AppConfig {
    * 默认取当前 OS 用户家目录；测试或多租户场景可覆盖。
    */
   agentHomeDir: string | undefined;
+  /**
+   * Codex CLI 可执行文件的绝对路径（`CODEX_BIN`）。
+   *
+   * Windows 服务的账号（LocalSystem）通常看不到安装用户的 PATH，npm 的 shim 目录
+   * 也不在其中；安装器会把 `where codex` 的结果写进这里。未配置时回落到 PATH 里的
+   * `codex`（Linux/macOS 的常规情况）。
+   */
+  codexBin: string | undefined;
 }
 
 const LOG_LEVELS: LogLevel[] = ['debug', 'info', 'warn', 'error'];
@@ -260,5 +268,6 @@ export function loadConfig(): AppConfig {
     trustProxy: optionalEnv('TRUST_PROXY') === '1' ? 'loopback' : false,
     instanceId: readOrCreateInstanceId(dataDir),
     agentHomeDir: optionalEnv('AGENT_HOME_DIR'),
+    codexBin: optionalEnv('CODEX_BIN'),
   };
 }

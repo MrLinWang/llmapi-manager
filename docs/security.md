@@ -73,11 +73,9 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 | `gateway:read` / `gateway:write` | 查看网关信息 / 生成与重置网关令牌 |
 | `agents:read` / `agents:apply` | 预览 / 应用与还原 Agent 配置；`agents:apply` 还能**结束本机 Codex 进程** |
 | `logs:read` | 查看请求日志与统计 |
-| `settings:read` / `settings:write` | 查看 / 修改默认供应商与模型、Codex 行为开关、同步角色与范围；**API 令牌的查看 / 创建 / 吊销**也归这里 |
-| `sync:read` | **导出同步快照（含全部上游 API Key 明文）**，见「同步快照的威胁模型」 |
-| `sync:write` | 拉取 master 快照、仲裁同步冲突（不导出凭据，风险与改设置同级） |
-| `settings:read` / `settings:write` | 查看 / 修改默认供应商与模型、Codex 行为开关、**界面语言**；**API 令牌的查看 / 创建 / 吊销**也归这里 |
-
+| `settings:read` / `settings:write` | 查看 / 修改默认供应商与模型、Codex 行为开关（含两个流式参数）、同步角色与范围、**界面语言**；**API 令牌的查看 / 创建 / 吊销**也归这里 |
+| `sync:read` | **导出同步快照（含全部上游 API Key 明文）**，见「同步快照的威胁模型」；`master` / `peer` 提供快照时必需 |
+| `sync:write` | 拉取对端快照、仲裁同步冲突；`follower` / `peer` 拉取时必需。不导出凭据，风险与改设置同级 |
 | `users:manage` / `tenants:manage` | 预留给多用户与多租户管理（当前无对应接口，也不可授予 API 令牌） |
 
 角色映射：
@@ -162,10 +160,26 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
 拆开后可以把"改设置的人"与"能导出凭据的人"分开授权。代价是 `admin` 默认没有它，
 需要 owner 显式创建带 `sync:read` 的 API 令牌。
 
-它**可以**授予 API 令牌（不在 `UNGRANTABLE` 里），因为 follower 拉取必须用令牌而不是
+它**可以**授予 API 令牌（不在 `UNGRANTABLE` 里），因为对端拉取必须用令牌而不是
 登录会话；但仍受"只收窄、不提权"约束——只有本身持有 `sync:read` 的账号才能创建它。
 这意味着一个 `sync:read` 令牌等价于"全部上游 Key 的离线副本"，要像对待 root 凭据一样
 对待它：设 `expiresAt`，用完吊销。
+
+### `peer` 让每一端都成为快照服务器
+
+`master` 只有一端对外提供快照；`follower` 只连别人。`peer` 是另一种风险形态：
+**两端都跑着可导出全部上游 Key 的接口**，任何一端的凭据或账号被攻破，损失都是全量。
+
+- 角色本身不授予任何权限。`peer` 要真正工作，本机账号必须同时有 `sync:read`
+  （对外提供）与 `sync:write`（自己拉取）；对端给你的令牌也必须含 `sync:read`。
+  只把角色改成 `peer` 却没有相应权限，接口会 403，而不是"自动放行"。
+- 两端各建一个**只用于同步**的令牌，不要复用给 CI 或其它脚本；用完即吊销。
+  给对端的令牌应设 `expiresAt`，并只授予 `sync:read`，不要顺手带上 `providers:write`
+  之类的管理权限。
+- 能连通的对端范围越小越好：防火墙只放行对端地址、优先走回环或加密隧道；
+  不要把 `peer` 配在一台你本来不打算对外暴露的机器上。
+- 被攻破的 `sync:read` 令牌不需要再调别的接口：它已经能一次性拿走全部 Key。
+  因此它应当被当作 root 凭据来轮换与吊销，而不是普通 API 令牌。
 
 ### 为什么强制 HTTPS
 
@@ -184,9 +198,9 @@ Cookie 名 `llmapi_session`，值为 `<base64url(payload)>.<HMAC-SHA256>`：
   它只把 `trustProxy` 设成 `'loopback'`（只信任来自本机回环的转发头），
   **不能设成 `true`**——那样任何客户端都能伪造该头绕过检查。
 
-follower 侧有一道对称的检查：`assertMasterUrlAllowed` 在保存配置与 `pull` 时都校验
-`masterUrl` 协议，非回环的 `http://` 直接 403。少了它，follower 会把 master 的 API 令牌
-与拉回的明文 Key 一起走明文 HTTP 送出去。
+发起侧有一道对称的检查：`assertMasterUrlAllowed` 在保存配置与 `pull` 时都校验
+`masterUrl` 协议，非回环的 `http://` 直接 403。少了它，发起方会把对端的 API 令牌
+与拉回的明文 Key 一起走明文 HTTP 送出去（`peer` 两端都可能是发起方，所以两端都要防）。
 
 `SYNC_ALLOW_INSECURE=1` 是给可信内网（如 EasyTier 隧道）留的显式逃生门：默认必须由人
 主动设置，而不是猜测"这可能是内网所以放过"。配套的还有 `cache-control: no-store`，
@@ -206,13 +220,64 @@ follower 侧有一道对称的检查：`assertMasterUrlAllowed` 在保存配置�
 > 打码尾部对本地版来自密文、对远端版来自明文，本来就不对应。它只够做
 > "看起来是不是同一个"的粗判断，不能当相等性依据。
 
+### `sync-state.json` 里存了什么
+
+双向同步的基线文件 `data/tenants/<id>/sync-state.json` 只存每个条目的**内容哈希**
+（SHA-256 十六进制），不存配置原文，也没有任何接口暴露它。但它不是"完全无信息"的文件：
+
+- 供应商的哈希覆盖 **`apiKey` 的明文**（以及其他字段）。哈希本身不可逆、不能还原 Key，
+  但它是密钥的**指纹**：拿到这个文件又拿到一份候选 Key 的人，可以离线确认两者是否一致。
+  上游 Key 是长随机串，穷举不可行，所以这是"确认已知候选"的风险，不是"算出密钥"的风险。
+- 哈希还覆盖 `baseUrl`、模型清单、`modelCapabilities`、优先级等。它能说明"哪些条目在
+  两次同步之间改过"，但不保留历史值。
+- `gatewayToken`、`language`、`sync`、`networking` **不参与**哈希（见
+  [sync.md](./sync.md#sync-statejson三方合并的基线) 的规范内容表），所以这个文件里没有
+  网关令牌的指纹。
+
+结论：仍按数据目录同级的敏感度保护它（`data/` 不被他人遍历，文件 0600）。
+它能被删除且不影响正确性——下一次同步会退回"首次同步"重新建立基线。
+
 ### 已知残留风险
 
-- **快照导出没有频率限制，也不留独立审计**：只有一行 info 日志（`by` / `via` /
+- **快照导出没有频率限制，也不留独立审计**：只有一行 info 日志（`by` / `via` / `from` /
   `scopes` / 条数）。导出过的数据无法召回。
-- **follower 侧令牌只在前缀上被校验**（必须以 `api_` 开头），不落盘、不进设置文件。
+- **发起侧令牌只在前缀上被校验**（必须以 `api_` 开头），不落盘、不进设置文件。
+  它只在一次 `pull` 请求的生命周期内存在，换令牌只能重新填。
 - **没有传输重试与完整性校验**：快照没有签名，链路被中间人替换内容时无法察觉
-  （HTTPS 是唯一防线）。
+  （HTTPS 是唯一防线）。`peer` 部署把这个风险乘以两端。
+- **`peer` 双端暴露**：两台机器都提供可导出全部 Key 的接口，任意一端沦陷都是全量损失；
+  只能靠最小授权、令牌过期、防火墙对端白名单与网络隔离收紧。
+- **`sync-state.json` 含 API Key 明文的哈希**：不可逆但是指纹。拿到数据目录 + 候选 Key
+  的人可离线比对；按数据目录同级敏感度保护。
+
+## Windows 服务与 `.env`
+
+Windows 安装包把服务托给 WinSW，并以 **LocalSystem** 运行。这带来几处本仓库其它部署方式
+没有的风险，需要安装器与部署者共同处理：
+
+- **`.env` 里有 `DATA_ENCRYPTION_KEY`**（以及首次安装期间短暂的 `ADMIN_PASSWORD`）。
+  这个文件必须限制 ACL：只允许服务账号与 Administrators 读取，不要让普通用户可读。
+  安装器负责创建并收紧权限；手动修改后要重新检查。
+- **`ADMIN_PASSWORD` 在健康检查通过后应从 `.env` 删除**。留着等于把管理员口令明文
+  放在磁盘上；已建号后它不再生效，但泄露面仍然存在。
+- **数据目录在 `C:\ProgramData\llmapi-manager\`**：`%ProgramData%` 默认允许普通用户
+  创建文件，但已有目录的 ACL 取决于安装器。确保 `data/` 不被其它用户遍历——`providers.json`
+  里只有 `apiKey` 字段是加密的，地址、模型清单等仍是明文；`sync-state.json` 另含如上的
+  内容哈希。
+- **LocalSystem 权限很大**：它能写系统目录、加载驱动、访问所有本地用户文件。
+  安装器只把 `AGENT_HOME_DIR\.codex` / `.claude` 的修改权限授予它，但这仍是
+  "让一个高权限账号去写用户家目录"。更稳妥的部署是改用专用低权限账号运行服务，
+  并只给它 `data/` 与 `AGENT_HOME_DIR` 的必要权限。
+- **防火墙规则（安装时可选，默认不加）只放行入站 TCP 8787 的 Private 配置档**。
+  把机器接入不受信任的网络、或网络被识别为 Public 时，要么规则不生效，要么端口在更大范围
+  暴露——两种都不理想。
+- **明文 HTTP 同步**：局域网里用 `SYNC_ALLOW_INSECURE=1` 时，快照（含全部上游 Key 明文）
+  会在链路上可被抓包。只在完全可信的网段这么做；否则用 HTTPS 反代 + `TRUST_PROXY=1`，
+  或只走回环/加密隧道。
+- **卸载默认保留数据**：`-Purge` 才删除。处置旧机器时若忘了 `-Purge`，`data/` 与 `.env`
+  会留在磁盘上。
+
+> 本环境是 Linux，上述 Windows 行为未实测，需在 Windows CI 与用户机器上验证。
 
 ## 部署风险清单
 
@@ -227,6 +292,10 @@ follower 侧有一道对称的检查：`assertMasterUrlAllowed` 在保存配置�
 | 数据目录被他人读取 | 文件权限 0600；确保 `data/` 所在目录不被其他人遍历 |
 | 多实例共享 `data/` | 不支持，会造成写入竞争；单实例部署 |
 | 反向代理缓冲 SSE | 关闭 `proxy_buffering`，否则流式响应被攒住 |
+| 同步配置为 `peer` | 两端都成为快照服务器：只在对端可信、网络隔离、令牌最小化（仅 `sync:read`、设过期、用完吊销）时启用 |
+| 同步走明文 HTTP | 仅可信内网 + 两端 `SYNC_ALLOW_INSECURE=1`；否则用 HTTPS 反代 + `TRUST_PROXY=1` |
+| Windows 服务以 LocalSystem 运行 | 收紧 `.env` 与 `data/` 的 ACL；只授予 `AGENT_HOME_DIR\.codex` / `.claude` 必要权限；更稳妥是换专用低权限账号 |
+| Windows 卸载残留数据 | 处置机器前用 `-Purge`（会删数据目录与 `.env`），或手动删除 |
 
 ## 不做的事
 

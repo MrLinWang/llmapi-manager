@@ -871,21 +871,24 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 
 ## 配置同步
 
-多设备配置同步：一台机器当 master 导出配置，其余 follower 拉取。设计与取舍见
-[sync.md](./sync.md)。
+多设备配置同步：先在一台机器配好供应商、设置与 Agent 连接方式，再让其它机器拉取。
+角色分 `standalone` / `master` / `follower` / `peer`：`peer` 同时提供快照并拉取对端，
+两端都设 `peer` 就是双向同步。拉取仍由接收方发起，没有推送、没有定时任务。
+设计与取舍见 [sync.md](./sync.md)。
 
 | 方法 | 路径 | 权限 | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/sync/status` | `settings:read` | 当前角色、可选范围、冲突数、永不同步项 |
-| PATCH | `/api/sync/config` | `settings:write` | 修改角色 / master 地址 / 同步范围 |
-| GET | `/api/sync/snapshot` | **`sync:read`** | master 导出快照（**含上游 Key 明文**） |
-| POST | `/api/sync/pull` | **`sync:write`** | follower 主动拉取并应用 |
+| GET | `/api/sync/status` | `settings:read` | 当前角色、能力/权限位、可选范围、冲突数、永不同步项 |
+| PATCH | `/api/sync/config` | `settings:write` | 修改角色 / 对端地址 / 同步范围 |
+| GET | `/api/sync/snapshot` | **`sync:read`** | `master` / `peer` 导出快照（**含上游 Key 明文**） |
+| POST | `/api/sync/pull` | **`sync:write`** | `follower` / `peer` 主动拉取并应用 |
 | GET | `/api/sync/conflicts` | `settings:read` | 待仲裁冲突列表 |
 | POST | `/api/sync/conflicts/:id/resolve` | **`sync:write`** | 用本地版或远端版了结一条冲突 |
 
 `sync:read` 与 `sync:write` 刻意不对称：前者能把全部上游 API Key 明文导出，默认不授予
 任何角色（`admin` 也不含），需要显式创建含该 scope 的 API 令牌；后者只改本机自己的配置
-（风险与改设置同级），`admin` 有。`status` / `config` / `conflicts` 三个接口仍用 `settings:*`。
+（风险与改设置同级），`admin` 有。`peer` 要同时具备两者才能既提供又拉取。
+`status` / `config` / `conflicts` 三个接口仍用 `settings:*`。
 
 ### GET /api/sync/status
 
@@ -894,12 +897,17 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 ```json
 {
   "config": {
-    "role": "follower",
-    "masterUrl": "https://box.example.com:8787",
+    "role": "peer",
+    "masterUrl": "https://linux-box.example.com:8787",
     "scopes": ["providers", "settings"],
     "lastPullAt": "2026-01-01T00:00:00.000Z",
-    "lastPullResult": "从 https://box.example.com:8787 拉取完成：应用 4 项，产生 0 条冲突待仲裁（180ms）"
+    "lastPullResult": "已应用 4 项（180ms）",
+    "lastMasterId": "inst_ab12cd34ef56"
   },
+  "canServe": true,
+  "canPull": true,
+  "hasSyncRead": true,
+  "hasSyncWrite": true,
   "availableScopes": [
     { "scope": "providers", "label": "供应商与模型（含上游 API Key，跨机重新加密）" },
     { "scope": "settings", "label": "网关设置（默认模型、跨协议转发、审批模型等）" },
@@ -910,29 +918,36 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 }
 ```
 
-`availableScopes` 与 `neverSynced` 都是给界面直接渲染的，避免前端另维护一份清单与文案。
+- `canServe` / `canPull` **只按角色**判断：`master`/`peer` 能导出，`follower`/`peer` 能拉取。
+- `hasSyncRead` / `hasSyncWrite` 是当前身份（会话或 API 令牌）的权限位。界面用两者组合
+  判断「按钮是否可点」：例如 `admin` 有 `sync:write` 但没有 `sync:read`，能拉取、不能导出。
+- `masterUrl` 字段名保持不变以兼容旧数据，语义是「对端地址」：`follower` 与 `peer` 必填。
+- `availableScopes` 与 `neverSynced` 都是给界面直接渲染的，避免前端另维护一份清单与文案。
 
 ### PATCH /api/sync/config
 
 权限 `settings:write`。
 
 ```json
-{ "role": "follower", "masterUrl": "https://box.example.com:8787", "scopes": ["providers"] }
+{ "role": "peer", "masterUrl": "https://linux-box.example.com:8787", "scopes": ["providers"] }
 ```
 
 | 字段 | 说明 |
 | --- | --- |
-| `role` | `standalone` / `master` / `follower`，其余值 400 |
-| `masterUrl` | follower 的拉取地址；`null` 或空串清除；保存时去掉尾部 `/` |
+| `role` | `standalone` / `master` / `follower` / `peer`，其余值 400 |
+| `masterUrl` | 对端地址（`follower` / `peer` 用）；`null` 或空串清除；保存时去掉尾部 `/` |
 | `scopes` | `providers` / `settings` / `agentTargets` 的子集，重复项被去重，未知值 400 |
 
-字段均可省略（省略即不修改）。`role` 为 `follower` 时 `masterUrl` 不能为空，否则 400。
-返回 `{ config }`。
+字段均可省略（省略即不修改）。`role` 为 `follower` 时 `masterUrl` 不能为空，否则 400
+（`sync.masterUrl.requiredForFollower`）；`role` 为 `peer` 时同样不能为空，报
+`sync.masterUrl.requiredForPeer`。返回 `{ config }`。
+
+`scopes` 为空数组表示「什么都不动」；导出与拉取都会以 400 拒绝，而不是回落成全部范围。
 
 ### GET /api/sync/snapshot
 
-权限 **`sync:read`**。master 专用，非 master 返回 400。查询参数 `scopes`（逗号分隔，
-省略时用设置里的；两者都为空则视为全部范围）。
+权限 **`sync:read`**。`master` 与 `peer` 可用，其余角色返回 400。
+查询参数 `scopes`（逗号分隔，省略时用设置里的）；最终为空返回 400。
 
 响应体就是快照本身：
 
@@ -940,18 +955,23 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 {
   "schemaVersion": 1,
   "exportedAt": "2026-01-01T00:00:00.000Z",
-  "masterId": "http://127.0.0.1:8787",
+  "masterId": "inst_ab12cd34ef56",
   "scopes": ["providers"],
   "providers": [
     { "id": "p_...", "name": "wllapi", "providerKey": "wllapi", "apiType": "openai",
       "baseUrl": "https://api.example.com/v1", "apiKey": "sk-...（明文）",
-      "models": ["gpt-6-luna"], "enabled": true, "priority": 1,
+      "models": ["gpt-6-luna"], "imageModels": ["gpt-image-2"],
+      "modelCapabilities": { "gpt-6-luna": { "contextWindow": 128000,
+        "reasoningEfforts": ["low", "medium", "high"] } },
+      "enabled": true, "priority": 1, "notes": "…", "websiteUrl": "…",
       "createdBy": "u_owner", "createdAt": "...", "updatedAt": "..." }
   ]
 }
 ```
 
-`settings` 与 `agentTargets` 只在对应 scope 勾选时出现。`settings` **不含 `gatewayToken`**。
+`settings` 与 `agentTargets` 只在对应 scope 勾选时出现。`settings` 含两个 Codex 流式字段，
+但**不含 `gatewayToken`**；`agentTargets` 每项可带 `updatedAt`。
+`masterId` 是本机实例标识（`instance.json` 的 `instanceId`），不是 URL。
 
 > **`apiKey` 在这里是明文。** `enc:v1:` 密文绑定本机的 `DATA_ENCRYPTION_KEY`，
 > 传过去解不开，所以只能明文过网、由对方重新加密。因此：非回环地址强制 HTTPS
@@ -960,26 +980,33 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 
 ### POST /api/sync/pull
 
-权限 **`sync:write`**。非 follower 返回 400。
+权限 **`sync:write`**。`follower` 与 `peer` 可用，其余角色返回 400。
 
 ```json
-{ "token": "api_...（master 的 API 令牌，需含 sync:read）" }
+{ "token": "api_...（对端的 API 令牌，需含 sync:read）" }
 ```
 
-令牌前缀必须是 `api_`，否则 400。服务端用它请求 master 的 snapshot 接口（30 秒超时），
-再应用到本地；令牌只这一次使用，**不落盘**。
+令牌前缀必须是 `api_`，否则 400。服务端用它请求对端的 snapshot 接口（30 秒超时），
+校验快照结构后再应用到本地；令牌只这一次使用，**不落盘**。
+
+校验失败：
+- `schemaVersion` 比本机新 → 400 `sync.snapshot.futureSchema`；
+- 结构错误（缺字段、类型不对、重复 provider id 等）→ 400 `sync.snapshot.malformed`。
+
+返回：
 
 ```json
 {
   "applied": 4,
   "conflicts": [{ "id": "c_ab12cd34ef56", "scope": "providers", "targetId": "p_...",
                   "targetLabel": "wllapi (wllapi)", "changedFields": ["apiKey", "models"] }],
-  "summary": "从 https://box.example.com:8787 拉取完成：应用 4 项，产生 1 条冲突待仲裁（180ms）"
+  "summary": "已应用 4 项（180ms）"
 }
 ```
 
-`conflicts` 是本次新产生的项（已追加进冲突文件，未覆盖历史冲突）。失败时返回 400，
-`master 返回 <status>：<响应体前 200 字>` 或 `拉取超时（30 秒）…`。
+`conflicts` 是本次新产生或更新的公开冲突项；`remoteValueSealed` 与 `remoteHash` 都不会
+出现在响应里。合并基线来自每租户的 `sync-state.json`：只有对端变了就自动应用，只有本地
+变了就保留本地，两边都变且内容不同才产生冲突（各 scope 规则见 [sync.md](./sync.md)）。
 
 ### GET /api/sync/conflicts
 
@@ -1007,13 +1034,17 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 ```
 
 - `changedFields` 只给字段名（`name` / `baseUrl` / `apiType` / `enabled` / `priority` /
-  `models` / `apiKey`；`settings` 则是五个设置字段名），不含完整值。
+  `models` / `imageModels` / `modelCapabilities` / `notes` / `websiteUrl` / `apiKey`；
+  `settings` 则是设置字段名；`agentTargets` 是 `mode` / `directProviderId` / `directModel`）。
 - `localValue` / `remoteValue` 是**打码后**的可比较形态，Key 只留 `***` + 末 4 位。
-- 完整远端值加密保存在 `sync-conflicts.json` 的 `remoteValueSealed` 里，**不出接口**
-  （路由会把它剔除，因为只需要 `settings:read` 的人不该拿到凭据副本）。
-  本机未配置 `DATA_ENCRYPTION_KEY` 时该字段为 `null`。
-- 冲突判定用 `Date.parse` 比较时间数值（不是字符串比较），所以带不同时区偏移的
-  `updatedAt` 不会误判。**时间戳相同但内容不同也算冲突**，不静默让远端覆盖。
+- 完整远端值加密保存在 `sync-conflicts.json` 的 `remoteValueSealed` 里，**不出接口**；
+  三方合并用的 `remoteHash` 同样不出接口。本机未配置 `DATA_ENCRYPTION_KEY` 时
+  `remoteValueSealed` 为 `null`。
+- 每条 `(scope, targetId)` 只保留一条冲突；重复拉取会更新远端值而不是堆重复项。
+  两侧内容已收敛时旧冲突会被自动清掉。
+- 出现冲突说明两侧都改过同一项；有 `sync-state.json` 基线后不再用时间戳单独裁决，
+  所以不会因为"对端还没拉取"这种单向落后产生假冲突。首次同步没有基线时仍用
+  `updatedAt` 兜底，且**时间戳相同但内容不同也算冲突**。
 
 ### POST /api/sync/conflicts/:id/resolve
 
@@ -1023,10 +1054,13 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 { "choice": "remote" }
 ```
 
-`choice` 只能是 `local` 或 `remote`，否则 400。
+`choice` 只能是 `local` 或 `remote`，否则 400；支持 `providers` / `settings` /
+`agentTargets` 三类冲突。
 
-- `local`：不改数据（本地版就是现值），只移除这条冲突。
-- `remote`：解封 `remoteValueSealed` 并用远端版覆盖该条。
+- `local`：不改数据（本地版就是现值），只移除这条冲突；基线推进到远端哈希，
+  下次拉取不会因为同一份旧远端值反复报冲突。
+- `remote`：解封 `remoteValueSealed` 并用远端版覆盖该条；本地 `updatedAt` 用远端时间，
+  基线推进到远端哈希。
 
 返回 `{ "ok": true, "conflictCount": 0 }`；未知 id 返回 400。
 
@@ -1034,6 +1068,14 @@ curl http://127.0.0.1:8787/api/providers -H 'Authorization: Bearer api_xxx…'
 落进冲突文件），选 `remote` 会返回 400 并提示"请先设置 `DATA_ENCRYPTION_KEY` 并重启，
 再重新拉取以重建冲突记录；或者改选『用本地』"。这与「未知冲突」是两种不同原因，
 报错文案刻意分开。
+
+### 已知边界
+
+- **手动拉取**：没有定时任务、没有推送；由接收方点「立即同步」触发。
+- **不传播删除**：对端删掉的供应商不会自动删本机；远端缺失的本地记录保留。
+- **单对端**：一条配置只保存一个对端地址；多 peer 网状同步不在本期。
+- **peer 双端暴露**：两端都设 `peer` 时各自都提供快照接口，任意一端泄露
+  `sync:read` 令牌都等于泄露全部上游 Key；令牌要按所有者级别保管、可单独吊销。
 
 ## 信息接口
 

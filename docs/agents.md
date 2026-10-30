@@ -13,6 +13,19 @@
 它按 `{ tenantId, userId }` 计算，`registerTenantWorkspace()` 已预留为"每租户独立工作区"的入口。
 结束进程时服务端还会读 `CODEX_HOME`（若设置）来定位 Codex 的配置目录。
 
+Windows 上同一组文件落在 `C:\Users\<用户名>\` 下：
+
+| Agent | Windows 路径 |
+| --- | --- |
+| Codex CLI | `C:\Users\<用户名>\.codex\config.toml`、`auth.json`、`llmapi-model-catalog.json` |
+| Claude Code | `C:\Users\<用户名>\.claude\settings.json` |
+
+Windows 服务默认以 **LocalSystem** 运行，它自己的家目录是
+`C:\Windows\system32\config\systemprofile`。所以安装器会把 `AGENT_HOME_DIR` 显式设为
+`C:\Users\<安装用户>`，并给服务账号授予该目录下 `.codex` / `.claude` 的修改权限——
+否则文件会写进系统配置目录，用户自己的 Codex 永远读不到（表现为"应用成功但配置没生效"）。
+重装、换用户或手动改过权限后，这是第一个要检查的地方。
+
 ## 选哪个供应商
 
 Agent 只能用与自己协议匹配的供应商：
@@ -392,6 +405,12 @@ JSON 用"读 → 定位 → 就地改写"，TOML 用"按段定位 → 只替换�
 **解析失败必须中止**。文件不是合法 JSON/TOML 时报错返回，绝不退回"写一个空文件"。
 如果目标 JSON 顶层不是对象，或某个中间节点不是对象（无法继续下钻），同样报错而不是覆盖。
 
+**Windows 的编码差异不是解析失败**：记事本/PowerShell 保存的文件常带 UTF-8 BOM，
+行尾也可能是 CRLF。读取前统一**剥离 BOM**，再把 CRLF 归一成 LF；写回一律用 LF。
+不剥离 BOM 会让 `JSON.parse` / TOML 首行解析直接失败，看起来像"用户的配置文件坏了"，
+实际只是编辑器加了个看不见的字节。写 Windows 路径时按 TOML 字符串转义（反斜杠写成 `\\`，
+例如 `"C:\\Users\\me\\.codex\\llmapi-model-catalog.json"`），JSON 文件里同理。
+
 模型目录（`llmapi-model-catalog.json`）是唯一的例外：它整份由我们生成、不做按键合并，
 但仍遵守"写前备份 + 只删自己创建的文件"。
 
@@ -538,13 +557,14 @@ Codex 只在**启动时**读一次配置与模型目录。改完配置（或换�
 1. `codex app-server daemon stop` —— 官方入口，让 TUI 连的托管守护进程优雅退出
    （先停 daemon 再停 TUI，否则 TUI 可能在 daemon 退出过程中自动重连）；
 2. **按 pid 文件兜底结束 daemon 与 updater** —— 官方命令失败时的保险，见下；
-3. 按进程表精确匹配后 `SIGTERM` 掉 `codex`（TUI）与 `codex exec` 进程，按
-   800ms/1200ms/1600ms 三轮检查存活，仍活着的补 `SIGKILL`。
+3. 按进程表精确匹配后结束 `codex`（TUI）与 `codex exec` 进程：POSIX 发 `SIGTERM`，
+   按 800ms/1200ms/1600ms 三轮检查存活，仍活着的补 `SIGKILL`；Windows 用
+   `taskkill /PID <pid> /T /F` 直接结束进程树。
 
-这三步都成功也只代表「能探测到的进程都停了」。提示里因此固定附一句
-**「也可手动执行 `pkill -9 -f codex` 来清理相关进程」**：从非标准位置启动、
-或进程表读不到的 Codex 不会出现在匹配结果里，按钮返回成功而 Codex 仍能用时，
-用户至少知道下一步做什么，不必去翻日志或猜。
+这三步都成功也只代表「能探测到的进程都停了」。从非标准位置启动、或进程表读不到的 Codex
+不会出现在匹配结果里，按钮返回成功而 Codex 仍能用时，按平台手动清理：POSIX 用
+`pkill -9 -f codex`，Windows 用任务管理器结束 `codex.exe`，或 `taskkill /F /IM codex.exe`。
+这样用户至少知道下一步做什么，不必去翻日志或猜。
 
 **目录只列该 Agent 能用的协议。** Codex 的 `wire_api` 固定是 `responses`，所以目录里
 默认不能出现 `openai` 供应商的别名——用户选中后 `/v1/responses` 打到 `openai` 上游必然
@@ -568,13 +588,34 @@ Codex 只在**启动时**读一次配置与模型目录。改完配置（或换�
 第 3 步也不是发一次 `SIGTERM` 就算完：Codex 关闭时要收尾（写 rollout、断连接），
 一轮检查常常来不及，用户会看到"点了退出但进程还在"。
 
-匹配规则刻意保守：只认可执行文件名为 `codex`（前面是行首或 `/`，后面是空格或结束）的进程，
-且子命令不在 `app-server` / `login` / `logout` / `update` / `mcp` / `debug` / `completion` /
-`help` / `version` / `apply` / `resume` 之列；`codex --version`、`codex --help` 这类一次性命令也不会被当成 TUI。
-这样避免误杀编辑器插件、`mycodex` 或本服务自己的子进程。
+匹配规则刻意保守：只认可执行文件名为 `codex` 的进程，且子命令不在 `app-server` /
+`login` / `logout` / `update` / `mcp` / `debug` / `completion` / `help` / `version` /
+`apply` / `resume` 之列；`codex --version`、`codex --help` 这类一次性命令也不会被当成 TUI。
+POSIX 上 `codex` 前面只能是行首或 `/`、后面只能是空白或结束；Windows 上同时接受
+反斜杠分隔、带引号的路径，以及 `.exe` / `.cmd` / `.bat` 后缀。这样避免误杀编辑器插件、
+`mycodex` 或本服务自己的子进程。
 
 定位配置目录时优先用环境变量 `CODEX_HOME`，否则用 `AGENT_HOME_DIR`（再否则 OS 家目录）下的 `.codex`；
 该目录不存在时不会强行设 `CODEX_HOME`（codex 会对不存在的路径报错，但那只是"本机还没配过"）。
+
+**Windows 上 `codex` 可能不在 PATH 里。** 服务以 LocalSystem 运行时，PATH 通常不含
+npm 全局安装目录（`%AppData%\npm`），`codex app-server daemon stop` 会直接失败。
+用 `CODEX_BIN` 指向可执行文件的绝对路径（如 `C:\Users\me\AppData\Roaming\npm\codex.cmd`）；
+服务端会通过 `cmd.exe /d /s /c` 调用它——`.cmd` 是批处理包装，不能像可执行文件那样直接 exec。
+
+### Windows 上的进程表
+
+POSIX 用 `ps -ww -Ao pid=,etime=,command=` 读进程表；Windows 改用 PowerShell 的
+`Get-CimInstance Win32_Process`（取 `ProcessId` / `CreationDate` / `CommandLine`），
+执行前设 `[Console]::OutputEncoding = UTF8`，输出用 `ConvertTo-Json -Compress`，
+避免中文或非 ASCII 命令行被按本地代码页转坏。
+
+**探测失败不静默当空**：拿不到进程表时返回 `null` 并产生
+`agents.process.tableUnavailable` 告警（出现在响应的 `warnings` 里），而不是返回"没有
+进程"——后者会让用户以为已经停干净，实际 Codex 还在跑。
+
+> 本环境是 Linux，Windows 的进程探测与 `taskkill` 路径**未在本机实测**，
+> 需在 Windows CI 与用户机器上验证。
 
 响应：
 
@@ -593,9 +634,10 @@ Codex 只在**启动时**读一次配置与模型目录。改完配置（或换�
 Claude Code 没有常驻进程，该按钮只对 Codex 显示；直接调接口会返回 `supported: false`
 与 `warnings: ["Claude Code 没有需要结束的常驻进程"]`，而不是报错。
 
-> 这需要 `codex` 在服务进程的 PATH 上。缺 `codex` 时只结束本机进程并在 `warnings` 里说明。
-> `~/.codex` 只读时官方 `daemon stop` 会失败，但第 2 步的 pid 兜底通常仍能结束进程；
-> 两步的结果都会在 `actions` / `warnings` 里如实返回，不会静默当成成功。
+> 这需要 `codex` 在服务进程的 PATH 上，或由 `CODEX_BIN` 显式指定。缺 `codex` 时只结束
+> 本机进程并在 `warnings` 里说明。`~/.codex`（Windows 为 `%USERPROFILE%\.codex`）只读时
+> 官方 `daemon stop` 会失败，但第 2 步的 pid 兜底通常仍能结束进程；两步的结果都会在
+> `actions` / `warnings` 里如实返回，不会静默当成成功。
 
 ## 排错
 
@@ -615,3 +657,7 @@ Claude Code 没有常驻进程，该按钮只对 Codex 显示；直接调接口�
 | 应用后 Agent 仍走旧配置 | Agent 进程需要重启 |
 | 还原时出现 conflicts | 被写入的键后来被手动改过，按提示自行处理 |
 | 预览报「字段 xxx 不是对象」 | 目标 JSON 里该路径是标量，无法下钻；需手动整理 |
+| Windows 服务下应用配置提示成功，但用户自己的 Codex 没变化 | 文件可能写进了 `C:\Windows\system32\config\systemprofile`：`AGENT_HOME_DIR` 没有指向安装用户目录，或安装器授予的 `.codex` 修改权限丢失 |
+| Windows 下「退出 Codex 进程」提示找不到 `codex` | LocalSystem 的 PATH 通常不含 npm 全局安装目录：用 `CODEX_BIN` 指向 `codex.cmd` 的绝对路径，然后重启服务 |
+| 结束进程的 `warnings` 里出现「无法读取进程表」 | PowerShell 进程探测失败（被策略禁用、编码/权限问题）。它不会被当成"没有进程"：`killed` 可能偏低，按提示手动清理 |
+| Windows 上 `config.toml` / `settings.json` 突然解析失败 | 编辑器可能加了 UTF-8 BOM 或改成了 CRLF。服务会先剥离 BOM、归一 CRLF；仍失败说明文件本身不是合法 TOML/JSON |

@@ -303,15 +303,30 @@ export interface GatewayOverview {
   todayStats: { total: number; success: number; successRate: number; avgLatencyMs: number };
 }
 
-/** 多设备配置同步：角色。standalone 表示不参与同步。 */
-export type SyncRole = 'standalone' | 'master' | 'follower';
+/**
+ * 多设备配置同步：角色。
+ *
+ * - `standalone`：不参与同步。
+ * - `master`：只对外提供快照（`GET /api/sync/snapshot`）。
+ * - `follower`：只主动拉取（`POST /api/sync/pull`）。
+ * - `peer`：双向——既向对端提供快照，也从对端拉取。
+ *
+ * `master` / `follower` 是**方向**而不是权限：同一个账号能不能拉取看 `sync:write`，
+ * 能不能导出快照看 `sync:read`（见 `SyncStatus` 的只读能力字段）。
+ */
+export type SyncRole = 'standalone' | 'master' | 'follower' | 'peer';
 
 /** 可同步的内容范围，与 `server/src/domain/sync.ts` 的 SYNC_SCOPES 一一对应。 */
 export type SyncScope = 'providers' | 'settings' | 'agentTargets';
 
 export interface SyncConfig {
   role: SyncRole;
-  /** follower 要拉取的 master 地址；master 角色下不用 */
+  /**
+   * 对端地址（字段名沿用已落盘的 `masterUrl`）。
+   *
+   * `follower` / `peer` 必须有值；`standalone` / `master` 下为空。
+   * `peer` 的语义是「我要拉取的那台对端」——双向时两端互相填对方。
+   */
   masterUrl: string | null;
   /** 勾选同步哪些内容；空数组表示什么都不动（安全的默认） */
   scopes: SyncScope[];
@@ -346,4 +361,17 @@ export interface SyncStatus {
   conflictCount: number;
   /** 永远不会同步的内容，直接展示给用户 */
   neverSynced: string[];
+  /**
+   * 该角色能否导出快照（master / peer）。
+   *
+   * 这是**角色能力**，不等于账号权限：账号是否真有 `sync:read` 看 `hasSyncRead`。
+   * 前端必须两者组合判断，不能只看其中一个。
+   */
+  canServe: boolean;
+  /** 该角色能否拉取（follower / peer）；账号权限看 `hasSyncWrite`。 */
+  canPull: boolean;
+  /** 当前账号是否拥有 `sync:read`（导出快照）。用于给出可操作的权限提示。 */
+  hasSyncRead: boolean;
+  /** 当前账号是否拥有 `sync:write`（拉取与冲突仲裁）。 */
+  hasSyncWrite: boolean;
 }

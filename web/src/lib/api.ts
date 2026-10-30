@@ -382,8 +382,10 @@ export const api = {
   /**
    * 多设备配置同步。
    *
-   * 注意 pull 的 token 是 **master 的 API 令牌**（`api_` 前缀且含 `sync:read`），
+   * 注意 pull 的 token 是**对端的 API 令牌**（`api_` 前缀且含 `sync:read`），
    * 不是本机的登录会话，也不是网关令牌 —— 它只在这一处使用，不落盘。
+   * 拉取本身需要本机账号有 `sync:write`；这一点由 `/api/sync/status` 的
+   * `canPull` / `hasSyncWrite` 告知，前端不要按角色自己推导。
    */
   syncStatus: () => request<SyncStatus>('/api/sync/status'),
   setSyncConfig: (body: { role?: SyncRole; masterUrl?: string | null; scopes?: SyncScope[] }) =>
@@ -391,7 +393,7 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
-  /** 立即从 master 拉取并应用；conflicts 是本次新产生的待仲裁项。 */
+  /** 立即从对端拉取并应用；conflicts 是本次新产生的待仲裁项（已剔除远端密文与哈希）。 */
   syncPull: (token: string) =>
     request<{ applied: number; conflicts: SyncConflict[]; summary: string }>(
       '/api/sync/pull',

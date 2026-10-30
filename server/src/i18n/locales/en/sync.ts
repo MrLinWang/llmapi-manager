@@ -21,26 +21,30 @@ export const enSync: typeof zhSync = {
       'No sync scope selected. Check the items to sync under “Sync scope” first (blank means nothing is synced).',
   },
   masterUrl: {
-    invalid: 'Invalid master URL: {{value}}',
-    mustBeHttp: 'Master URL must use http or https: {{value}}',
-    requiredForFollower: 'A master URL is required when selecting the follower role',
+    invalid: 'Invalid peer URL: {{value}}',
+    mustBeHttp: 'Peer URL must use http or https: {{value}}',
+    requiredForFollower: 'A peer URL is required when selecting the follower role',
+    requiredForPeer:
+      'A peer URL is required when selecting the peer role (each side must fill in the other side’s address)',
     mustBeStringOrNull: 'masterUrl must be a string or null',
     insecure:
-      'The master URL uses plaintext HTTP ({{value}}); pulling would expose the API token and upstream keys. Use https, or (on a trusted network only) set SYNC_ALLOW_INSECURE=1.',
+      'The peer URL uses plaintext HTTP ({{value}}); pulling would expose the API token and upstream keys. Use https, or (on a trusted network only) set SYNC_ALLOW_INSECURE=1.',
   },
   role: {
     unknown: 'role must be one of {{available}}',
-    mustBeMasterToExport: 'This instance is not the master role, so there is no snapshot to export',
-    mustBeFollowerToPull: 'Only the follower role can pull',
-    mustBeMasterToServe: 'This instance is not the master role and cannot serve a snapshot',
+    mustBeMasterToExport:
+      'This role cannot serve a snapshot: the master or peer role is required',
+    mustBeFollowerToPull: 'This role cannot pull: the follower or peer role is required',
+    mustBeMasterToServe:
+      'This role cannot serve a snapshot: the master or peer role is required',
   },
   pull: {
-    noMasterUrl: 'No master URL configured yet',
-    tokenRequired: "An API token from the master is required (api_ prefix with sync:read)",
-    timeout: 'Pull timed out (30s); check the master URL and network connectivity',
+    noMasterUrl: 'No peer URL configured yet',
+    tokenRequired: "An API token from the peer is required (api_ prefix with sync:read)",
+    timeout: 'Pull timed out (30s); check the peer URL and network connectivity',
     failed: 'Pull failed: {{reason}}',
-    badStatus: 'Master returned {{status}}: {{reason}}',
-    badPayload: 'Master did not return a valid snapshot: {{reason}}',
+    badStatus: 'Peer returned {{status}}: {{reason}}',
+    badPayload: 'Peer did not return a valid snapshot: {{reason}}',
   },
   conflict: {
     choiceInvalid: 'choice must be local or remote',

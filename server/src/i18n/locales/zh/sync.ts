@@ -22,32 +22,34 @@ export const zhSync = {
       '未选择任何同步范围。请先在「同步范围」里勾选要同步的内容（空白表示不同步任何数据）。',
   },
   masterUrl: {
-    invalid: 'master 地址不合法：{{value}}',
-    mustBeHttp: 'master 地址必须用 http 或 https：{{value}}',
+    invalid: '对端地址不合法：{{value}}',
+    mustBeHttp: '对端地址必须用 http 或 https：{{value}}',
     /** follower 必须有地址：分两次提交会在中间态被 400 挡回来 */
-    requiredForFollower: '选择 follower 角色时必须填写 master 地址',
+    requiredForFollower: '选择 follower 角色时必须填写对端地址',
+    /** peer 也需要对端地址；文案写清双向，避免被误读成只约束 follower */
+    requiredForPeer: '选择 peer 角色时必须填写对端地址（两端都是 peer 时各自都要填）',
     mustBeStringOrNull: 'masterUrl 必须是字符串或 null',
-    /** follower 侧明文 HTTP：会把 master 令牌与上游 Key 送出去 */
+    /** follower/peer 侧明文 HTTP：会把对端令牌与上游 Key 送出去 */
     insecure:
-      'master 地址是明文 HTTP（{{value}}），拉取时会暴露 API 令牌与上游 Key。请改用 https，或（仅在可信内网）设置 SYNC_ALLOW_INSECURE=1。',
+      '对端地址是明文 HTTP（{{value}}），拉取时会暴露 API 令牌与上游 Key。请改用 https，或（仅在可信内网）设置 SYNC_ALLOW_INSECURE=1。',
   },
   role: {
     unknown: 'role 必须是 {{available}} 之一',
-    /** 导出快照要求本机是 master：follower 上没有"权威版本"可给 */
-    mustBeMasterToExport: '当前不是 master 角色，没有可导出的快照',
-    mustBeFollowerToPull: '只有 follower 角色才能拉取',
-    mustBeMasterToServe: '当前不是 master 角色，无法提供快照',
+    /** 导出快照要求本机是 master 或 peer：follower/standalone 上没有"权威版本"可给 */
+    mustBeMasterToExport: '当前角色不能提供快照：需要 master 或 peer',
+    mustBeFollowerToPull: '当前角色不能拉取：需要 follower 或 peer',
+    mustBeMasterToServe: '当前角色不能提供快照：需要 master 或 peer',
   },
   pull: {
-    noMasterUrl: '尚未配置 master 地址',
+    noMasterUrl: '尚未配置对端地址',
     /** 提示令牌来源与所需权限，但不回显令牌本身 */
-    tokenRequired: '需要 master 的 API 令牌（api_ 前缀，且包含 sync:read 权限）',
-    timeout: '拉取超时（30 秒），检查 master 地址与网络连通性',
+    tokenRequired: '需要对端的 API 令牌（api_ 前缀，且包含 sync:read 权限）',
+    timeout: '拉取超时（30 秒），检查对端地址与网络连通性',
     failed: '拉取失败：{{reason}}',
-    /** master 返回的 HTTP 状态非 2xx */
-    badStatus: 'master 返回 {{status}}：{{reason}}',
+    /** 对端返回的 HTTP 状态非 2xx */
+    badStatus: '对端返回 {{status}}：{{reason}}',
     /** 响应不是预期的快照结构 */
-    badPayload: 'master 返回的不是合法快照：{{reason}}',
+    badPayload: '对端返回的不是合法快照：{{reason}}',
   },
   conflict: {
     choiceInvalid: 'choice 必须是 local 或 remote',

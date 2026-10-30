@@ -3,8 +3,27 @@ import path from 'node:path';
 import type { AgentDefinition, AgentId, AgentFileRole, PreviewEntry } from '../domain/agent';
 import type { UiLanguage } from '../domain/settings';
 import { AGENT_DEFINITIONS } from './registry';
-import { applyTomlEdits, readTableScalars, readTomlScalar, removeTomlKeyIfValue } from './toml';
+import {
+  applyTomlEdits,
+  readTableScalars as readTableScalarsFromToml,
+  readTomlScalar,
+  removeTomlKeyIfValue,
+} from './toml';
 import { translate } from '../i18n';
+
+/**
+ * 去掉 UTF-8 BOM（`EF BB BF`，解码后是 `U+FEFF`）。
+ *
+ * Windows 上的编辑器（记事本旧版、部分 PowerShell `Out-File` 默认编码）会给
+ * JSON/TOML 文件加 BOM。`JSON.parse` 遇到 BOM 直接抛错，TOML 的首行键也会带着
+ * BOM 而匹配不到；症状是"用户的配置文件明明合法，我们却报解析失败"或
+ * "解析成空文件后把用户配置覆盖掉"（后者更糟）。
+ *
+ * 只在**解析前**剥离；备份仍保存原始字节（含 BOM），用户找回时内容不变。
+ */
+export function stripBom(content: string): string {
+  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+}
 
 /** 我们写入某个 Agent 文件的目标键值集合。 */
 export interface DesiredWrites {
@@ -28,7 +47,7 @@ export interface DesiredWrites {
 export function readJsonPath(content: string, dotted: string): string | null {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(content);
+    parsed = JSON.parse(stripBom(content));
   } catch {
     return null;
   }
@@ -43,8 +62,9 @@ export function readJsonPath(content: string, dotted: string): string | null {
 
 export function applyJsonWrites(content: string, writes: DesiredWrites[]): string {
   let parsed: Record<string, unknown> = {};
-  if (content.trim() !== '') {
-    const candidate: unknown = JSON.parse(content);
+  const normalized = stripBom(content);
+  if (normalized.trim() !== '') {
+    const candidate: unknown = JSON.parse(normalized);
     if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
       throw new Error('target JSON is not an object at the top level; refusing to overwrite');
     }
@@ -88,7 +108,7 @@ export function removeJsonPathIfValue(
 
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(content) as Record<string, unknown>;
+    parsed = JSON.parse(stripBom(content)) as Record<string, unknown>;
   } catch {
     return { content, removed: false, currentValue };
   }
@@ -128,9 +148,11 @@ function readCurrentValue(
   if (content === null) return null;
   const spec = definition.files.find((item) => item.role === role);
   if (!spec) return null;
+  // TOML 的编辑器在 toml.ts（不负责 BOM），统一在这里剥离后再交给它解析
+  const normalized = stripBom(content);
   return spec.format === 'toml'
-    ? readTomlScalar(content, write.path, write.table)
-    : readJsonPath(content, write.path);
+    ? readTomlScalar(normalized, write.path, write.table)
+    : readJsonPath(normalized, write.path);
 }
 
 export function buildPreviewEntries(
@@ -265,6 +287,8 @@ export function applyAgentWrites(options: ApplyFilesOptions): WriteResult[] {
 
     const existing = readFileSafe(filePath);
     const created = existing === null;
+    // 解析前统一剥 BOM；备份仍写 existing 的原样内容（含 BOM），找回时不变
+    const existingContent = existing === null ? '' : stripBom(existing);
 
     let nextContent: string;
     if (spec.format === 'toml') {
@@ -276,7 +300,7 @@ export function applyAgentWrites(options: ApplyFilesOptions): WriteResult[] {
         table: write.table,
         raw: write.raw,
       }));
-      nextContent = applyTomlEdits(existing ?? '', edits);
+      nextContent = applyTomlEdits(existingContent, edits);
       for (const removal of removals) {
         const outcome = removeTomlKeyIfValue(
           nextContent,
@@ -287,7 +311,7 @@ export function applyAgentWrites(options: ApplyFilesOptions): WriteResult[] {
         nextContent = outcome.content;
       }
     } else {
-      nextContent = applyJsonWrites(existing ?? '', writes);
+      nextContent = applyJsonWrites(existingContent, writes);
     }
 
     // 写前同目录备份：改坏了用户能就地找回
@@ -403,7 +427,8 @@ export function revertAgentWrites(
       }
     }
 
-    let working = content;
+    // 解析前剥 BOM：TOML 编辑器与 JSON.parse 都不接受首字节 BOM
+    let working = stripBom(content);
     let changed = false;
 
     for (const [key, expected] of Object.entries(file.values)) {
@@ -451,8 +476,9 @@ export function revertAgentWrites(
 
 /** 判断文档在移除我们的键之后是否已无内容（TOML 忽略空行/注释，JSON 看是否有键）。 */
 export function isEmptyDocument(content: string, format: 'json' | 'toml'): boolean {
+  const normalized = stripBom(content);
   if (format === 'toml') {
-    return content
+    return normalized
       .split('\n')
       .every((line) => {
         const trimmed = line.trim();
@@ -460,7 +486,7 @@ export function isEmptyDocument(content: string, format: 'json' | 'toml'): boole
       });
   }
   try {
-    const parsed: unknown = JSON.parse(content);
+    const parsed: unknown = JSON.parse(normalized);
     return (
       parsed !== null &&
       typeof parsed === 'object' &&
@@ -472,4 +498,14 @@ export function isEmptyDocument(content: string, format: 'json' | 'toml'): boole
   }
 }
 
-export { AGENT_DEFINITIONS, readTableScalars };
+/**
+ * 读表内标量键（预览 diff 用）。
+ *
+ * 这里包一层而不是直接 re-export：`toml.ts` 不处理 BOM，而调用方传进来的
+ * 是刚从磁盘读出的原文——统一在这一层剥离，避免每个调用点各记一遍。
+ */
+export function readTableScalars(content: string, table: string): Record<string, string> {
+  return readTableScalarsFromToml(stripBom(content), table);
+}
+
+export { AGENT_DEFINITIONS };

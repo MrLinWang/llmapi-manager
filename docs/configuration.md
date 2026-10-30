@@ -10,9 +10,9 @@
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `HOST` | `127.0.0.1` | 监听地址。对外暴露请改 `0.0.0.0` 并配 HTTPS 反向代理 |
+| `HOST` | `127.0.0.1` | 监听地址。对外暴露请改 `0.0.0.0` 并配 HTTPS 反向代理；Windows 服务安装包默认即 `0.0.0.0`，可达范围由防火墙与网络配置档约束 |
 | `PORT` | `8787` | 监听端口 |
-| `PUBLIC_BASE_URL` | 由 `HOST:PORT` 推导 | **写进 Agent 配置**的网关地址（不带 `/v1`）。反向代理或容器部署必须显式设置 |
+| `PUBLIC_BASE_URL` | 由 `HOST:PORT` 推导 | **写进 Agent 配置**的网关地址（不带 `/v1`）。反向代理或容器部署必须显式设置；Windows 服务默认固定为 `http://127.0.0.1:8787`，让本机 Agent 走回环 |
 | `DATA_DIR` | `data` | 数据目录。相对路径按**进程 cwd** 解析：`npm start` / `npm run dev` 经 workspaces 切换后 cwd 是 `server/`，所以默认落在 `server/data`；想固定在仓库根可设 `../data` 或绝对路径 |
 | `ADMIN_USERNAME` | `admin` | 初始管理员用户名，仅首次创建账号时使用 |
 | `ADMIN_PASSWORD` | 无 | 应急通道：设置后跳过网页初始化，直接以此口令创建 `ADMIN_USERNAME` 账号 |
@@ -23,11 +23,12 @@
 | `LOG_DIR` | 仓库根 `log/` | 运行日志目录；设为 `off` 则只输出到控制台 |
 | `LOG_MAX_BYTES` | `5242880`（5MB） | 单个日志文件的滚动阈值 |
 | `LOG_MAX_FILES` | `5` | 保留的历史日志文件个数 |
-| `AGENT_HOME_DIR` | OS 家目录 | Agent 配置根目录（其下为 `.codex`、`.claude`） |
+| `AGENT_HOME_DIR` | OS 家目录 | Agent 配置根目录（其下为 `.codex`、`.claude`）。Windows 服务以 LocalSystem 运行时**必须**显式指向安装用户目录，否则文件会写进 `C:\Windows\system32\config\systemprofile`，用户自己的 Codex 读不到 |
 | `CODEX_HOME` | 无 | 仅用于定位 Codex 配置目录（结束 Codex 进程时设进子进程环境）。设了就优先于 `AGENT_HOME_DIR/.codex` |
+| `CODEX_BIN` | 无（用 PATH 上的 `codex`） | `codex` 可执行文件的绝对路径（Windows 上如 `C:\Users\me\AppData\Roaming\npm\codex.cmd`）。Windows 服务（LocalSystem）的 PATH 通常不含 npm 全局安装目录，结束 Codex 守护进程时会找不到 `codex`；设为完整路径可避免该问题 |
 | `ENABLE_DIAGNOSTICS` | 无（关闭） | 设为 `1` 才开启 `/api/diagnostics/*`；未开启时这四个接口返回 404 |
-| `TRUST_PROXY` | 无（关闭） | 设为 `1` 才采信 `X-Forwarded-Proto` 等转发头，且只信任来自回环的代理。**部署在反向代理后必须开**，否则同步快照的 HTTPS 检查会把代理回源当成明文请求 |
-| `SYNC_ALLOW_INSECURE` | 无（关闭） | 设为 `1` 允许同步快照与 follower 拉取走明文 HTTP。仅用于可信内网（如 EasyTier 隧道内） |
+| `TRUST_PROXY` | 无（关闭） | 设为 `1` 才采信 `X-Forwarded-Proto` 等转发头，且只信任来自回环的代理。**部署在 HTTPS 反向代理后必须开**，否则同步快照的 HTTPS 检查会把代理回源当成明文请求。直接以局域网 HTTP 提供服务时**不要**开：没有反代可信任，开了只会让伪造的转发头被采信 |
+| `SYNC_ALLOW_INSECURE` | 无（关闭） | 设为 `1` 允许同步快照与 follower / peer 拉取走明文 HTTP。仅用于可信内网（如 EasyTier 隧道内、家用局域网）。**两端都要设**：一端导出、一端拉取，任一端没开都会被自己的协议检查拦下。它不替代防火墙，也不改变「快照里是明文 Key」这一事实 |
 | `MODELS_DEV_URL` | `https://models.dev/models.json?type=all` | 模型公开规格库地址，供 `npm run registry:sync -w server` 校准上下文窗口与推理档位。内网部署可指向同构镜像；不可达时该命令报错退出，不影响服务运行 |
 | `MODELINFO_URL` | `https://modelinfo.dev/v1/models` | 另一个模型目录源，**推理档位优先取它**（直接给数组，不用按 provider 投票）。注意只有这一个路径可用，`api.json`/`models.json` 均 404 |
 
@@ -42,6 +43,64 @@
 注意这个推导值**不能当作"本机访问"的安全证据**：服务其实对外监听，明文请求照样能进来。
 同步快照的 HTTPS 检查因此读的是请求实际协议（`request.protocol`），不看这个配置项；
 需要反向代理配合时开 `TRUST_PROXY=1`。`publicBaseUrlIsExplicit` 记录了它是不是用户显式配的。
+
+## `HOST` 与 `PUBLIC_BASE_URL` 是两件事
+
+这两个值经常被混为一谈，而它们的用途完全不同：
+
+| 变量 | 回答什么问题 | 影响 |
+| --- | --- | --- |
+| `HOST` | 服务**监听**在哪块网卡上 | 决定「谁能连进来」。`127.0.0.1` 只允许本机；`0.0.0.0` 允许所有网卡 |
+| `PUBLIC_BASE_URL` | 客户端**应该用什么地址访问**本服务 | 决定写进 Agent 配置的网关地址，也影响会话 Cookie 是否加 `Secure` |
+
+Windows 服务安装包的默认组合是 `HOST=0.0.0.0` + `PUBLIC_BASE_URL=http://127.0.0.1:8787`：
+
+- `HOST=0.0.0.0` 让局域网里的另一台机器能访问控制台与同步快照接口；
+- `PUBLIC_BASE_URL` 仍写回环，因为**本机 Agent 走回环最稳**——不受网卡切换、IP 变化、
+  VPN 占用路由的影响。把它改成局域网地址的唯一理由是：**其它设备上的 Agent 也要经这台
+  网关转发**。那时必须填一个客户端确实能访问到的地址（局域网 IP 或域名），否则 Agent
+  会连不上。
+
+反过来也要注意：改 `PUBLIC_BASE_URL` 不会让服务「只监听回环」，它只是写进配置的字符串；
+真正的可达性由 `HOST` + 防火墙决定。同步的 HTTPS 检查两者都不看，只看请求实际协议
+（见[`SYNC_ALLOW_INSECURE`](#环境变量)与 [sync.md](./sync.md#windows-与局域网)）。
+
+## Windows 服务模式
+
+Windows 安装包（Inno Setup 生成的 `llmapi-manager-setup-<version>-x64.exe`）与便携 zip
+把服务装成 WinSW 托管的 Windows 服务，运行时固定为自带的 Node 22 LTS x64，不要求用户
+预装 Node。安装、升级、卸载、日志与故障排查见 [windows.md](./windows.md)；本节只列
+安装器写进 `.env` 的默认值与它们的原因。
+
+| 变量 | Windows 服务默认 | 说明 |
+| --- | --- | --- |
+| `HOST` | `0.0.0.0` | 允许局域网访问；范围交给防火墙与网络配置档 |
+| `PORT` | `8787` | 与源码运行一致 |
+| `PUBLIC_BASE_URL` | `http://127.0.0.1:8787` | 本机 Agent 走回环；其它设备要从网关走时再改 |
+| `DATA_DIR` | `C:\ProgramData\llmapi-manager\data` | 安装器展开 `%ProgramData%`。升级与卸载默认保留 |
+| `LOG_DIR` | `C:\ProgramData\llmapi-manager\log` | 与 `DATA_DIR` 分开，避免迁移数据时带走日志 |
+| `AGENT_HOME_DIR` | `C:\Users\<安装用户>` | 服务以 LocalSystem 运行，自身家目录是系统配置目录；必须指向安装用户目录 |
+| `DATA_ENCRYPTION_KEY` | 安装时随机生成 | 缺了它会明文存凭据并持续告警 |
+| `ADMIN_PASSWORD` | 安装时随机生成，**健康检查通过后从 `.env` 删除** | 用于首次建号。删除后账号已存在，重启不会重复创建 |
+| `SYNC_ALLOW_INSECURE` | 不写（关闭） | 只有可信局域网做明文同步时才设为 `1`，且两端都要设 |
+| `CODEX_BIN` | 不写（依赖 PATH） | 服务账号 PATH 里没有 npm 全局目录时，填 `codex.cmd` 的绝对路径 |
+| `TRUST_PROXY` | 不写（关闭） | 只有前面放了 HTTPS 反向代理时才设 `1` |
+
+几个必须知道的 Windows 细节：
+
+- **服务账号默认是 LocalSystem**。它能写安装用户的家目录前提是安装器额外授予了
+  `AGENT_HOME_DIR\.codex` 与 `.claude` 的修改权限；重装或换用户后若权限丢失，表现为
+  「应用配置成功但 Codex 读不到」。安全上更稳妥的做法是改用专用低权限账号运行服务。
+- **防火墙规则是入站 TCP 8787，Private 配置档**（安装时可选，**默认不勾选**）。Windows
+  把当前网络识别为 Public 时这条规则不生效，局域网访问会表现为连接超时。需要改网络配置档，
+  或补一条对应配置档的规则。
+- **只升级程序不覆盖配置**：升级保留 `.env` 与数据目录；卸载默认保留数据，
+  只有显式 `-Purge` 才删除。
+- **`ADMIN_PASSWORD` 是一次性的**：健康检查通过后安装器会把它从 `.env` 删掉。若安装
+  中断在删除之前，`.env` 里会残留一个已生效的口令，应手动删除并确认账号密码强度。
+
+> 本仓库的开发环境是 Linux，**以上 Windows 运行时行为没有在本机实测**，
+> 需在 Windows CI 与用户机器上验证安装、升级、卸载三条路径。
 
 ## 运行日志
 
@@ -94,14 +153,15 @@ Docker / systemd 部署如果希望把日志挂到宿主机，把 `LOG_DIR` 指�
 ```
 data/                                # 默认即 server/data，见上表 DATA_DIR 说明
 ├── identity.json                     租户与账号
-├── instance.json                     会话签名密钥
+├── instance.json                     会话签名密钥（也是同步快照的 masterId 来源）
 ├── setup.json                        首次初始化状态（一次性令牌哈希，完成后清空）
 └── tenants/<tenantId>/
-    ├── providers.json                供应商
-    ├── settings.json                 默认供应商/模型、界面语言、网关令牌、Codex 行为开关
+    ├── providers.json                供应商（含 imageModels 与 modelCapabilities）
+    ├── settings.json                 默认供应商/模型、界面语言、网关令牌、Codex 行为与流式参数、同步设置
     ├── agents.json                   下发快照
     ├── api-tokens.json               程序化访问用的 API 令牌（只存 sha256）
     ├── sync-conflicts.json           待仲裁的同步冲突（凭据已打码）
+    ├── sync-state.json               双向同步的内容基线（只存哈希，不存原文，无接口）
     └── requests.jsonl                请求日志
 ```
 
@@ -111,6 +171,11 @@ Agent 文件的写前备份**不在数据目录**，而是落在被改文件的�
 `sync-conflicts.json` 单独成文件而不是塞进 `settings.json`：冲突可能累积很多条，
 混进设置会让设置文件变成一个还在变大的列表，而两者的生命周期也不同（冲突解决完就该清空）。
 它里面的凭据只保留打码形态，完整远端值另存为本机加密的 `remoteValueSealed`。
+
+`sync-state.json` 是[双向同步](./sync.md#sync-statejson三方合并的基线)的三方合并基线：
+记录每个供应商 / 设置 / Agent 连接方式的**内容哈希**，用来区分「只有一边变了」与
+「两边真的改成了不同结果」。它不暴露任何接口，删除它只会让下一次同步退回「首次同步」
+（按 `updatedAt` 判方向），不会丢数据。
 
 所有 JSON 文件的外层结构：
 
@@ -179,6 +244,8 @@ npm start
 - 反向代理需要关闭对 SSE 的缓冲（例如 nginx 的 `proxy_buffering off;`），否则流式响应会被攒住。
 - 服务是无状态的（除 `data/`），用 systemd / pm2 / 容器托管都可以，但**不要多实例共享同一个 `data/`**：
   JSON 存储与内存缓存没有跨进程协调。
+- Windows 上推荐用安装包 + WinSW 服务模式（`HOST=0.0.0.0`、ProgramData 下的数据与日志、
+  防火墙放行 TCP 8787），见上文「Windows 服务模式」与 [windows.md](./windows.md)。
 
 ## 迁移
 

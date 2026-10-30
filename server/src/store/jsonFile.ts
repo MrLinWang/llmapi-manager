@@ -23,13 +23,66 @@ export interface JsonFile<T> {
   write(data: T): void;
 }
 
+/**
+ * rename 在 Windows 上的瞬时失败码：目标文件正被杀毒软件/索引器/另一个进程打开时，
+ * `MoveFileEx` 会返回 EPERM/EBUSY/EACCES。这不是数据错误，稍等重试就能成功。
+ */
+const TRANSIENT_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const RENAME_RETRY_DELAYS_MS = [10, 20, 50] as const;
+
+/** 同步睡眠：写入路径是同步 API（createJsonFile.write 返回 void），不能 await。 */
+function sleepSync(ms: number): void {
+  // Atomics.wait 是标准库里唯一不忙等的同步睡眠；SharedArrayBuffer 不会被实际修改。
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+export interface RenameRetryOptions {
+  /** 测试注入；默认 fs.renameSync */
+  rename?: (from: string, to: string) => void;
+  /** 测试注入；默认同步 Atomics.wait */
+  sleep?: (ms: number) => void;
+}
+
+/**
+ * 临时文件 → 目标文件的重命名，瞬时失败最多重试 3 次（10/20/50ms）。
+ *
+ * 为什么必须重试：Windows 没有 POSIX 的"rename 覆盖是原子且几乎不失败"的保证。
+ * 杀毒软件/Windows Search 会短暂持有文件句柄，rename 抛 EPERM，表现为**偶发写入失败**
+ * ——用户看到保存报错，重试一次又好了，极难归因。三次总等待 80ms，足够让持锁方释放。
+ *
+ * 非瞬时错误（ENOENT、EXDEV 等）立即抛出：重试解决不了，只会掩盖真实问题。
+ */
+export function renameWithRetry(
+  tmp: string,
+  filePath: string,
+  options: RenameRetryOptions = {},
+): void {
+  const rename = options.rename ?? fs.renameSync;
+  const sleep = options.sleep ?? sleepSync;
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      rename(tmp, filePath);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const retryable =
+        code !== undefined &&
+        TRANSIENT_RENAME_CODES.has(code) &&
+        attempt < RENAME_RETRY_DELAYS_MS.length;
+      if (!retryable) throw error;
+      sleep(RENAME_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
 export function writeFileAtomic(filePath: string, content: string, mode = 0o600): void {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
   const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
   fs.writeFileSync(tmp, content, { mode });
   try {
-    fs.renameSync(tmp, filePath);
+    renameWithRetry(tmp, filePath);
   } catch (error) {
     fs.rmSync(tmp, { force: true });
     throw error;

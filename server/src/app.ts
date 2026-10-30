@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import fs from 'node:fs';
+import path from 'node:path';
 import type { AppContext } from './context';
 import { RouteRegistry } from './http/routeRegistry';
 import { registerApiGuard, defineRoute } from './http/guard';
@@ -122,8 +123,11 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       });
       return;
     }
-    // SPA fallback：非接口路径交给前端路由
-    const indexPath = `${ctx.config.webDistDir}/index.html`;
+    // SPA fallback：非接口路径交给前端路由。
+    // 用 path.join 而不是字符串拼 `/`：Windows 上 webDistDir 是反斜杠，
+    // `.../web/dist` + `/index.html` 会得到混合分隔符，虽然多数 API 能容忍，
+    // 但一旦有人把它当字符串做 startsWith/比较就会出错。
+    const indexPath = path.join(ctx.config.webDistDir, 'index.html');
     if (fs.existsSync(indexPath)) {
       reply.type('text/html').send(fs.readFileSync(indexPath));
       return;

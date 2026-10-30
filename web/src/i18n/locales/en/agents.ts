@@ -89,9 +89,9 @@ export const enAgents: typeof zhAgents = {
     appliedWithRunning_other:
       'Config written, but {{count}} {{agent}} processes are still running. They keep the old config and must be restarted before the changes take effect.',
     reopenCodexHint:
-      'Reopen Codex to load the latest config. You can also run <code>pkill -9 -f codex</code> manually to clean up the related processes.',
+      'Reopen Codex to load the latest config. You can also end leftover processes manually: on Windows use Task Manager or <code>taskkill /F /IM codex.exe</code>; on Linux/macOS run <code>pkill -9 -f codex</code>.',
     manualKillHint:
-      'You can also run <code>pkill -9 -f codex</code> manually to clean up the related processes.',
+      'You can also end leftover processes manually: on Windows use Task Manager or <code>taskkill /F /IM codex.exe</code>; on Linux/macOS run <code>pkill -9 -f codex</code>.',
     webSearchOff: 'Web search disabled and the config was re-applied. Codex no longer sends the web_search tool.',
     webSearchOn: 'Web search enabled and the config was re-applied. Upstreams that do not support the tool will report unsupported_tool.',
     streamCleared:

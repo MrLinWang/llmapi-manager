@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Server } from 'node:http';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { buildApp } from '../src/app';
@@ -3318,6 +3320,306 @@ describe('冒烟：配置同步的端到端链路', () => {
       });
       expect(response.statusCode).toBe(400);
     } finally {
+      await instance.app.close();
+      fs.rmSync(instance.dir, { recursive: true, force: true });
+      fs.rmSync(instance.home, { recursive: true, force: true });
+    }
+  });
+
+  // ── Phase 1：peer / 快照校验 / 冲突响应脱敏 ──────────────────────
+
+  /** 起一个只返回固定快照 JSON 的假对端，让 pull 走真实 HTTP 而不是 mock fetch。 */
+  async function startSnapshotServer(
+    payload: unknown,
+  ): Promise<{ port: number; close: () => Promise<void> }> {
+    const server = createServer((_request, response) => {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify(payload));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as AddressInfo).port;
+    return {
+      port,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  }
+
+  function remoteProviderPayload(
+    id: string,
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      id,
+      name: '远端供应商',
+      providerKey: 'remote',
+      apiType: 'openai',
+      baseUrl: 'http://127.0.0.1:65530/v1',
+      apiKey: 'sk-remote-secret',
+      models: ['remote-model'],
+      imageModels: ['img-remote'],
+      modelCapabilities: {
+        'remote-model': { contextWindow: 64_000, reasoningEfforts: ['low', 'high'] },
+      },
+      enabled: true,
+      priority: 1,
+      notes: 'from remote',
+      websiteUrl: 'https://remote.example.com',
+      createdBy: 'u_remote',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('status 返回 canServe/canPull 与当前身份的 sync 权限', async () => {
+    const instance = await makeInstance({ encryptionKey: 'k-status' });
+    try {
+      const response = await instance.app.inject({
+        method: 'GET', url: '/api/sync/status', headers: { cookie: instance.cookie },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json() as {
+        config: { role: string };
+        canServe: boolean;
+        canPull: boolean;
+        hasSyncRead: boolean;
+        hasSyncWrite: boolean;
+      };
+      expect(body.config.role).toBe('standalone');
+      expect(body.canServe).toBe(false);
+      expect(body.canPull).toBe(false);
+      // 登录的是 owner（ADMIN_PASSWORD 建号），两个 sync 权限都有
+      expect(body.hasSyncRead).toBe(true);
+      expect(body.hasSyncWrite).toBe(true);
+
+      // 只含 settings:read 的令牌：两个 sync 权限都没有，界面据此隐藏按钮
+      const created = await instance.app.inject({
+        method: 'POST', url: '/api/tokens', headers: { cookie: instance.cookie },
+        payload: { name: '只读设置', scopes: ['settings:read'] },
+      });
+      expect(created.statusCode).toBe(200);
+      const token = (created.json() as { token: string }).token;
+      const limited = await instance.app.inject({
+        method: 'GET', url: '/api/sync/status',
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(limited.statusCode).toBe(200);
+      const limitedBody = limited.json() as { hasSyncRead: boolean; hasSyncWrite: boolean };
+      expect(limitedBody.hasSyncRead).toBe(false);
+      expect(limitedBody.hasSyncWrite).toBe(false);
+    } finally {
+      await instance.app.close();
+      fs.rmSync(instance.dir, { recursive: true, force: true });
+      fs.rmSync(instance.home, { recursive: true, force: true });
+    }
+  });
+
+  it('peer 既能导出快照，也能拉取对端（保留 imageModels/modelCapabilities）', async () => {
+    const remote = await startSnapshotServer({
+      schemaVersion: 1,
+      exportedAt: '2026-01-01T00:00:00.000Z',
+      masterId: 'inst_remote_peer',
+      scopes: ['providers'],
+      providers: [remoteProviderPayload('p_peer_remote')],
+    });
+    const instance = await makeInstance({ encryptionKey: 'k-peer' });
+    try {
+      const patched = await instance.app.inject({
+        method: 'PATCH', url: '/api/sync/config', headers: { cookie: instance.cookie },
+        payload: {
+          role: 'peer',
+          masterUrl: `http://127.0.0.1:${remote.port}`,
+          scopes: ['providers'],
+        },
+      });
+      expect(patched.statusCode).toBe(200);
+
+      const status = (
+        await instance.app.inject({
+          method: 'GET', url: '/api/sync/status', headers: { cookie: instance.cookie },
+        })
+      ).json() as { canServe: boolean; canPull: boolean };
+      expect(status.canServe).toBe(true);
+      expect(status.canPull).toBe(true);
+
+      // 提供快照
+      const snapshot = await instance.app.inject({
+        method: 'GET', url: '/api/sync/snapshot?scopes=providers',
+        headers: { cookie: instance.cookie, host: '127.0.0.1:8787' },
+      });
+      expect(snapshot.statusCode).toBe(200);
+
+      // 同一角色也能拉取
+      const pulled = await instance.app.inject({
+        method: 'POST', url: '/api/sync/pull', headers: { cookie: instance.cookie },
+        payload: { token: 'api_peer_pull_token' },
+      });
+      expect(pulled.statusCode).toBe(200);
+      const result = pulled.json() as { applied: number; conflicts: unknown[]; summary: string };
+      expect(result.applied).toBe(1);
+      expect(result.conflicts).toHaveLength(0);
+      expect(result.summary.length).toBeGreaterThan(0);
+
+      const stored = instance.ctx.store
+        .forTenant('t_default')
+        .providers.list()
+        .find((item) => item.id === 'p_peer_remote');
+      expect(stored).toBeDefined();
+      // 同步范围必须把生图模型与能力表一起带过来，否则对端 Codex 目录会退化
+      expect(stored?.imageModels).toEqual(['img-remote']);
+      expect(stored?.modelCapabilities?.['remote-model']).toMatchObject({ contextWindow: 64_000 });
+      expect(instance.ctx.secrets.decode(stored!.apiKey)).toBe('sk-remote-secret');
+    } finally {
+      await remote.close();
+      await instance.app.close();
+      fs.rmSync(instance.dir, { recursive: true, force: true });
+      fs.rmSync(instance.home, { recursive: true, force: true });
+    }
+  });
+
+  it('follower 不能导出快照', async () => {
+    const instance = await makeInstance({ encryptionKey: 'k-follower' });
+    try {
+      const patched = await instance.app.inject({
+        method: 'PATCH', url: '/api/sync/config', headers: { cookie: instance.cookie },
+        payload: { role: 'follower', masterUrl: 'http://127.0.0.1:1', scopes: ['providers'] },
+      });
+      expect(patched.statusCode).toBe(200);
+
+      const response = await instance.app.inject({
+        method: 'GET', url: '/api/sync/snapshot?scopes=providers',
+        headers: { cookie: instance.cookie, host: '127.0.0.1:8787' },
+      });
+      expect(response.statusCode).toBe(400);
+      expect((response.json() as { error: { messageKey: string } }).error.messageKey).toBe(
+        'sync.role.mustBeMasterToExport',
+      );
+    } finally {
+      await instance.app.close();
+      fs.rmSync(instance.dir, { recursive: true, force: true });
+      fs.rmSync(instance.home, { recursive: true, force: true });
+    }
+  });
+
+  it('master 不能拉取对端', async () => {
+    const instance = await makeInstance({ encryptionKey: 'k-master' });
+    try {
+      await instance.app.inject({
+        method: 'PATCH', url: '/api/sync/config', headers: { cookie: instance.cookie },
+        payload: { role: 'master', scopes: ['providers'] },
+      });
+      const response = await instance.app.inject({
+        method: 'POST', url: '/api/sync/pull', headers: { cookie: instance.cookie },
+        payload: { token: 'api_should_not_matter' },
+      });
+      expect(response.statusCode).toBe(400);
+      expect((response.json() as { error: { messageKey: string } }).error.messageKey).toBe(
+        'sync.role.mustBeFollowerToPull',
+      );
+    } finally {
+      await instance.app.close();
+      fs.rmSync(instance.dir, { recursive: true, force: true });
+      fs.rmSync(instance.home, { recursive: true, force: true });
+    }
+  });
+
+  it('pull 响应与冲突列表都不含 sealed/remoteHash；畸形/未来快照返回 400', async () => {
+    const instance = await makeInstance({ encryptionKey: 'k-conflict' });
+    let conflictServer: Awaited<ReturnType<typeof startSnapshotServer>> | undefined;
+    let futureServer: Awaited<ReturnType<typeof startSnapshotServer>> | undefined;
+    let malformedServer: Awaited<ReturnType<typeof startSnapshotServer>> | undefined;
+    try {
+      const created = await instance.app.inject({
+        method: 'POST', url: '/api/providers', headers: { cookie: instance.cookie },
+        payload: {
+          name: '本地供应商',
+          apiType: 'openai',
+          baseUrl: 'http://127.0.0.1:65530/v1',
+          apiKey: 'sk-local-secret',
+          models: ['local-model'],
+        },
+      });
+      expect(created.statusCode).toBe(201);
+      const providerId = (created.json() as { provider: { id: string } }).provider.id;
+
+      // 同 id、内容不同、updatedAt 更旧 → 首次同步判冲突（保留本地）
+      conflictServer = await startSnapshotServer({
+        schemaVersion: 1,
+        exportedAt: '2020-01-01T00:00:00.000Z',
+        masterId: 'inst_remote_conflict',
+        scopes: ['providers'],
+        providers: [
+          remoteProviderPayload(providerId, { updatedAt: '2020-01-01T00:00:00.000Z' }),
+        ],
+      });
+      futureServer = await startSnapshotServer({
+        schemaVersion: 2,
+        exportedAt: '2026-01-01T00:00:00.000Z',
+        masterId: 'inst_future',
+        scopes: ['providers'],
+        providers: [],
+      });
+      malformedServer = await startSnapshotServer({
+        schemaVersion: 1,
+        masterId: '',
+        scopes: ['providers'],
+      });
+
+      const patchConfig = async (port: number) =>
+        instance.app.inject({
+          method: 'PATCH', url: '/api/sync/config', headers: { cookie: instance.cookie },
+          payload: { role: 'follower', masterUrl: `http://127.0.0.1:${port}`, scopes: ['providers'] },
+        });
+      const pullOnce = async () =>
+        instance.app.inject({
+          method: 'POST', url: '/api/sync/pull', headers: { cookie: instance.cookie },
+          payload: { token: 'api_fake_pull_token' },
+        });
+
+      expect((await patchConfig(conflictServer.port)).statusCode).toBe(200);
+
+      const pulled = await pullOnce();
+      expect(pulled.statusCode).toBe(200);
+      const pulledBody = pulled.json() as { applied: number; conflicts: Array<Record<string, unknown>> };
+      expect(pulledBody.applied).toBe(0);
+      expect(pulledBody.conflicts).toHaveLength(1);
+      expect(pulledBody.conflicts[0].scope).toBe('providers');
+
+      const pulledRaw = JSON.stringify(pulledBody);
+      // 这两个字段只给服务端内部用：一个是凭据密文副本，一个是合并基线
+      expect(pulledRaw).not.toContain('remoteValueSealed');
+      expect(pulledRaw).not.toContain('remoteHash');
+      // 响应里不能出现远端明文 Key
+      expect(pulledRaw).not.toContain('sk-remote-secret');
+
+      const listed = await instance.app.inject({
+        method: 'GET', url: '/api/sync/conflicts', headers: { cookie: instance.cookie },
+      });
+      expect(listed.statusCode).toBe(200);
+      const listedRaw = JSON.stringify(listed.json());
+      expect(listedRaw).not.toContain('remoteValueSealed');
+      expect(listedRaw).not.toContain('remoteHash');
+      expect(listedRaw).not.toContain('sk-remote-secret');
+
+      // 未来版本：拒绝而不是按当前结构硬解读
+      expect((await patchConfig(futureServer.port)).statusCode).toBe(200);
+      const future = await pullOnce();
+      expect(future.statusCode).toBe(400);
+      expect((future.json() as { error: { messageKey: string } }).error.messageKey).toBe(
+        'sync.snapshot.futureSchema',
+      );
+
+      // 结构错误：统一 malformed
+      expect((await patchConfig(malformedServer.port)).statusCode).toBe(200);
+      const malformed = await pullOnce();
+      expect(malformed.statusCode).toBe(400);
+      expect((malformed.json() as { error: { messageKey: string } }).error.messageKey).toBe(
+        'sync.snapshot.malformed',
+      );
+    } finally {
+      await conflictServer?.close();
+      await futureServer?.close();
+      await malformedServer?.close();
       await instance.app.close();
       fs.rmSync(instance.dir, { recursive: true, force: true });
       fs.rmSync(instance.home, { recursive: true, force: true });

@@ -64,6 +64,9 @@ export const zhAgents = {
     /** Claude Code 没有常驻进程：说清"不支持"而不是返回一个空 actions 让用户猜 */
     noneForAgent: '{{agent}} 没有需要结束的常驻进程',
     noneRunning: '本机没有正在运行的 Codex 进程',
+    /** Windows：PowerShell 进程表探测失败，不能把"探测不到"当成"没有进程" */
+    tableUnavailable:
+      '无法读取本机进程列表，未能探测正在运行的 Codex 进程。请检查 PowerShell 是否可用，或按需手动结束进程',
   },
   catalog: {
     /** 目录条目上"来自哪家、哪个上游模型"的次要文字（Codex 的 /model 列表会显示） */

@@ -378,6 +378,11 @@ export function registerModelRoutes(
         nextPreference.directModel = null;
       }
 
+      // 按 Agent 记一次改动时间：同步的三方合并与冲突判定需要它。
+      // 不能用 settings.updatedAt 代替——改语言、改默认模型也会推进那个时间，
+      // 会让一个根本没动过的 AgentTarget 看起来"本地改过"，产生假冲突。
+      nextPreference.updatedAt = new Date().toISOString();
+
       const next: TenantSettings = {
         ...settings,
         agentTargets: { ...settings.agentTargets, [agentId]: nextPreference },

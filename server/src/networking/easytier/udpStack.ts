@@ -30,6 +30,7 @@
  */
 
 import dgram from 'node:dgram';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import {
@@ -295,31 +296,137 @@ export class UdpStack extends EventEmitter {
 }
 
 /**
- * 探测本机的 DNS 解析器地址（`/etc/resolv.conf` 的第一个 `nameserver`）。
+ * Windows DNS 解析器探测脚本。
+ *
+ * `Get-DnsClientServerAddress -AddressFamily IPv4` 返回每块网卡的 DNS 服务器列表，
+ * 展平后 `ConvertTo-Json` 输出数组（只有一个时输出字符串）。UDP 转发是 udp4，
+ * 所以只取 IPv4——IPv6 地址投递不进去，返回它只会让 DNS 静默失败。
+ *
+ * `[Console]::OutputEncoding = UTF8` 与进程表探测同理：中文代码页会把输出编码成 GBK。
+ */
+export const WINDOWS_DNS_SCRIPT =
+  '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ' +
+  '(Get-DnsClientServerAddress -AddressFamily IPv4).ServerAddresses | ConvertTo-Json -Compress';
+
+/** 从 `/etc/resolv.conf` 内容里取第一个有效的 nameserver；没有返回 null。 */
+export function parseResolvConf(content: string): string | null {
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('nameserver')) continue;
+    const parts = trimmed.split(/\s+/);
+    const address = parts[1];
+    if (address !== undefined && address !== '') {
+      // 去掉 IPv6 的 scope 后缀（fe80::1%eth0 → fe80::1）
+      return address.split('%')[0];
+    }
+  }
+  return null;
+}
+
+const IPV4_ADDRESS = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+
+/** 校验并规范化单个 DNS 地址；不是 IPv4 时返回 null（udp4 投递不了 IPv6）。 */
+function normalizeIpv4(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().replace(/^["']|["']$/g, '');
+  if (!IPV4_ADDRESS.test(trimmed)) return null;
+  const octets = trimmed.split('.').map((item) => Number(item));
+  return octets.every((item) => item >= 0 && item <= 255) ? trimmed : null;
+}
+
+/**
+ * 解析 Windows `Get-DnsClientServerAddress` 的输出。
+ *
+ * 形态随 PowerShell 版本/管道形态而变：数组、单字符串、或被 `Select-Object` 包成
+ * `{ ServerAddresses: [...] }` 对象。非 JSON 的纯文本（某些包装脚本）按行取第一个 IPv4。
+ */
+export function parseWindowsDnsServerOutput(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+
+  const pick = (value: unknown): string | null => {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const address = pick(item);
+        if (address !== null) return address;
+      }
+      return null;
+    }
+    if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      const nested =
+        record.ServerAddresses ?? record.serverAddresses ?? record.value ?? record.Value;
+      return pick(nested);
+    }
+    return normalizeIpv4(value);
+  };
+
+  try {
+    return pick(JSON.parse(trimmed));
+  } catch {
+    // 不是 JSON：逐行尝试，忽略空行与报错文本
+    for (const line of trimmed.split('\n')) {
+      const address = normalizeIpv4(line.trim());
+      if (address !== null) return address;
+    }
+    return null;
+  }
+}
+
+export interface DnsResolutionOptions {
+  /** 默认 `process.platform`；测试注入用 */
+  platform?: NodeJS.Platform;
+  /** 默认用 execFileSync 调 PowerShell；测试注入用 */
+  exec?: (file: string, args: string[]) => string;
+  /** 默认读 `/etc/resolv.conf`；测试注入用 */
+  readResolvConf?: () => string;
+}
+
+/**
+ * 探测本机的 DNS 解析器地址。
  *
  * 为什么需要它：DNS 的解析器**通常不是 `127.0.0.1`**。实测这台机器上
  * systemd-resolved 用的是 `127.0.0.53:53`——按"127.0.0.1:53"配默认映射，
  * 虚拟网内的 DNS 开箱就不工作，而症状是"能连对端但域名解析不了"，
  * 排查方向会偏到 resolv.conf 上。
  *
- * 读不到文件（非 Linux、权限不足）时回退到 `127.0.0.1`：让用户自己配，
- * 但至少不会崩。调用方应当把探测结果记日志，方便用户核对。
+ * Windows 没有 resolv.conf，用 `Get-DnsClientServerAddress`（同一条 PowerShell
+ * 路线的输出必须按 UTF-8 解码，见 WINDOWS_DNS_SCRIPT）。
+ *
+ * 探测失败（非 Linux、权限不足、没有网卡 DNS、输出不可解析）一律回退到
+ * `127.0.0.1`：让用户自己配，但至少不会崩。调用方应当把探测结果记日志，方便用户核对。
  */
-export function resolveSystemDnsServer(): string {
-  try {
-    const content = readFileSync('/etc/resolv.conf', 'utf8');
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('nameserver')) continue;
-      const parts = trimmed.split(/\s+/);
-      const address = parts[1];
-      if (address !== undefined && address !== '') {
-        // 去掉 IPv6 的 scope 后缀（fe80::1%eth0 → fe80::1）
-        return address.split('%')[0];
-      }
+export function resolveSystemDnsServer(options: DnsResolutionOptions = {}): string {
+  const platform = options.platform ?? process.platform;
+
+  if (platform === 'win32') {
+    try {
+      const exec =
+        options.exec ??
+        ((file: string, args: string[]) =>
+          execFileSync(file, args, {
+            encoding: 'utf8',
+            timeout: 5_000,
+            windowsHide: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          }));
+      const raw = exec('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        WINDOWS_DNS_SCRIPT,
+      ]);
+      return parseWindowsDnsServerOutput(raw) ?? '127.0.0.1';
+    } catch {
+      return '127.0.0.1';
     }
+  }
+
+  try {
+    const read = options.readResolvConf ?? (() => readFileSync('/etc/resolv.conf', 'utf8'));
+    return parseResolvConf(read()) ?? '127.0.0.1';
   } catch {
     // 读不到就用回环地址兜底，由用户显式配置
+    return '127.0.0.1';
   }
-  return '127.0.0.1';
 }

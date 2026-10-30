@@ -2,9 +2,11 @@
 
 ## 环境
 
-- Node.js >= 18.18（`package.json` 的 `engines`）。开发机上验证过 18.20。
+- Node.js >= 18.18（`package.json` 的 `engines`）。开发机上验证过 22.23.1。
 - npm 9+（使用 workspaces）。
-- 无需数据库、无需 Go/Rust 工具链。
+- 无需数据库、无需 Go/Rust 工具链（可选的 `native/easytier-node/` 才需要 Rust）。
+- Windows 上建议用 **Node 22 LTS x64**：安装包/便携包固定带这个运行时，
+  开发环境与产物保持一致能少一类"本机能跑、装完不能跑"的问题。
 
 ## 起步
 
@@ -43,6 +45,17 @@ npm run dev -w web        # vite，热更新
 | `npm test` | server（vitest）→ web（vitest + jsdom） |
 | `npm run registry:sync -w server` | 用 modelinfo.dev / models.dev 校准模型上下文与推理档位（默认演练，`-- --write` 落盘） |
 
+Windows 打包与服务脚本（**需在 Windows 上运行**，Linux 上不可执行）：
+
+| 脚本 | 作用 |
+| --- | --- |
+| `scripts/windows/build-package.ps1` | 构建便携 zip；本机有 Inno Setup 时同时生成安装包 |
+| `scripts/windows/install-service.ps1` | 写入 `.env`、注册 WinSW 服务、配置目录权限；防火墙规则可选（默认不加） |
+| `scripts/windows/uninstall-service.ps1` | 停止并删除服务；默认保留数据，`-Purge` 才删除 |
+
+用法与前置依赖见 [windows.md](./windows.md)。这些脚本的验证依赖 Windows CI 或用户机器，
+本仓库的 Linux 开发环境跑不了。
+
 ## 测试布局
 
 | 文件 | 覆盖 |
@@ -54,16 +67,17 @@ npm run dev -w web        # vite，热更新
 | `server/test/selection.test.ts` | 选路纯函数：生图三档优先级（声明 → 默认 → priority）、别名不进回退、生图永不转换、对话路径不受影响 |
 | `server/test/convert.test.ts` | Responses ←→ Chat 的请求 / 响应 / 流式三向映射，含工具调用与有损字段 |
 | `server/test/apiToken.test.ts` | API 令牌生成与校验：`api_` 前缀区分、sha256 比对与 `timingSafeEqual`、空 scopes / 过期 / 吊销一律拒绝、`lastUsedAt` 60 秒节流、对外视图不含 hash |
-| `server/test/agents.test.ts` | JSON/TOML 补丁（含 `raw` 布尔）、Codex 模型目录生成、备份、还原冲突、空壳文件清理 |
-| `server/test/sync.test.ts` | 配置同步：快照导出 Key 为明文且不含网关令牌、只导出勾选范围、跨机重新加密后能解出原文、冲突判定（本地更晚 / 远端更晚 / 内容相同 / 时间戳相同但内容不同 / 时区偏移）、冲突文件无明文 Key、不删远端没有的供应商、不覆盖本机网关令牌、两种仲裁选择、未配置加密密钥时不封存远端值 |
-| `server/test/agents.test.ts` | JSON/TOML 补丁（含 `raw` 布尔）、Codex 模型目录生成（含按模型分化的推理档位与模态白名单）、备份、还原冲突、空壳文件清理 |
+| `server/test/agents.test.ts` | JSON/TOML 补丁（含 `raw` 布尔、UTF-8 BOM 剥离）、Codex 模型目录生成（含按模型分化的推理档位与模态白名单）、备份、还原冲突、空壳文件清理 |
+| `server/test/sync.test.ts` | 配置同步：快照导出 Key 为明文且不含网关令牌、只导出勾选范围、跨机重新加密后能解出原文、`sync-state.json` 内容哈希与规范化（键序、档位数组排序）、三方合并各分支（只有一边变 / 两边变成一样 / 两边变成不同）、冲突 upsert 与收敛清理、不删远端没有的供应商、不覆盖本机网关令牌、两种仲裁与 agentTargets 冲突、未配置加密密钥时不封存远端值 |
+| `server/test/syncBidirectional.test.ts` | peer 双向：两端互拉后收敛、重复拉取不反复产生冲突、`canServe` / `canPull` / `hasSyncRead` / `hasSyncWrite`、旧快照缺字段的兼容、首次拉取不误报换机 |
 | `server/test/effortProbe.test.ts` | 逐档实测：responses/openai 各自发对路径与字段、`/v1` 不重复拼接、accepted/rejected 判定、全档位被拒时不写能力、进度回调（`done` 单调递增）、候选档位白名单 |
 | `server/test/modelInfo.test.ts` | modelinfo.dev 的字段映射、`document` 模态过滤、档位白名单与升序、`efforts: []` 与未知的区分 |
 | `server/test/modelRegistry.test.ts` | models.dev 的名字归一化与多候选放弃、四源合并优先级（上游 > modelinfo > models.dev > 默认）、输出上限取最小 |
 
-| `server/test/processes.test.ts` | Codex 进程识别（TUI / `exec` / 不误伤 `mycodex` 与一次性命令）、`etime` 解析 |
+| `server/test/processes.test.ts` | Codex 进程识别（TUI / `exec` / 不误伤 `mycodex` 与一次性命令）、`etime` 解析。会真正 spawn 进程的用例用 `it.skipIf(process.platform === 'win32')` 跳过；临时目录统一 `os.tmpdir()`，不要写死 `/tmp` |
+| `server/test/processesWindows.test.ts` | Windows 进程表的解析纯函数：`Get-CimInstance` 的 JSON → 进程条目、反斜杠/引号/`.exe`/`.cmd` 的命令识别、`taskkill` 参数；**不依赖真实 Windows**，在 Linux 上也能跑 |
 | `server/test/security.test.ts` | 权限矩阵、租户隔离、凭据编解码、路由登记 |
-| `server/test/storage.test.ts` | 原子写、损坏隔离、未来版本隔离 |
+| `server/test/storage.test.ts` | 原子写、Windows 下 `rename` 遇 `EPERM` / `EBUSY` / `EACCES` 的重试、损坏隔离、未来版本隔离 |
 | `server/test/logger.test.ts` | 运行日志落盘、级别阈值、打码、按大小滚动与保留个数 |
 | `server/test/smoke.test.ts` | 端到端：登录、供应商（含三种 `apiType` 与拉取模型列表）、网关令牌、API 令牌（生命周期 / 收窄 403 / 不能改口令与建令牌 / 吊销即失效）、转发（含流式/回退/501 双向/4xx 透传/自动开启转换）、诊断接口（默认 404、开启后路由预演与自检清单、只读令牌 403）、Agent（含模型目录与 `web_search` 开关、结束进程）、界面语言设置（默认 null / 落盘 / 非法值 400 / 读路径降级 / 只读令牌 403）、越权、持久化 |
 | `web/test/pages.test.tsx` | 页面装配：登录、首次设置、供应商（含获取模型与标签片段编辑）、模型（含三种协议选项与文案）、Agent、概览、设置页语言切换（落盘 PATCH + 刷新身份 + 无权限只读）（jsdom + 假 fetch） |
@@ -76,10 +90,27 @@ npm run dev -w web        # vite，热更新
 所以并行跑测试不会撞端口。正常那个假上游同时提供 Chat Completions / Responses / Messages 三种
 响应形态（`server/test/mockUpstream.ts`），以便断言请求确实打到了对应协议的路径上。
 Agent 相关用例用 `AGENT_HOME_DIR` 指向临时目录，**不会碰你的真实家目录**。
-`processes.test.ts` 只测纯函数（命令行分类与 `etime` 解析），不会真的给任何进程发信号。
-日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**。
+`processes.test.ts` 以纯函数为主（命令行分类与 `etime` 解析）；真正 spawn 进程验证「结束进程」的用例只在 POSIX 上跑，`it.skipIf(process.platform === 'win32')` 跳过——Windows 侧由 `processesWindows.test.ts` 的纯函数覆盖，避免 CI 上误杀进程。
+日志用例一律把 `LOG_DIR` 指向临时目录，**不会污染仓库根的 `log/`**；涉及临时文件的用例统一用 `os.tmpdir()`，不要写死 `/tmp`（Windows 上没有 `/tmp`）。
 
-当前基线：731 项（server 694 + web 37）。
+## Windows 开发与 CI
+
+- **纯函数优先**：能脱离平台判断的逻辑（命令识别、JSON/TOML 解析、路径拼接、哈希、`etime`
+  换算）都做成纯函数，在 Linux 上就能测；只有「真的调 PowerShell / 真的发信号」的路径才做
+  平台分支。
+- **POSIX-only 用例显式跳过**：用 `it.skipIf(process.platform === 'win32')`，不要靠 `if`
+  直接 return——那样在 Windows 上会显示「通过」，掩盖根本没跑。
+- **`/tmp` 一律换成 `os.tmpdir()`**：Windows 没有 `/tmp`，写死会让整个文件在 CI 上失败。
+- **PowerShell/服务脚本不在 Linux 上执行**：`scripts/windows/**` 与
+  `.github/workflows/ci.yml` 的打包、安装步骤只能在 Windows runner 或用户机器上验证。
+  本机若装了 `pwsh`，最多做语法解析，不要声称已实测。
+- **CI 矩阵**：Ubuntu 与 Windows 都跑 `npm ci` + `npm run typecheck` + `npm test`；
+  另有 Windows 打包 job（有 Inno Setup 就出 EXE，否则出便携 zip）与解压 zip 跑
+  `/api/health` 的冒烟 job。改到 Windows 运行时逻辑后要看 Windows runner 的结果，
+  而不是只本地 Linux 绿。
+
+测试基线：数量以 `npm test` 的**实际输出为准**（server + web 两段都算）。文档不写死具体
+数字，避免每加一个用例就过期；Lead 终检时如需回填，以当次完整输出为准。
 
 
 ```bash
@@ -254,6 +285,12 @@ curl -s localhost:8787/api/health | jq      # 启动告警
 - 想看模型目录：应用 Codex 配置后读 `~/.codex/llmapi-model-catalog.json`；
   `codex debug models` 可导出官方目录作为结构参照。
 - 会话问题：`data/instance.json` 被换了会导致所有会话失效。
+- **Windows 服务**：日志在 `C:\ProgramData\llmapi-manager\log\app.log`，用
+  `Get-Content -Wait` 跟踪；`Get-Service` 看服务状态，`Restart-Service` 让改过的
+  `.env` 生效。安装/卸载脚本失败时先看它输出的日志路径与 `.env` 内容。
+- **Windows 明文 HTTP 同步**：两端都设 `SYNC_ALLOW_INSECURE=1`，否则一侧会以
+  `sync.snapshot.mustUseHttps` / `sync.masterUrl.insecure` 拒绝；确认 Windows 防火墙
+  放行了入站 TCP 8787（Private 配置档）。
 
 ## 提交前自查
 
@@ -274,6 +311,13 @@ curl -s localhost:8787/api/health | jq      # 启动告警
   「令牌能调管理接口」「越权 403」「令牌不能改口令 / 建令牌」「吊销后失效」都通过。
 - 改了诊断接口 → `smoke.test.ts` 里「默认关闭返回 404」与「开启后路由预演/自检清单」通过，
   且确认它复用的是 `selection.ts` / `convert/` / `upstreamPathFor`，没有自己重算一遍。
+- 改了同步（角色 / 范围 / 合并 / 冲突 / 快照字段）→ `sync.test.ts`、`syncBidirectional.test.ts`
+  与 `smoke.test.ts` 的同步用例组通过；`peer` 要按「两端都升级」验证，不要只测单端。
+- 改了 Windows 平台分支（进程、路径、BOM/CRLF、原子写重试、SPA fallback、SIGBREAK、DNS）→
+  纯函数单测在 Linux 通过，POSIX-only 用例用 `skipIf(win32)`，并看 Windows CI 的结果；
+  **不要因为本地 Linux 绿了就声称 Windows 已验证**。
+- 改了安装包/服务脚本 → 在 Windows runner 上构建并用解压后的产物跑 `/api/health` 冒烟；
+  Linux 上只能做静态检查。
 - 改了行为 → `docs/` 对应章节同步更新。
 - 没有把 `data/`、`.env`、`node_modules/`、`dist/` 加进版本库。
 
@@ -286,6 +330,8 @@ curl -s localhost:8787/api/health | jq      # 启动告警
 | 请求日志 | 全量追加，无轮转 | 加按大小/时间轮转或迁移到数据库 |
 | 无熔断 | 失败供应商不会被摘除 | 加熔断器与健康检查，注意与"别名不回落"的语义区分 |
 | 协议转换 | 只支持 `/v1/responses → openai`（Chat）一个方向 | 其余组合（如 `/v1/messages`）仍 501；需要时按 `gateway/convert/` 的结构补转换器 |
-| Codex 模型目录 | 上下文与输出上限是写死的保守值（128k / 8192），不反映上游真实能力 | 需要在供应商记录里补"每模型能力"字段，再喂给目录生成 |
-| 结束进程 | 只覆盖 Linux/macOS（依赖 `ps -ww -Ao`），Windows 上探测不到进程 | 按平台分支实现（Windows 需 `tasklist` / `wmic` 或 `Get-CimInstance`） |
+| Codex 模型目录 | 上下文/输出上限与推理档位来自 `modelCapabilities`（上游 → modelinfo → models.dev → 默认），但缺逐模型手工编辑入口 | 需要时补一个"覆盖单模型能力"的编辑 UI，而不是改目录生成逻辑 |
+| 结束进程 | POSIX 用 `ps` + 信号，Windows 用 PowerShell `Get-CimInstance` + `taskkill /PID /T /F`；Windows 路径只有纯函数测试 | 在 Windows CI/用户机器验证进程表探测、pid 兜底与结束进程树的实际效果 |
+| Windows 安装包 | 脚本只能在 Windows 上执行，Linux 开发环境跑不了 | 依赖 Windows CI 的打包/冒烟 job；不要在本机声称已实测 |
+| 同步并发 | 两次 `pull` 同时触发时谁后写谁生效，没有锁 | 需要时加进程内互斥与"正在同步"状态 |
 | 前端数据层 | 自写 `useAsync` | 页面规模变大后再评估引入查询库，不要提前抽象 |

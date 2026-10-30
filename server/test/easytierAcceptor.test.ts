@@ -175,7 +175,8 @@ beforeAll(async () => {
 afterAll(async () => {
   // 完整落盘：排查"路由信息没被对端采纳"这类问题只能靠看它的全量日志
   if (nativeLog.length > 0) {
-    fs.writeFileSync('/tmp/native-acceptor.log', nativeLog.join(''));
+    // 不能用写死的 /tmp：Windows 上没有这个目录，会抛 ENOENT 把清理流程打断
+    fs.writeFileSync(path.join(os.tmpdir(), 'native-acceptor.log'), nativeLog.join(''));
   }
   await acceptor?.close();
   native?.kill('SIGTERM');

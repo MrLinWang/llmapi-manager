@@ -10,6 +10,7 @@ import { createSecretCodec } from '../src/crypto/secretCodec';
 import { SyncService } from '../src/services/sync';
 import { resetWarnings } from '../src/resilience';
 import type { SyncSnapshot } from '../src/domain/sync';
+import { toPublicSyncConflict, validateSyncSnapshot } from '../src/domain/sync';
 import type { ProviderRecord } from '../src/domain/provider';
 import { translate } from '../src/i18n';
 
@@ -542,5 +543,589 @@ describe('同步接口的错误文案走 i18n', () => {
     expect(text).toContain('502');
     expect(text).toContain('bad gateway');
     expect(text).not.toContain('{{');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════
+// Phase 1：双向同步（peer 场景、sync-state 三方合并、冲突收敛）
+// ══════════════════════════════════════════════════════════════════
+
+/** 一份合法的远端供应商条目。 */
+function remoteProvider(
+  overrides: Partial<NonNullable<SyncSnapshot['providers']>[number]> = {},
+): NonNullable<SyncSnapshot['providers']>[number] {
+  return {
+    id: 'p_1',
+    name: 'wllapi',
+    providerKey: 'wllapi',
+    apiType: 'openai',
+    baseUrl: 'https://api.example.com/v1',
+    apiKey: 'sk-remote',
+    models: ['gpt-6-luna'],
+    enabled: true,
+    priority: 1,
+    createdBy: 'u_1',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function providersSnapshot(
+  providers: Array<NonNullable<SyncSnapshot['providers']>[number]>,
+  overrides: Partial<SyncSnapshot> = {},
+): SyncSnapshot {
+  return {
+    schemaVersion: 1,
+    exportedAt: '2026-01-01T00:00:00.000Z',
+    masterId: 'peer_b',
+    scopes: ['providers'],
+    providers,
+    ...overrides,
+  };
+}
+
+function remoteSettings(
+  overrides: Partial<NonNullable<SyncSnapshot['settings']>> = {},
+): NonNullable<SyncSnapshot['settings']> {
+  return {
+    defaultProviderId: 'p_1',
+    defaultModel: 'gpt-6-luna',
+    approvalReviewModel: null,
+    protocolConversion: false,
+    disableCodexWebSearch: true,
+    codexStreamMaxRetries: 10,
+    codexStreamIdleTimeoutMs: 600_000,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+/** 读某条基线，供断言"有没有推进"；同步文件不暴露 API，只能从仓储看。 */
+function baseHash(
+  repos: TenantRepos,
+  scope: 'providers' | 'settings' | 'agentTargets',
+  targetId: string,
+): string | undefined {
+  return repos.syncState
+    .read()
+    .entries.find((entry) => entry.scope === scope && entry.targetId === targetId)?.hash;
+}
+
+describe('同步：快照导出补齐 Phase 1 字段', () => {
+  it('供应商带 imageModels / modelCapabilities / notes / websiteUrl', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    repos.providers.saveAll([
+      sampleProvider({
+        apiKey: secrets.encode('sk-x'),
+        imageModels: ['gpt-image-2'],
+        modelCapabilities: {
+          'gpt-6-luna': {
+            contextWindow: 128_000,
+            maxOutputTokens: 4_096,
+            supportsReasoning: true,
+            reasoningEfforts: ['high', 'low'],
+            inputModalities: ['text', 'image'],
+          },
+        },
+        notes: '主线路',
+        websiteUrl: 'https://example.com',
+      }),
+    ]);
+
+    const snapshot = new SyncService(repos, secrets, instanceId).exportSnapshot(['providers']);
+    expect(snapshot.providers?.[0].imageModels).toEqual(['gpt-image-2']);
+    expect(snapshot.providers?.[0].modelCapabilities?.['gpt-6-luna']).toMatchObject({
+      contextWindow: 128_000,
+      reasoningEfforts: ['high', 'low'],
+    });
+    expect(snapshot.providers?.[0].notes).toBe('主线路');
+    expect(snapshot.providers?.[0].websiteUrl).toBe('https://example.com');
+  });
+
+  it('设置带两个 Codex 流式字段，agentTargets 带 updatedAt', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const settings = repos.settings.read();
+    repos.settings.write({
+      ...settings,
+      codexStreamMaxRetries: 7,
+      codexStreamIdleTimeoutMs: 123_456,
+      agentTargets: {
+        codex: {
+          mode: 'direct',
+          directProviderId: 'p_1',
+          directModel: 'gpt-6-luna',
+          updatedAt: '2026-03-03T00:00:00.000Z',
+        },
+      },
+    });
+
+    const snapshot = new SyncService(repos, secrets, instanceId).exportSnapshot([
+      'settings',
+      'agentTargets',
+    ]);
+    expect(snapshot.settings?.codexStreamMaxRetries).toBe(7);
+    expect(snapshot.settings?.codexStreamIdleTimeoutMs).toBe(123_456);
+    expect(snapshot.agentTargets?.codex.updatedAt).toBe('2026-03-03T00:00:00.000Z');
+  });
+});
+
+describe('同步：三方合并（sync-state 基线）', () => {
+  it('建立基线后仅本地变：保留本地且不推进基线', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const service = new SyncService(repos, secrets, instanceId);
+    repos.providers.saveAll([
+      sampleProvider({ apiKey: secrets.encode('sk-a'), updatedAt: '2026-01-01T00:00:00.000Z' }),
+    ]);
+
+    // 第一次拉取内容一致 → 建立基线
+    const initial = service.applySnapshot(
+      providersSnapshot([remoteProvider({ apiKey: 'sk-a' })]),
+    );
+    expect(initial.conflicts).toHaveLength(0);
+    const firstBase = baseHash(repos, 'providers', 'p_1');
+    expect(firstBase).toMatch(/^[0-9a-f]{64}$/);
+
+    // 只有本地改
+    repos.providers.saveAll([
+      sampleProvider({
+        apiKey: secrets.encode('sk-local-new'),
+        updatedAt: '2026-02-01T00:00:00.000Z',
+      }),
+    ]);
+    const result = service.applySnapshot(providersSnapshot([remoteProvider({ apiKey: 'sk-a' })]));
+
+    expect(result.conflicts).toHaveLength(0);
+    expect(secrets.decode(repos.providers.list()[0].apiKey)).toBe('sk-local-new');
+    // 关键：基线不能推进，否则下次拉取会把这次本地改动当成"已同步"而覆盖掉
+    expect(baseHash(repos, 'providers', 'p_1')).toBe(firstBase);
+  });
+
+  it('建立基线后仅远端变：应用远端并推进基线', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const service = new SyncService(repos, secrets, instanceId);
+    repos.providers.saveAll([
+      sampleProvider({ apiKey: secrets.encode('sk-a'), updatedAt: '2026-01-01T00:00:00.000Z' }),
+    ]);
+    service.applySnapshot(providersSnapshot([remoteProvider({ apiKey: 'sk-a' })]));
+
+    const result = service.applySnapshot(
+      providersSnapshot([
+        remoteProvider({
+          apiKey: 'sk-b',
+          updatedAt: '2026-03-01T00:00:00.000Z',
+        }),
+      ]),
+    );
+
+    expect(result.applied).toBe(1);
+    expect(result.conflicts).toHaveLength(0);
+    expect(secrets.decode(repos.providers.list()[0].apiKey)).toBe('sk-b');
+    // 应用远端保留远端 updatedAt（不是本机 now）
+    expect(repos.providers.list()[0].updatedAt).toBe('2026-03-01T00:00:00.000Z');
+    expect(baseHash(repos, 'providers', 'p_1')).not.toBeUndefined();
+  });
+
+  it('两侧都改成同一内容：收敛并计数', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const service = new SyncService(repos, secrets, instanceId);
+    repos.providers.saveAll([
+      sampleProvider({ apiKey: secrets.encode('sk-a'), updatedAt: '2026-01-01T00:00:00.000Z' }),
+    ]);
+    service.applySnapshot(providersSnapshot([remoteProvider({ apiKey: 'sk-a' })]));
+
+    // 两边各自改成了同样的内容（时间不同也无所谓，内容哈希一致）
+    repos.providers.saveAll([
+      sampleProvider({ apiKey: secrets.encode('sk-same'), updatedAt: '2026-02-01T00:00:00.000Z' }),
+    ]);
+    const result = service.applySnapshot(
+      providersSnapshot([
+        remoteProvider({ apiKey: 'sk-same', updatedAt: '2026-03-01T00:00:00.000Z' }),
+      ]),
+    );
+
+    expect(result.applied).toBe(1);
+    expect(result.conflicts).toHaveLength(0);
+    expect(secrets.decode(repos.providers.list()[0].apiKey)).toBe('sk-same');
+    expect(baseHash(repos, 'providers', 'p_1')).not.toBeUndefined();
+  });
+
+  it('两侧都改且内容不同：冲突、保留本地、不推进基线', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const service = new SyncService(repos, secrets, instanceId);
+    repos.providers.saveAll([
+      sampleProvider({ apiKey: secrets.encode('sk-a'), updatedAt: '2026-01-01T00:00:00.000Z' }),
+    ]);
+    service.applySnapshot(providersSnapshot([remoteProvider({ apiKey: 'sk-a' })]));
+    const baseBefore = baseHash(repos, 'providers', 'p_1');
+
+    repos.providers.saveAll([
+      sampleProvider({ apiKey: secrets.encode('sk-local'), updatedAt: '2026-02-01T00:00:00.000Z' }),
+    ]);
+    const result = service.applySnapshot(
+      providersSnapshot([
+        remoteProvider({ apiKey: 'sk-remote-new', updatedAt: '2026-03-01T00:00:00.000Z' }),
+      ]),
+    );
+
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0].scope).toBe('providers');
+    expect(result.conflicts[0].changedFields).toContain('apiKey');
+    expect(secrets.decode(repos.providers.list()[0].apiKey)).toBe('sk-local');
+    expect(baseHash(repos, 'providers', 'p_1')).toBe(baseBefore);
+  });
+
+  it('没有基线的首次同步仍按 updatedAt：本地更新且不同 → 冲突', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    repos.providers.saveAll([
+      sampleProvider({
+        apiKey: secrets.encode('sk-local'),
+        updatedAt: '2026-06-01T00:00:00.000Z',
+      }),
+    ]);
+
+    const result = new SyncService(repos, secrets, instanceId).applySnapshot(
+      providersSnapshot([remoteProvider({ apiKey: 'sk-remote' })]),
+    );
+    expect(result.conflicts).toHaveLength(1);
+    expect(secrets.decode(repos.providers.list()[0].apiKey)).toBe('sk-local');
+  });
+});
+
+describe('同步：冲突 upsert 与收敛清理', () => {
+  function seedConflict(): {
+    repos: TenantRepos;
+    secrets: ReturnType<typeof createSecretCodec>;
+    service: SyncService;
+  } {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    repos.providers.saveAll([
+      sampleProvider({
+        apiKey: secrets.encode('sk-local'),
+        updatedAt: '2026-06-01T00:00:00.000Z',
+      }),
+    ]);
+    return { repos, secrets, service: new SyncService(repos, secrets, instanceId) };
+  }
+
+  it('重复拉取同一目标只保留一条冲突，但会更新远端值', () => {
+    const { repos, service } = seedConflict();
+    const first = service.applySnapshot(
+      providersSnapshot([remoteProvider({ name: '远端一', apiKey: 'sk-r1' })]),
+    );
+    expect(first.conflicts).toHaveLength(1);
+    const id = first.conflicts[0].id;
+
+    const second = service.applySnapshot(
+      providersSnapshot([remoteProvider({ name: '远端二', apiKey: 'sk-r2' })]),
+    );
+
+    expect(second.conflicts).toHaveLength(1);
+    expect(second.conflicts[0].id).toBe(id);
+    expect(second.conflicts[0].remoteValue).toMatchObject({ name: '远端二' });
+    // 落盘也只有一条，不是累积成两条
+    expect(repos.syncConflicts.list()).toHaveLength(1);
+  });
+
+  it('本地内容追上远端后，下一次拉取删除已有冲突', () => {
+    const { repos, secrets, service } = seedConflict();
+    const first = service.applySnapshot(
+      providersSnapshot([remoteProvider({ apiKey: 'sk-remote' })]),
+    );
+    expect(first.conflicts).toHaveLength(1);
+    expect(repos.syncConflicts.list()).toHaveLength(1);
+
+    // 用户手工把本地改成与远端一致（等价于"选远端"之外的另一条收敛路径）
+    repos.providers.saveAll([
+      sampleProvider({
+        apiKey: secrets.encode('sk-remote'),
+        updatedAt: '2026-07-01T00:00:00.000Z',
+      }),
+    ]);
+    const second = service.applySnapshot(
+      providersSnapshot([remoteProvider({ apiKey: 'sk-remote' })]),
+    );
+
+    expect(second.conflicts).toHaveLength(0);
+    expect(repos.syncConflicts.list()).toHaveLength(0);
+  });
+
+  it('选 local 后把基线推进到远端哈希：再拉同一份远端不会重复报冲突', () => {
+    const { repos, secrets, service } = seedConflict();
+    const snapshot = providersSnapshot([remoteProvider({ apiKey: 'sk-remote' })]);
+    const first = service.applySnapshot(snapshot);
+    expect(first.conflicts).toHaveLength(1);
+
+    expect(service.resolveConflict(first.conflicts[0].id, 'local')).toBe(true);
+    expect(secrets.decode(repos.providers.list()[0].apiKey)).toBe('sk-local');
+
+    const second = service.applySnapshot(snapshot);
+    expect(second.conflicts).toHaveLength(0);
+    expect(second.applied).toBe(0);
+    expect(secrets.decode(repos.providers.list()[0].apiKey)).toBe('sk-local');
+    expect(baseHash(repos, 'providers', 'p_1')).not.toBeUndefined();
+  });
+
+  it('选 remote 后应用远端内容与 updatedAt，并推进基线', () => {
+    const { repos, secrets, service } = seedConflict();
+    const snapshot = providersSnapshot([
+      remoteProvider({ apiKey: 'sk-remote', updatedAt: '2026-03-01T00:00:00.000Z' }),
+    ]);
+    const first = service.applySnapshot(snapshot);
+
+    expect(service.resolveConflict(first.conflicts[0].id, 'remote')).toBe(true);
+    const record = repos.providers.list()[0];
+    expect(secrets.decode(record.apiKey)).toBe('sk-remote');
+    expect(record.updatedAt).toBe('2026-03-01T00:00:00.000Z');
+
+    const second = service.applySnapshot(snapshot);
+    expect(second.conflicts).toHaveLength(0);
+    expect(second.applied).toBe(0);
+  });
+
+  it('对外冲突形态剔除 remoteValueSealed 与 remoteHash', () => {
+    const { service } = seedConflict();
+    const { conflicts } = service.applySnapshot(
+      providersSnapshot([remoteProvider({ apiKey: 'sk-remote' })]),
+    );
+    const publicConflict = toPublicSyncConflict(conflicts[0]);
+    expect(publicConflict).not.toHaveProperty('remoteValueSealed');
+    expect(publicConflict).not.toHaveProperty('remoteHash');
+  });
+});
+
+describe('同步：settings 与 agentTargets 的三方合并', () => {
+  it('设置仅远端变：覆盖并保留远端 updatedAt，网关令牌不动', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const service = new SyncService(repos, secrets, instanceId);
+    repos.settings.write({ ...repos.settings.read(), ...remoteSettings() });
+    service.applySnapshot({
+      schemaVersion: 1,
+      exportedAt: '2026-01-01T00:00:00.000Z',
+      masterId: 'peer_b',
+      scopes: ['settings'],
+      settings: remoteSettings(),
+    });
+
+    const result = service.applySnapshot({
+      schemaVersion: 1,
+      exportedAt: '2026-01-01T00:00:00.000Z',
+      masterId: 'peer_b',
+      scopes: ['settings'],
+      settings: remoteSettings({
+        defaultModel: 'gpt-6-nova',
+        codexStreamMaxRetries: 3,
+        updatedAt: '2026-05-01T00:00:00.000Z',
+      }),
+    });
+
+    expect(result.applied).toBe(1);
+    const after = repos.settings.read();
+    expect(after.defaultModel).toBe('gpt-6-nova');
+    expect(after.codexStreamMaxRetries).toBe(3);
+    expect(after.updatedAt).toBe('2026-05-01T00:00:00.000Z');
+  });
+
+  it('旧快照缺流式字段时按默认值处理，不把本机设成 null', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const service = new SyncService(repos, secrets, instanceId);
+    const legacy = remoteSettings();
+    delete (legacy as { codexStreamMaxRetries?: number | null }).codexStreamMaxRetries;
+    delete (legacy as { codexStreamIdleTimeoutMs?: number | null }).codexStreamIdleTimeoutMs;
+
+    service.applySnapshot({
+      schemaVersion: 1,
+      exportedAt: '2026-01-01T00:00:00.000Z',
+      masterId: 'peer_old',
+      scopes: ['settings'],
+      settings: legacy,
+    });
+
+    const after = repos.settings.read();
+    expect(after.codexStreamMaxRetries).toBe(10);
+    expect(after.codexStreamIdleTimeoutMs).toBe(600_000);
+  });
+
+  it('agentTargets 应用远端时保留远端 updatedAt，且不推进 settings.updatedAt', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const settings = repos.settings.read();
+    repos.settings.write({ ...settings, updatedAt: '2026-01-01T00:00:00.000Z' });
+    const service = new SyncService(repos, secrets, instanceId);
+
+    const result = service.applySnapshot({
+      schemaVersion: 1,
+      exportedAt: '2026-01-01T00:00:00.000Z',
+      masterId: 'peer_b',
+      scopes: ['agentTargets'],
+      agentTargets: {
+        codex: {
+          mode: 'direct',
+          directProviderId: 'p_1',
+          directModel: 'gpt-6-luna',
+          updatedAt: '2026-05-01T00:00:00.000Z',
+        },
+      },
+    });
+
+    expect(result.applied).toBe(1);
+    const after = repos.settings.read();
+    expect(after.agentTargets.codex).toMatchObject({
+      mode: 'direct',
+      directProviderId: 'p_1',
+      directModel: 'gpt-6-luna',
+      updatedAt: '2026-05-01T00:00:00.000Z',
+    });
+    // AgentTarget 是设置的一部分，但不该让"整份设置"看起来变过
+    expect(after.updatedAt).toBe('2026-01-01T00:00:00.000Z');
+    expect(baseHash(repos, 'agentTargets', 'codex')).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('agentTargets 也会产生冲突，并能用远端版解决', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const settings = repos.settings.read();
+    repos.settings.write({
+      ...settings,
+      agentTargets: {
+        codex: {
+          mode: 'gateway',
+          directProviderId: null,
+          directModel: null,
+          updatedAt: '2026-06-01T00:00:00.000Z',
+        },
+      },
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const service = new SyncService(repos, secrets, instanceId);
+    const snapshot: SyncSnapshot = {
+      schemaVersion: 1,
+      exportedAt: '2026-01-01T00:00:00.000Z',
+      masterId: 'peer_b',
+      scopes: ['agentTargets'],
+      agentTargets: {
+        codex: {
+          mode: 'direct',
+          directProviderId: 'p_1',
+          directModel: 'gpt-6-luna',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+    };
+
+    const result = service.applySnapshot(snapshot);
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0].scope).toBe('agentTargets');
+    expect(result.conflicts[0].targetId).toBe('codex');
+    // 冲突期间保留本地
+    expect(repos.settings.read().agentTargets.codex?.mode).toBe('gateway');
+
+    expect(service.resolveConflict(result.conflicts[0].id, 'remote')).toBe(true);
+    expect(repos.settings.read().agentTargets.codex).toMatchObject({
+      mode: 'direct',
+      directProviderId: 'p_1',
+      directModel: 'gpt-6-luna',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const again = service.applySnapshot(snapshot);
+    expect(again.conflicts).toHaveLength(0);
+  });
+});
+
+describe('同步：lastMasterChanged 不误报', () => {
+  it('首次拉取（lastMasterId 为 null）不算换机', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const service = new SyncService(repos, secrets, instanceId);
+    service.applySnapshot(providersSnapshot([], { masterId: 'peer_first' }));
+    expect(service.takeMasterChanged()).toBe(false);
+  });
+
+  it('确实换了实例标识才提示', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const settings = repos.settings.read();
+    repos.settings.write({
+      ...settings,
+      sync: { ...settings.sync, lastMasterId: 'peer_old' },
+    });
+    const service = new SyncService(repos, secrets, instanceId);
+    service.applySnapshot(providersSnapshot([], { masterId: 'peer_new' }));
+    expect(service.takeMasterChanged()).toBe(true);
+  });
+
+  it('同一实例标识不提示', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    const settings = repos.settings.read();
+    repos.settings.write({
+      ...settings,
+      sync: { ...settings.sync, lastMasterId: 'peer_same' },
+    });
+    const service = new SyncService(repos, secrets, instanceId);
+    service.applySnapshot(providersSnapshot([], { masterId: 'peer_same' }));
+    expect(service.takeMasterChanged()).toBe(false);
+  });
+});
+
+describe('同步：快照校验', () => {
+  it('本机导出的快照能通过校验（往返一致）', () => {
+    const { repos, secrets, instanceId } = makeTenant('k');
+    repos.providers.saveAll([
+      sampleProvider({
+        apiKey: secrets.encode('sk-x'),
+        imageModels: ['gpt-image-2'],
+        modelCapabilities: { 'gpt-6-luna': { contextWindow: 1_000_000 } },
+      }),
+    ]);
+    const exported = new SyncService(repos, secrets, instanceId).exportSnapshot([
+      'providers',
+      'settings',
+      'agentTargets',
+    ]);
+    const result = validateSyncSnapshot(exported);
+    expect(result.ok).toBe(true);
+  });
+
+  it('未来 schemaVersion 明确拒绝，而不是按当前结构硬解读', () => {
+    const raw: unknown = { ...providersSnapshot([remoteProvider()]), schemaVersion: 2 };
+    const result = validateSyncSnapshot(raw);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.messageKey).toBe('sync.snapshot.futureSchema');
+      expect(result.params).toMatchObject({ remote: 2, local: 1 });
+    }
+  });
+
+  it('结构不合法统一返回 sync.snapshot.malformed', () => {
+    const cases: unknown[] = [
+      null,
+      'not-a-snapshot',
+      {},
+      { schemaVersion: 1 },
+      { schemaVersion: 1, exportedAt: 'x', masterId: '', scopes: [] },
+      { schemaVersion: 1, exportedAt: 'x', masterId: 'm', scopes: ['nope'] },
+      { schemaVersion: 1, exportedAt: 'x', masterId: 'm', scopes: ['settings'], settings: {} },
+      {
+        schemaVersion: 1,
+        exportedAt: 'x',
+        masterId: 'm',
+        scopes: ['agentTargets'],
+        agentTargets: { codex: { mode: 'sideways', directProviderId: null, directModel: null } },
+      },
+      providersSnapshot([remoteProvider({ apiType: 'grpc' })]),
+    ];
+    for (const raw of cases) {
+      const result = validateSyncSnapshot(raw);
+      expect(result.ok, JSON.stringify(raw)).toBe(false);
+      if (!result.ok) expect(result.messageKey).toBe('sync.snapshot.malformed');
+    }
+  });
+
+  it('provider id 重复被拒绝（否则会静默相互覆盖）', () => {
+    const result = validateSyncSnapshot(
+      providersSnapshot([remoteProvider({ id: 'p_dup' }), remoteProvider({ id: 'p_dup' })]),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.messageKey).toBe('sync.snapshot.malformed');
+      expect(String(result.params.reason)).toContain('duplicate');
+    }
   });
 });

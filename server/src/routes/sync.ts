@@ -4,18 +4,23 @@ import type { TenantRepos } from '../store/tenantScope';
 import { defineRoute, getPrincipal } from '../http/guard';
 import type { RouteRegistry } from '../http/routeRegistry';
 import { badRequest, forbidden } from '../http/errors';
+import { can } from '../auth/policy';
 import { SyncSealedUnavailableError, SyncService } from '../services/sync';
 import {
   SYNC_SCOPES,
   SYNC_SCOPE_LABELS,
+  canPullSnapshot,
+  canServeSnapshot,
   defaultSyncConfig,
+  toPublicSyncConflict,
+  validateSyncSnapshot,
   type SyncRole,
   type SyncScope,
 } from '../domain/sync';
 import { translate } from '../i18n';
 import type { UiLanguage } from '../domain/settings';
 
-const ROLES: readonly SyncRole[] = ['standalone', 'master', 'follower'];
+const ROLES: readonly SyncRole[] = ['standalone', 'master', 'follower', 'peer'];
 
 function parseScopes(raw: unknown): SyncScope[] {
   if (!Array.isArray(raw)) throw badRequest('sync.scopes.mustBeArray');
@@ -84,10 +89,10 @@ function assertSecureTransport(request: FastifyRequest, ctx: AppContext): void {
 }
 
 /**
- * 校验 follower 要连的 master 地址。
+ * 校验 follower / peer 要连的对端地址。
  *
  * 与上面的检查互补：上面管"我导出时链路是否加密"，这里管"我拉取时链路是否加密"。
- * 少了后者，follower 会把 master 的 API 令牌与拉回的明文 Key 走明文 HTTP 送出去。
+ * 少了后者，拉取方会把对端的 API 令牌与拉回的明文 Key 走明文 HTTP 送出去。
  */
 function assertMasterUrlAllowed(masterUrl: string, allowInsecure: boolean): void {
   let parsed: URL;
@@ -152,11 +157,20 @@ export function registerSyncRoutes(
     app,
     registry,
     { method: 'GET', url: '/api/sync/status', access: 'settings:read' },
-    async () => {
+    async (request) => {
+      const principal = getPrincipal(request);
       const config = service.readConfig();
       const conflicts = repos.syncConflicts.list();
       return {
         config,
+        // 前端据这两个字段决定显示「导出快照」/「立即同步」：peer 两者都要显示。
+        // 早先只有角色字符串，前端只能复制一份"master 才能导出"的规则。
+        canServe: canServeSnapshot(config.role),
+        canPull: canPullSnapshot(config.role),
+        // 告诉界面当前身份到底有没有相应权限，避免渲染出一个点了会 403 的按钮。
+        // 尤其 admin 有 sync:write 但没有 sync:read（导出会把全部 Key 明文带走）。
+        hasSyncRead: can(principal, 'sync:read'),
+        hasSyncWrite: can(principal, 'sync:write'),
         // 前端据此渲染勾选项，避免在两处维护范围清单与文案
         availableScopes: SYNC_SCOPES.map((scope) => ({
           scope,
@@ -205,10 +219,16 @@ export function registerSyncRoutes(
 
       if (body.scopes !== undefined) next.scopes = parseScopes(body.scopes);
 
-      // follower 必须有 master 地址，否则拉取时无从下手——在保存时就拦住，
+      // follower 与 peer 都必须有对端地址，否则拉取时无从下手——在保存时就拦住，
       // 比等到点"同步"才报错更早暴露配置漏项
-      if (next.role === 'follower' && !next.masterUrl) {
-        throw badRequest('sync.masterUrl.requiredForFollower');
+      if ((next.role === 'follower' || next.role === 'peer') && !next.masterUrl) {
+        // peer 不是 follower：文案要写明两端都是 peer 时各自都要填对端地址，
+        // 否则用户会以为这句话只约束 follower。
+        throw badRequest(
+          next.role === 'peer'
+            ? 'sync.masterUrl.requiredForPeer'
+            : 'sync.masterUrl.requiredForFollower',
+        );
       }
 
       repos.settings.write({
@@ -221,7 +241,7 @@ export function registerSyncRoutes(
   );
 
   /**
-   * 导出快照（master 侧，供 follower 拉取）。
+   * 导出快照（master / peer 侧，供 follower / peer 拉取）。
    *
    * 三个必须的防护，缺一不可：
    * 1. 独立权限 `sync:read`（不是 settings:*）——它能导出全部上游 Key 明文
@@ -234,7 +254,8 @@ export function registerSyncRoutes(
     { method: 'GET', url: '/api/sync/snapshot', access: 'sync:read' },
     async (request, reply) => {
       const config = service.readConfig();
-      if (config.role !== 'master') {
+      // master / peer 都能提供快照：peer 是对等的双向节点，不是"只能拉"的角色
+      if (!canServeSnapshot(config.role)) {
         throw badRequest('sync.role.mustBeMasterToExport');
       }
 
@@ -272,11 +293,11 @@ export function registerSyncRoutes(
   );
 
   /**
-   * 主动拉取（follower 侧）。
+   * 主动拉取（follower / peer 侧）。
    *
-   * 由本机发起、用用户填的 API 令牌去调 master 的 snapshot 接口，
-   * 再应用到本地。不走"master 推送"——推送需要 master 知道所有 follower 地址，
-   * 那反而要求每个 follower 都对外可达，与"多设备互联"的初衷相反。
+   * 由本机发起、用用户填的 API 令牌去调对端的 snapshot 接口，
+   * 再应用到本地。不走"对端推送"——推送需要对端知道所有拉取方地址，
+   * 那反而要求每个拉取方都对外可达，与"多设备互联"的初衷相反。
    */
   defineRoute(
     app,
@@ -286,7 +307,8 @@ export function registerSyncRoutes(
     { method: 'POST', url: '/api/sync/pull', access: 'sync:write' },
     async (request) => {
       const config = service.readConfig();
-      if (config.role !== 'follower') {
+      // follower / peer 都能拉取；peer 同时还能对外提供快照
+      if (!canPullSnapshot(config.role)) {
         throw badRequest('sync.role.mustBeFollowerToPull');
       }
       if (!config.masterUrl) throw badRequest('sync.pull.noMasterUrl');
@@ -310,30 +332,43 @@ export function registerSyncRoutes(
       const url = `${config.masterUrl}/api/sync/snapshot?scopes=${scopes.join(',')}`;
 
       const startedAt = Date.now();
-      let snapshot;
-      try {
-        const response = await fetch(url, {
-          headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
-          signal: AbortSignal.timeout(30_000),
-        });
-        if (!response.ok) {
-          const text = await response.text();
-          // 不要把整个响应体带进错误（可能是 master 的错误细节），只要前 200 字
-          throw badRequest('sync.pull.badStatus', {
-            status: response.status,
-            // 只留前 200 字：整段响应可能是 master 的错误细节，可能很长
-            reason: text.slice(0, 200) || '(empty response)',
-          });
-        }
-        snapshot = (await response.json()) as Parameters<typeof service.applySnapshot>[0];
-      } catch (cause) {
+      // 网络层的失败与"响应不合法"分开处理：前者通常是地址/连通性问题，
+      // 后者说明对端不是本服务或版本不兼容，报错要能让人分辨。
+      const response = await fetch(url, {
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+        signal: AbortSignal.timeout(30_000),
+      }).catch((cause: unknown): never => {
         if (cause instanceof Error && cause.name === 'TimeoutError') {
           throw badRequest('sync.pull.timeout');
         }
         throw badRequest('sync.pull.failed', {
           reason: cause instanceof Error ? cause.message : String(cause),
         });
+      });
+
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw badRequest('sync.pull.badStatus', {
+          status: response.status,
+          // 只留前 200 字：整段响应可能是对端的错误细节，可能很长
+          reason: text.slice(0, 200) || '(empty response)',
+        });
       }
+
+      let raw: unknown;
+      try {
+        raw = await response.json();
+      } catch {
+        throw badRequest('sync.pull.badPayload', { reason: 'invalid JSON' });
+      }
+
+      // 不能 `as SyncSnapshot` 直接信任对端：可能是旧版本、别的服务、
+      // 或被中间人改过。坏结构进合并逻辑后可能写坏数据文件。
+      const validation = validateSyncSnapshot(raw);
+      if (!validation.ok) {
+        throw badRequest(validation.messageKey, validation.params);
+      }
+      const snapshot = validation.snapshot;
 
       const { applied, conflicts } = service.applySnapshot(snapshot);
       const masterChanged = service.takeMasterChanged();
@@ -360,7 +395,9 @@ export function registerSyncRoutes(
         updatedAt: new Date().toISOString(),
       });
 
-      return { applied, conflicts, summary };
+      // 冲突里带 `remoteValueSealed`（凭据副本）与 `remoteHash`（内部基线），
+      // 两者都不能出接口——响应只给公开形态。
+      return { applied, conflicts: conflicts.map(toPublicSyncConflict), summary };
     },
   );
 
@@ -370,9 +407,10 @@ export function registerSyncRoutes(
     { method: 'GET', url: '/api/sync/conflicts', access: 'settings:read' },
     async () => ({
       // 剔除 `remoteValueSealed`：它是给服务端内部"选远端"时还原用的，
-      // 前端并不需要（`SyncConflict` 类型里也没有这个字段）。留着它等于把
+      // 前端并不需要（`SyncConflictPublic` 类型里没有这个字段）。留着它等于把
       // 一份可能是明文的凭据副本发给了只需 settings:read 的人。
-      conflicts: repos.syncConflicts.list().map(({ remoteValueSealed: _sealed, ...rest }) => rest),
+      // `remoteHash` 同理：它是内部基线，对外没有意义。
+      conflicts: repos.syncConflicts.list().map(toPublicSyncConflict),
     }),
   );
 

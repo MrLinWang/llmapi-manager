@@ -8,6 +8,8 @@ import type { RequestLogRecord } from '../domain/requestLog';
 import type { ApiTokenRecord } from '../domain/apiToken';
 import type { SyncConflict, SyncConflictsData } from '../domain/sync';
 import { defaultSyncConflictsData } from '../domain/sync';
+import type { SyncStateData } from '../domain/syncState';
+import { SYNC_STATE_SCHEMA_VERSION, defaultSyncStateData } from '../domain/syncState';
 import { createJsonFile, appendJsonLine, readJsonLines, type JsonFile } from './jsonFile';
 import type { StorePaths } from './paths';
 import type { IdentityRepo } from './identityRepo';
@@ -45,6 +47,17 @@ export interface SyncConflictRepo {
   clear(): void;
 }
 
+/**
+ * 同步基线仓储。
+ *
+ * 只给同步服务内部用，**不挂任何路由**：用户不需要看到哈希，
+ * 而暴露它只会多一个可被误改的入口。
+ */
+export interface SyncStateRepo {
+  read(): SyncStateData;
+  write(data: SyncStateData): void;
+}
+
 export interface RequestLogRepo {
   append(record: RequestLogRecord): void;
   recent(limit: number): RequestLogRecord[];
@@ -59,6 +72,7 @@ export interface TenantRepos {
   readonly requestLog: RequestLogRepo;
   readonly apiTokens: ApiTokenRepo;
   readonly syncConflicts: SyncConflictRepo;
+  readonly syncState: SyncStateRepo;
 }
 
 export interface Store {
@@ -159,12 +173,49 @@ export function createStore(
       clear: () => syncConflictsFile.write({ conflicts: [] }),
     };
 
+    const syncStateFile = createJsonFile<SyncStateData>({
+      filePath: paths.syncStateFile(tenantId),
+      schemaVersion: SYNC_STATE_SCHEMA_VERSION,
+      defaultValue: defaultSyncStateData,
+      logger,
+    });
+
+    const syncState: SyncStateRepo = {
+      read: () => {
+        const data = syncStateFile.read();
+        // 手改坏的 entries 不能让整次合并崩掉：非数组按空基线处理，
+        // 逐条过滤掉结构不对的项（宁可冲突判贵一点，也不要 500）。
+        const entries = Array.isArray(data?.entries)
+          ? data.entries.filter(
+              (entry) =>
+                entry &&
+                typeof entry === 'object' &&
+                typeof entry.scope === 'string' &&
+                typeof entry.targetId === 'string' &&
+                typeof entry.hash === 'string' &&
+                entry.hash !== '',
+            )
+          : [];
+        return { entries, updatedAt: data?.updatedAt ?? new Date().toISOString() };
+      },
+      write: (next) => syncStateFile.write(next),
+    };
+
     const requestLog: RequestLogRepo = {
       append: (record) => appendJsonLine(logFile, record),
       recent: (limit) => readJsonLines<RequestLogRecord>(logFile, limit).reverse(),
     };
 
-    return { tenantId, providers, settings, agents, requestLog, apiTokens, syncConflicts };
+    return {
+      tenantId,
+      providers,
+      settings,
+      agents,
+      requestLog,
+      apiTokens,
+      syncConflicts,
+      syncState,
+    };
   };
 
   return {

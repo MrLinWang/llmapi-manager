@@ -290,7 +290,9 @@ export class AgentService {
       };
     }
 
-    const result = await stopCodexProcesses(this.ctx.config.agentHomeDir, language);
+    const result = await stopCodexProcesses(this.ctx.config.agentHomeDir, language, {
+      codexBin: this.ctx.config.codexBin,
+    });
     const actions = [...result.actions];
     // 一个进程都没探测到也要说清楚，否则前端只能靠 actions 是否为空去推断，
     // 用户看到"什么都没发生"会怀疑按钮坏了。

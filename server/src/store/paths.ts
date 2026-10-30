@@ -56,4 +56,14 @@ export class StorePaths {
     return path.join(this.tenantDir(tenantId), 'sync-conflicts.json');
   }
 
+  /**
+   * 同步基线文件：每租户一份，记录双方上次确认过的内容哈希。
+   *
+   * 单独成文件而不是塞进 `settings.sync`：它是合并算法的内部状态，
+   * 且会随同步条数增长；混进设置会让每次读设置都带上一份可能很大的
+   * 哈希表。它也不经任何接口暴露。
+   */
+  syncStateFile(tenantId: string): string {
+    return path.join(this.tenantDir(tenantId), 'sync-state.json');
+  }
 }

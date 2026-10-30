@@ -83,6 +83,11 @@ async function main(): Promise<void> {
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  // Windows 上 Ctrl+Break / 关闭控制台窗口走 SIGBREAK；不注册的话 Node 默认直接退出，
+  // 正在写的日志与 JSON 落盘没有机会收尾。非 Windows 平台没有这个信号，注册也无意义。
+  if (process.platform === 'win32') {
+    process.on('SIGBREAK', () => void shutdown('SIGBREAK'));
+  }
 }
 
 /**

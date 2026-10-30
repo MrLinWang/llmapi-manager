@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  llmapi-manager 的 WinSW 2.12 服务配置模板。
+
+  由 scripts/windows/install-service.ps1 读取并替换 __PLACEHOLDER__ 后写到安装目录：
+      <安装目录>\llmapi-manager-service.xml
+
+  %BASE% 是 WinSW 自己注入的环境变量，指向重命名后的 llmapi-manager-service.exe
+  所在目录（即安装目录根），所以 executable / workingdirectory / arguments 都以 %BASE%
+  为基准。node.exe 与 server\dist\index.js 都在安装目录根下。
+-->
+<service>
+  <id>__SERVICE_ID__</id>
+  <name>__DISPLAY_NAME__</name>
+  <description>__DESCRIPTION__</description>
+
+  <!-- 固定 Node 22 LTS x64，入口是编译后的 server/dist/index.js -->
+  <executable>%BASE%\node.exe</executable>
+  <arguments>"%BASE%\server\dist\index.js"</arguments>
+  <workingdirectory>%BASE%</workingdirectory>
+
+  <env name="NODE_ENV" value="production"/>
+
+  <startmode>Automatic</startmode>
+  <stoptimeout>20 sec</stoptimeout>
+
+  <!-- 崩溃自动重启：10s / 30s / 60s；稳定运行 1 小时后重置失败计数 -->
+  <onfailure action="restart" delay="10 sec"/>
+  <onfailure action="restart" delay="30 sec"/>
+  <onfailure action="restart" delay="60 sec"/>
+  <resetfailure>1 hour</resetfailure>
+
+  <!-- 服务标准输出/错误与运行日志同目录：%ProgramData%\llmapi-manager\log -->
+  <logpath>__LOG_DIR__</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+
+  <!-- 默认空：LocalSystem；自定义账号时由 install-service.ps1 填入 serviceaccount 块 -->
+__SERVICE_ACCOUNT_BLOCK__
+</service>

@@ -34,9 +34,11 @@ log/                  运行日志（app.log + 滚动文件），已 gitignore
 web/                  React 18 + Vite + Tailwind
   src/lib/            api 封装、鉴权上下文、useAsync、类型、labels（枚举文案键）
   src/i18n/           i18next 初始化、语言探测、日期本地化、locales/{zh,en}/ 按区域字典
-  src/pages/          Login / Setup / Layout / Overview / Providers / Models / Agents / Settings
+  src/pages/          Login / Setup / Layout / Overview / Providers / Models / Agents / Sync / Settings
   src/components/     ui 基础件、ProviderForm、CopyButton、LanguageSelect
   test/               页面装配测试 + 字典契约 + 硬编码扫描（jsdom + testing-library）
+scripts/windows/      Windows 便携包/Inno 安装器/WinSW 服务脚本（需在 Windows 运行）
+.github/workflows/    Ubuntu + Windows CI、Windows 打包与便携包冒烟
 ```
 
 ## 常用命令
@@ -424,36 +426,79 @@ Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities
   与服务端 `domain/settings.ts` 的 `UI_LANGUAGES` 各加一个值——**两处必须同步**，
   否则会出现"保存成功但界面不认"。
 
-### 17. 多设备同步只传明文凭据，且必须走 HTTPS
+### 17. 多设备同步：peer 双向、三方基线、明文凭据
 
-配置同步（`server/src/routes/sync.ts`）把一台机器的配置复制到另一台。两条硬规则：
+配置同步（`server/src/routes/sync.ts` / `server/src/services/sync.ts`）把一台机器的配置
+复制到另一台。角色分 `standalone` / `master` / `follower` / `peer`：`peer` 同时导出快照
+并拉取对端，两端都设 `peer` 就是双向同步；**拉取仍由接收方发起**，没有推送、没有定时任务，
+拉取令牌只来自请求体、不落盘。
 
-- **跨机传的是明文，不是密文。** `enc:v1:` 绑定本机 `DATA_ENCRYPTION_KEY`，
-  换个密钥就解不开。所以 master 侧 `secrets.decode()` → TLS → follower 侧
-  `secrets.encode()`。由此推出：快照响应必须 `no-store`、**绝不进请求日志**
-  （只记"谁导出了多少条"）。
-- **传输安全看实际请求，不看配置字符串。** 早先按 `publicBaseUrl` 判断，而它在
-  未配置时由监听地址推导（`HOST=0.0.0.0` → `http://127.0.0.1`），被当成"回环所以安全"
-  ——对外监听的服务明文就能取走全部上游 Key。现在读 `request.protocol`，且只有在
-  部署者显式 `TRUST_PROXY=1` 时才采信 `X-Forwarded-Proto`（`trustProxy` 只信任回环
-  来源，防止外部伪造）。follower 侧的 `masterUrl` 同样要校验，否则令牌与 Key 走明文出去。
-- `sync:read`（导出快照）与 `sync:write`（拉取/仲裁）**刻意分开**：前者能把全部
-  上游 Key 明文导出去，admin 只有 `sync:write`。默认不给任何角色。
+四条硬规则：
 
-### 18. 时间戳比较用数值，不用字符串
+- **跨机传的是明文，不是密文。** `enc:v1:` 绑定本机 `DATA_ENCRYPTION_KEY`，换个密钥就解不开。
+  所以导出侧 `secrets.decode()` → TLS → 拉取侧 `secrets.encode()`。由此推出：快照响应必须
+  `no-store`、**绝不进请求日志**（只记"谁导出了多少条"）。
+- **传输安全看实际请求，不看配置字符串。** 早先按 `publicBaseUrl` 判断，而它在未配置时由
+  监听地址推导（`HOST=0.0.0.0` → `http://127.0.0.1`），被当成"回环所以安全"——对外监听的
+  服务明文就能取走全部上游 Key。现在读 `request.protocol`，且只有在部署者显式 `TRUST_PROXY=1`
+  时才采信 `X-Forwarded-Proto`（`trustProxy` 只信任回环来源，防止外部伪造）。拉取侧的
+  `masterUrl` 同样要校验，否则令牌与 Key 走明文出去。
+- `sync:read`（导出快照）与 `sync:write`（拉取/仲裁）**刻意分开**：前者能把全部上游 Key
+  明文导出去，admin 只有 `sync:write`。`peer` 要两者兼备才能既提供又拉取。
+- **合并用三方基线，不靠时间戳猜。** 每租户 `sync-state.json` 存规范内容的 SHA-256：
+  有 base 时按 `localHash !== base` / `remoteHash !== base` 判断哪侧改过；只有本地变就保留
+  本地且**不推进 base**，只有远端变才应用，两边都变且内容不同才冲突。冲突按
+  `(scope, targetId)` upsert，收敛后清理旧冲突；`remoteValueSealed` 与 `remoteHash` 都不能出接口。
+  应用远端保留远端 `updatedAt`；解决 `local` 时把 base 推进到 `remoteHash`，避免下次拉取
+  反过来覆盖本地选择。
+- 拉取侧必须 `validateSyncSnapshot`：未来版本返回 `sync.snapshot.futureSchema`，结构错误返回
+  `sync.snapshot.malformed`，不能 `as SyncSnapshot` 直接信任对端。同步范围必须覆盖
+  `imageModels` / `modelCapabilities` / `notes` / `websiteUrl` 与两个 Codex 流式字段。
 
-同步要判断"谁更新"，而 `updatedAt` 来自另一台机器、时区写法不保证一致。
-`'2026-05-05T10:00:00+08:00'`（=02:00Z）按字典序排在 `'2026-05-05T05:00:00.000Z'`
-之后，但它实际更早——直接比字符串会把"远端更新"误判成"本地更新"，产生假冲突并
-保留本该被覆盖的旧值。一律用 `Date.parse()` 比数值。
+**不做删除传播**（没有 tombstone，远端缺失的本地记录保留）；一端只配一个对端；
+`peer` 两端都暴露快照接口，任意一端泄露 `sync:read` 令牌都等于泄露全部上游 Key。
 
-另外**时间戳相同但内容不同也要判冲突**：让远端静默覆盖等于丢掉本地改动，
-那正是同步功能承诺要避免的事。
+### 18. 时间戳只做首次兜底，收敛判断用内容哈希
+
+有 `sync-state.json` 基线时，**不要用 `updatedAt` 判断谁更新**——时钟偏移、改完又改回、
+"远端只是还没拉取"都会让时间戳给出错误结论。收敛/冲突一律走内容哈希的三方比较。
+
+只在**首次同步没有 base** 时才用 `Date.parse()` 的数值比较兜底：`'2026-05-05T10:00:00+08:00'`
+按字典序排在 `'2026-05-05T05:00:00.000Z'` 之后，但它实际更早——直接比字符串会把"远端更新"
+误判成"本地更新"。首次兜底的判据是**本地不早于远端（含相等）且内容不同 → 冲突**；
+时间戳相同但内容不同也必须判冲突，让远端静默覆盖等于丢掉本地改动。
+
+### 19. Windows 端是正式支持，但不要假装已实测
+
+- **进程**：`agents/processes.ts` 在 `win32` 用 PowerShell `Get-CimInstance Win32_Process`
+  取进程表（UTF-8 + `ConvertTo-Json -Compress`），探测失败要产生
+  `agents.process.tableUnavailable` 告警，不能静默当"没有进程"；结束进程用
+  `taskkill /PID <pid> /T /F`；`codex` 通过 `CODEX_BIN` 或 `cmd.exe /d /s /c` 调用，pid 文件兜底保留。
+- **文件/路径**：JSON/TOML 解析前 `stripBom`；`writeFileAtomic` 的 rename 在
+  `EPERM/EBUSY/EACCES` 重试；SPA fallback 用 `path.join`；`SIGBREAK` 关闭钩子；
+  `udpStack` 的 DNS 在 Windows 用 `Get-DnsClientServerAddress`。
+- **安装包/服务**：`scripts/windows/` 是 Windows 专属（Inno Setup + WinSW + 自带 Node 22 x64）。
+  `.env` 必须收紧 ACL；`ADMIN_PASSWORD` 只在首次启动建号、健康检查通过后从 `.env` 删除；
+  LocalSystem 服务必须显式 `AGENT_HOME_DIR` 并给 `.codex` / `.claude` 授权；防火墙默认不勾选。
+- **验证边界**：本仓库开发环境是 Linux，**不能声称 Windows 服务/安装器已实测**。改 Windows
+  逻辑时：纯函数测试要在 Linux 能跑；POSIX-only 用例用 `it.skipIf(process.platform === 'win32')`；
+  Windows 行为最终看 `windows-latest` CI / 用户机器。临时文件用 `os.tmpdir()`，不要写死 `/tmp`。
+- Windows 原生 EasyTier 模块不编译；同局域网 HTTP 同步不依赖它，继续用 `builtin` 引擎。
 
 ## 改动后的自检清单
 
-- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 694 + web 37 = 731 项）。
+- `npm run typecheck` 与 `npm test` 都必须通过（当前基线：server 762 + web 42 = 804 项）。
 - 新增/修改 `/api` 路由 → 确认已用 `defineRoute` 声明权限，且 `npm test` 里的冒烟用例仍能登录访问。
+- 改到同步 → 补 `server/test/sync.test.ts` / `syncBidirectional.test.ts`，并在
+  `server/test/smoke.test.ts` 验：peer 可导出/拉取、follower 不能导出、master 不能拉取、
+  `canServe/canPull/hasSyncRead/hasSyncWrite`、Pull 响应不含 `remoteValueSealed`/`remoteHash`、
+  未来/畸形快照 400、镜像 `imageModels/modelCapabilities`/流式字段/agentTargets。改到
+  `sync-state.json` 时确认"仅本地变不推进 base"和"解决 local 后不反复冲突"。
+- 改到 Windows 平台分支（进程、路径、BOM/CRLF、原子写重试、SPA fallback、SIGBREAK、DNS）→
+  纯函数测试在 Linux 通过；POSIX-only 用例 `skipIf(win32)`；临时文件用 `os.tmpdir()`；
+  Windows 实际行为最终看 `windows-latest` CI，**不要本地 Linux 绿了就声称 Windows 已验证**。
+- 改安装包/服务脚本 → 在 Windows runner 上构建并用解压后的便携包跑 `/api/health` 冒烟；
+  服务安装、ACL、防火墙、Inno 完成页需在真实 Windows 验证。
 - 修改别名逻辑 → 补 `server/test/aliases.test.ts` 的边界（未知 key、禁用、未声明模型、格式残缺）。
 - 修改 Agent 补丁 → 补 `server/test/agents.test.ts`，必须覆盖"保留无关配置"与"还原冲突"。
 - 修改存储 → 补 `server/test/storage.test.ts`（原子写、损坏隔离、未来版本隔离）。
@@ -493,7 +538,10 @@ Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities
 - 不做**任意**协议互转：只有 `/v1/responses → openai`（Chat）这一个方向有转换器。
   `/v1/messages`、`/v1/chat/completions` 等其余组合一律 501，
   即便 `protocolConversion` 开着也不会转换——别偷偷转发到错误路径。
-- 不做计费、配额、多用户 UI、MCP/Skills/会话管理、桌面打包。
+- 不做计费、配额、多用户 UI、MCP/Skills/会话管理、桌面应用（托盘/GUI）打包；
+  Windows 服务安装包在 `scripts/windows/` 下提供，不属于桌面打包。
+- 同步不做**自动后台/定时/推送**，只做接收方手动拉取；不做删除传播（无 tombstone）；
+  不做多 peer 网状同步。`peer` 两端都暴露快照，按高敏接口对待。
 - 不把 JSON 文件存储换成数据库，除非任务明确要求；Repository 接口已就位，替换时不要改路由契约。
 - 不要引入第二套状态管理或数据请求库来"重写"现有 `useAsync`。前端依赖刻意保持精简
   （目前额外依赖只有 i18n 的 `i18next` + `react-i18next`，见第 16 条）；新增依赖要有明确必要性。
@@ -507,6 +555,8 @@ Codex 目录里的 `supported_reasoning_levels` **只来自** `modelCapabilities
 - `docs/api.md` 接口参考
 - `docs/gateway.md` 别名、选路、转发
 - `docs/agents.md` Agent 配置下发
+- `docs/sync.md` 多设备同步（peer、三方合并、冲突、Windows/局域网）
+- `docs/windows.md` Windows 安装包/服务/防火墙/排错
 - `docs/configuration.md` 环境变量与数据目录
 - `docs/security.md` 鉴权、权限、凭据与安全边界
 - `docs/development.md` 开发、测试、扩展方式

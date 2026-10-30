@@ -97,8 +97,9 @@ export const zhAgents = {
     appliedWithRunning_other:
       '配置已写入，但检测到 {{count}} 个 {{agent}} 进程仍在运行。它们用的是旧配置，必须退出后重新启动才生效。',
     reopenCodexHint:
-      '重新打开 Codex 即可加载最新配置。也可手动执行 <code>pkill -9 -f codex</code> 来清理相关进程。',
-    manualKillHint: '也可手动执行 <code>pkill -9 -f codex</code> 来清理相关进程。',
+      '重新打开 Codex 即可加载最新配置。也可手动结束残留进程：Windows 用任务管理器或 <code>taskkill /F /IM codex.exe</code>，Linux/macOS 用 <code>pkill -9 -f codex</code>。',
+    manualKillHint:
+      '也可手动结束残留进程：Windows 用任务管理器或 <code>taskkill /F /IM codex.exe</code>，Linux/macOS 用 <code>pkill -9 -f codex</code>。',
     webSearchOff: '已关闭联网搜索并重新应用配置。Codex 不再发送 web_search 工具。',
     webSearchOn: '已开启联网搜索并重新应用配置。上游若不支持该工具会报 unsupported_tool。',
     streamCleared: '已清空流式参数（改用 Codex 默认）。已重新应用配置。重启 Codex 后生效。',

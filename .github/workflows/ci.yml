@@ -1,0 +1,206 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+  windows-package:
+    name: windows-package
+    runs-on: windows-latest
+    needs: test
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 没有 Inno Setup 时 build-package.ps1 只生成便携 zip；安装失败不阻塞打包。
+      - name: Install Inno Setup (best effort)
+        continue-on-error: true
+        run: choco install innosetup --no-progress -y
+
+      - name: PowerShell syntax check (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $failed = $false
+          Get-ChildItem scripts/windows -Filter *.ps1 | ForEach-Object {
+            $file = $_
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              foreach ($e in $errors) {
+                Write-Host "::error file=$($file.FullName)::$($e.Message)"
+              }
+            } else {
+              Write-Host "OK: $($file.Name)"
+            }
+          }
+          if ($failed) { throw 'PowerShell syntax check failed' }
+
+      - name: Build portable package (and installer when Inno Setup exists)
+        shell: powershell
+        run: ./scripts/windows/build-package.ps1 -SkipNpmCi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-package
+          path: |
+            dist/windows/*.zip
+            dist/windows/*.exe
+            dist/windows/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-smoke:
+    name: windows-smoke
+    runs-on: windows-latest
+    needs: windows-package
+    timeout-minutes: 20
+    steps:
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-package
+          path: dist-package
+
+      - name: Extract and boot portable package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $zip = Get-ChildItem dist-package -Filter *.zip | Select-Object -First 1
+          if ($null -eq $zip) { throw '找不到便携 zip artifact' }
+
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'llmapi-smoke-package'
+          if (Test-Path $extractRoot) { Remove-Item $extractRoot -Recurse -Force }
+          Expand-Archive -Path $zip.FullName -DestinationPath $extractRoot -Force
+          $packageRoot = Get-ChildItem $extractRoot -Directory | Select-Object -First 1
+          if ($null -eq $packageRoot) { throw '便携 zip 没有顶层目录' }
+          $packageRootPath = $packageRoot.FullName
+          Write-Host "解压到：$packageRootPath"
+
+          # 用临时数据/日志目录和固定初始口令，避免写 ProgramData，也不依赖交互式初始化令牌
+          $dataDir = Join-Path $env:RUNNER_TEMP 'llmapi-smoke-data'
+          $logDir = Join-Path $env:RUNNER_TEMP 'llmapi-smoke-log'
+          if (Test-Path $dataDir) { Remove-Item $dataDir -Recurse -Force }
+          if (Test-Path $logDir) { Remove-Item $logDir -Recurse -Force }
+          $encryptionKey = -join (1..64 | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
+          $envLines = @(
+            'HOST=127.0.0.1',
+            'PORT=8799',
+            'PUBLIC_BASE_URL=http://127.0.0.1:8799',
+            ('DATA_DIR="' + $dataDir + '"'),
+            ('LOG_DIR="' + $logDir + '"'),
+            ('DATA_ENCRYPTION_KEY=' + $encryptionKey),
+            'ADMIN_USERNAME=admin',
+            'ADMIN_PASSWORD=Smoke-Test-Password-123',
+            ('AGENT_HOME_DIR="' + $env:RUNNER_TEMP + '"')
+          )
+          $envText = ($envLines -join "`r`n") + "`r`n"
+          [System.IO.File]::WriteAllText(
+            (Join-Path $packageRootPath '.env'),
+            $envText,
+            (New-Object System.Text.UTF8Encoding($false))
+          )
+
+          $stdoutLog = Join-Path $env:RUNNER_TEMP 'llmapi-smoke-stdout.log'
+          $stderrLog = Join-Path $env:RUNNER_TEMP 'llmapi-smoke-stderr.log'
+          $nodeExe = Join-Path $packageRootPath 'node.exe'
+          if (-not (Test-Path $nodeExe)) { throw "便携包缺少 node.exe：$nodeExe" }
+          foreach ($dependency in @('server\node_modules\fastify', 'server\dist\index.js', 'web\dist\index.html')) {
+            if (-not (Test-Path (Join-Path $packageRootPath $dependency))) {
+              throw "便携包缺少：$dependency"
+            }
+          }
+
+          $proc = Start-Process -FilePath $nodeExe `
+            -ArgumentList 'server\dist\index.js' `
+            -WorkingDirectory $packageRootPath `
+            -WindowStyle Hidden `
+            -PassThru `
+            -RedirectStandardOutput $stdoutLog `
+            -RedirectStandardError $stderrLog
+
+          try {
+            $health = $null
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Seconds 2
+              try {
+                $health = Invoke-RestMethod -Uri 'http://127.0.0.1:8799/api/health' -TimeoutSec 3 -UseBasicParsing
+                if ($health.ok -eq $true) { break }
+              } catch {
+                $health = $null
+              }
+            }
+
+            if ($null -eq $health -or $health.ok -ne $true) {
+              $appLog = Join-Path $logDir 'app.log'
+              if (Test-Path $appLog) { Get-Content $appLog -Tail 80 }
+              if (Test-Path $stderrLog) { Get-Content $stderrLog -Tail 80 }
+              throw '健康检查失败：/api/health 未返回 ok=true'
+            }
+            Write-Host "health: $($health | ConvertTo-Json -Compress)"
+            if ($health.gatewayBaseUrl -ne 'http://127.0.0.1:8799/v1') {
+              throw "gatewayBaseUrl 不符合预期：$($health.gatewayBaseUrl)"
+            }
+
+            $index = Invoke-WebRequest -Uri 'http://127.0.0.1:8799/' -UseBasicParsing -TimeoutSec 10
+            if ($index.StatusCode -ne 200) { throw "GET / 返回 $($index.StatusCode)" }
+            if ($index.Content -notmatch '<div id="root">') { throw 'GET / 返回的不是前端 index.html' }
+
+            Write-Host 'windows-smoke OK：便携包可解压、可启动、/api/health 与前端首页均正常'
+          } finally {
+            if ($null -ne $proc -and -not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force
+            }
+          }

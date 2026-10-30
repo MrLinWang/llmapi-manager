@@ -220,6 +220,40 @@ function installFetch(): void {
 
 installFetch();
 
+/**
+ * 同步状态 mock 的公共部分。
+ *
+ * `canServe` / `canPull` 是**角色能力**（master/peer 可提供、follower/peer 可拉取），
+ * `hasSyncRead` / `hasSyncWrite` 是**账号权限**。页面必须组合两者门控，
+ * 不能只看角色——否则会出现"界面允许点、服务端 403"。
+ * 单独抽出来，用例只覆盖自己关心的差异部分。
+ */
+function syncStatusRoute(
+  config: Record<string, unknown>,
+  capabilities: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    config: {
+      scopes: ['providers'],
+      lastPullAt: '2026-01-01T00:00:00.000Z',
+      lastPullResult: '从 https://box.example.com:8787 拉取完成：应用 2 项，产生 1 条冲突待仲裁',
+      ...config,
+    },
+    availableScopes: [
+      { scope: 'providers', label: '供应商与模型（含上游 API Key，跨机重新加密）' },
+      { scope: 'settings', label: '网关设置（默认模型、跨协议转发、审批模型等）' },
+      { scope: 'agentTargets', label: 'Agent 连接方式（走网关 / 直连）' },
+    ],
+    conflictCount: 1,
+    neverSynced: ['登录口令', '会话 cookie', 'DATA_ENCRYPTION_KEY', '网关令牌'],
+    canServe: true,
+    canPull: true,
+    hasSyncRead: true,
+    hasSyncWrite: true,
+    ...capabilities,
+  };
+}
+
 describe('前端页面装配', () => {
   it('登录页渲染用户名、口令与登录按钮', async () => {
     const { render, screen } = await import('@testing-library/react');
@@ -439,8 +473,8 @@ describe('前端页面装配', () => {
 
   it('结束 Codex 进程后的提示包含手动清理命令', async () => {
     // 自动结束是尽力而为：`codex app-server daemon stop` 在配置目录只读时会失败，
-    // 非标准位置启动的进程也可能匹配不到。提示里必须给出 `pkill -9 -f codex`，
-    // 否则用户看到"已结束"或一句失败原因后不知道下一步该做什么。
+    // 非标准位置启动的进程也可能匹配不到。提示里必须同时给出 Windows 与 POSIX 的
+    // 手动结束方式，否则 Windows 用户看到一条本机不存在的 `pkill` 命令无从下手。
     setOverrides({
       '/api/agents/codex/stop-processes': {
         actions: ['已结束 1 个 Codex 客户端进程'],
@@ -461,11 +495,11 @@ describe('前端页面装配', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '退出 Codex 进程' }));
 
-    // 逐字断言整句，不做"包含 pkill 就算过"的宽松检查：
+    // 逐字断言整句，不做"包含 taskkill 就算过"的宽松检查：
     // 用户要的就是这句话，措辞与换行都不能漂。
     await waitFor(() =>
       expect(document.body.textContent ?? '').toContain(
-        '也可手动执行 pkill -9 -f codex 来清理相关进程',
+        'Windows 用任务管理器或 taskkill /F /IM codex.exe',
       ),
     );
     // 提示里也要保留"重开 Codex 才生效"这一层，不能只剩命令
@@ -506,7 +540,7 @@ describe('前端页面装配', () => {
       ),
     );
     const text = document.body.textContent ?? '';
-    expect(text).toContain('也可手动执行 pkill -9 -f codex 来清理相关进程');
+    expect(text).toContain('Windows 用任务管理器或 taskkill /F /IM codex.exe');
     setOverrides({});
   });
 
@@ -530,7 +564,7 @@ describe('前端页面装配', () => {
 
     await waitFor(() =>
       expect(document.body.textContent ?? '').toContain(
-        '也可手动执行 pkill -9 -f codex 来清理相关进程',
+        'Windows 用任务管理器或 taskkill /F /IM codex.exe',
       ),
     );
     setOverrides({});
@@ -654,29 +688,18 @@ describe('前端页面装配', () => {
     setOverrides({});
   });
 
-  it('同步页展示角色、同步范围、永不互传项与冲突仲裁', async () => {
-    // 这是「多设备配置同步」的前端门面。三个点必须在页面上看得见：
-    // 1. 三种角色，且 master 的代价（对外提供含上游 Key 明文的快照）写出来；
-    // 2. 关闭同步时行为不变（默认 standalone）；
-    // 3. "口令/会话/网关令牌/密钥永远不同步"这条必须显式展示，
-    //    用户最担心的就是它 —— 靠 availableScopes 推是推不出来的。
+  it('同步页展示四种角色、双向语义、永不互传项与冲突仲裁', async () => {
+    // 这是「多设备配置同步」的前端门面。必须看得见：
+    // 1. 四种角色（方向），且 master/peer 的代价（对外提供含上游 Key 明文的快照）写出来；
+    // 2. peer 的双向语义（既提供也拉取，两端都要设 peer、各自持对方令牌）；
+    // 3. 关闭同步时行为不变（默认 standalone）；
+    // 4. "口令/会话/网关令牌/密钥永远不同步" + "删除不传播"；
+    // 5. 冲突仲裁支持 providers/settings/agentTargets 三种 scope。
     setOverrides({
-      '/api/sync/status': {
-        config: {
-          role: 'follower',
-          masterUrl: 'https://box.example.com:8787',
-          scopes: ['providers'],
-          lastPullAt: '2026-01-01T00:00:00.000Z',
-          lastPullResult: '从 https://box.example.com:8787 拉取完成：应用 2 项，产生 1 条冲突待仲裁',
-        },
-        availableScopes: [
-          { scope: 'providers', label: '供应商与模型（含上游 API Key，跨机重新加密）' },
-          { scope: 'settings', label: '网关设置（默认模型、跨协议转发、审批模型等）' },
-          { scope: 'agentTargets', label: 'Agent 连接方式（走网关 / 直连）' },
-        ],
-        conflictCount: 1,
-        neverSynced: ['登录口令', '会话 cookie', 'DATA_ENCRYPTION_KEY', '网关令牌'],
-      },
+      '/api/sync/status': syncStatusRoute({
+        role: 'follower',
+        masterUrl: 'https://box.example.com:8787',
+      }),
       '/api/sync/conflicts': {
         conflicts: [
           {
@@ -707,21 +730,31 @@ describe('前端页面装配', () => {
       </MemoryRouter>,
     );
 
-    // 角色三选一都渲染出来，且 master 的代价写清楚。
+    // 四角色卡片都渲染出来，且 master 的代价写清楚。
     // follower 会出现两次：页头徽标 + 角色卡片，所以用 getAllByText。
     expect(await screen.findByText('主设备（master）')).toBeTruthy();
     expect(screen.getAllByText('跟随设备（follower）').length).toBeGreaterThan(0);
+    expect(screen.getByText('双向对等（peer）')).toBeTruthy();
     expect(screen.getByText('不参与同步')).toBeTruthy();
-    expect(document.body.textContent ?? '').toContain('含上游 API Key');
+
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('含上游 API Key');
+    // peer 描述必须写清"同时提供 + 拉取"，不能沿用单向说法
+    expect(body).toContain('同时向对端提供快照并从对端拉取');
+    expect(body).toContain('双向');
+    // 旧文案「让其余设备跟随」是单向措辞，必须删掉
+    expect(body).not.toContain('让其余设备跟随');
+    // 删除不传播这条语义要显式展示（否则用户以为另一端删了这里会跟着删）
+    expect(body).toContain('删除不会传播');
 
     // 永远不会同步的项必须显式列出
-    expect(document.body.textContent ?? '').toContain('永远不会同步');
-    expect(document.body.textContent ?? '').toContain('DATA_ENCRYPTION_KEY');
+    expect(body).toContain('永远不会同步');
+    expect(body).toContain('DATA_ENCRYPTION_KEY');
 
-    // follower 才有拉取入口：master 地址已预填，令牌框是 password 型（不回显）
-    const tokenInput = (await screen.findByLabelText('Master 的 API 令牌')) as HTMLInputElement;
+    // follower 才有拉取入口：对端地址已预填，令牌框是 password 型（不回显）
+    const tokenInput = (await screen.findByLabelText('对端的 API 令牌')) as HTMLInputElement;
     expect(tokenInput.type).toBe('password');
-    expect((screen.getByLabelText('Master 地址') as HTMLInputElement).value).toBe(
+    expect((screen.getByLabelText('对端地址') as HTMLInputElement).value).toBe(
       'https://box.example.com:8787',
     );
     expect(screen.getByRole('button', { name: '立即同步' })).toBeTruthy();
@@ -735,7 +768,267 @@ describe('前端页面装配', () => {
     expect(screen.getByRole('button', { name: '用远端' })).toBeTruthy();
 
     // 有待仲裁项时顶部常驻提醒
-    expect(document.body.textContent ?? '').toContain('尚未仲裁');
+    expect(body).toContain('尚未仲裁');
+    setOverrides({});
+  });
+
+  it('peer 角色既显示拉取入口，也显示快照导出与双向提示', async () => {
+    setOverrides({
+      '/api/sync/status': syncStatusRoute({
+        role: 'peer',
+        masterUrl: 'http://192.168.1.10:8787',
+      }),
+      '/api/sync/conflicts': { conflicts: [] },
+    });
+    const { render, screen } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const SyncPage = (await import('../src/pages/SyncPage')).default;
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <SyncPage />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // peer 角色下页头徽标与角色卡片都会显示这个名字，用 findAllByText
+    expect((await screen.findAllByText('双向对等（peer）')).length).toBeGreaterThan(0);
+    const body = document.body.textContent ?? '';
+
+    // 拉取侧：对端地址 + 令牌 + 立即同步
+    expect((screen.getByLabelText('对端地址') as HTMLInputElement).value).toBe(
+      'http://192.168.1.10:8787',
+    );
+    expect(screen.getByLabelText('对端的 API 令牌')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '立即同步' })).toBeTruthy();
+
+    // 提供侧：导出快照说明必须按 sync:read 讲权限
+    expect(body).toContain('导出快照（供对端拉取）');
+    expect(body).toContain('sync:read');
+
+    // 双向提示：两端都要设 peer，且各自准备对方可用的令牌
+    expect(body).toContain('双向对等（peer）要做的两件事');
+    expect(body).toContain('两端都设为 peer');
+    // peer 同样要提示两台机器都对外暴露快照
+    expect(body).toContain('两台机器都会对外暴露快照接口');
+    setOverrides({});
+  });
+
+  it('没有 sync:write / sync:read 时给出可操作提示，并禁用拉取与仲裁', async () => {
+    // 权限必须按服务端下发的 canServe/canPull/hasSync* 门控，而不是按角色推导：
+    // 角色只决定方向，账号权限才决定"能不能真的做"。
+    setOverrides({
+      '/api/sync/status': syncStatusRoute(
+        { role: 'peer', masterUrl: 'https://box.example.com:8787' },
+        // canServe/canPull 是角色能力（peer 两者都能），hasSync* 才是账号权限；
+        // 缺权限时页面必须仍然展示区块，但禁用操作并给出提示。
+        { canServe: true, canPull: true, hasSyncRead: false, hasSyncWrite: false },
+      ),
+      '/api/sync/conflicts': {
+        conflicts: [
+          {
+            id: 'c_1',
+            scope: 'providers',
+            targetId: 'p_1',
+            targetLabel: 'Mock OpenAI',
+            localUpdatedAt: '2026-01-01T00:00:00.000Z',
+            remoteUpdatedAt: '2026-01-02T00:00:00.000Z',
+            changedFields: ['models'],
+            localValue: { name: 'Mock OpenAI', models: ['gpt-x'] },
+            remoteValue: { name: 'Mock OpenAI', models: ['gpt-y'] },
+            detectedAt: '2026-01-02T00:00:00.000Z',
+          },
+        ],
+      },
+    });
+    const { render, screen } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const SyncPage = (await import('../src/pages/SyncPage')).default;
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <SyncPage />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('立即同步');
+    const body = document.body.textContent ?? '';
+    // 无 sync:write：拉取与仲裁都要给出可操作提示（去设置 → API 令牌授予）
+    expect(body).toContain('当前账号没有 sync:write');
+    // 无 sync:read：导出快照的说明要指出缺哪个权限
+    expect(body).toContain('当前账号没有 sync:read');
+    expect(body).toContain('设置 → API 令牌');
+
+    // 按钮真的被禁用，而不是点了才 403
+    expect((screen.getByRole('button', { name: '立即同步' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect((screen.getByRole('button', { name: '用本地' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+    expect(
+      (screen.getByLabelText('对端的 API 令牌') as HTMLInputElement).disabled,
+    ).toBe(true);
+    setOverrides({});
+  });
+
+  it('冲突仲裁支持 agentTargets，且能把选择提交到 resolve 接口', async () => {
+    requests = [];
+    setOverrides({
+      '/api/sync/status': syncStatusRoute({
+        role: 'peer',
+        masterUrl: 'https://box.example.com:8787',
+      }),
+      '/api/sync/conflicts': {
+        conflicts: [
+          {
+            id: 'c_agent',
+            scope: 'agentTargets',
+            targetId: 'codex',
+            targetLabel: 'Codex CLI',
+            localUpdatedAt: '2026-01-01T00:00:00.000Z',
+            remoteUpdatedAt: '2026-01-02T00:00:00.000Z',
+            changedFields: ['mode', 'directProviderId'],
+            localValue: { mode: 'gateway' },
+            remoteValue: { mode: 'direct', directProviderId: 'p_1' },
+            detectedAt: '2026-01-02T00:00:00.000Z',
+          },
+        ],
+      },
+    });
+    const { render, screen, fireEvent, waitFor } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const SyncPage = (await import('../src/pages/SyncPage')).default;
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <SyncPage />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // scope 徽标显示成可读名，而不是 agentTargets 标识符
+    expect(await screen.findByText('Agent 连接方式')).toBeTruthy();
+    // agentTargets 的冲突值是 { mode, directProviderId }，要渲染成键值而不是空白
+    const body = document.body.textContent ?? '';
+    expect(body).toContain('mode=gateway');
+    expect(body).toContain('directProviderId=p_1');
+
+    fireEvent.click(screen.getByRole('button', { name: '用远端' }));
+    await waitFor(() => {
+      expect(
+        requests.some(
+          (item) =>
+            item.method === 'POST' && item.path === '/api/sync/conflicts/c_agent/resolve',
+        ),
+      ).toBe(true);
+    });
+    const posted = requests.find(
+      (item) => item.method === 'POST' && item.path === '/api/sync/conflicts/c_agent/resolve',
+    );
+    expect(posted?.body).toBe(JSON.stringify({ choice: 'remote' }));
+    setOverrides({});
+  });
+
+  it('切到 peer 要二次确认，确认后把角色与对端地址一起提交', async () => {
+    const originalConfirm = window.confirm;
+    const confirmed: string[] = [];
+    window.confirm = (message?: string) => {
+      confirmed.push(String(message));
+      return true;
+    };
+    requests = [];
+    setOverrides({
+      '/api/sync/status': syncStatusRoute({
+        role: 'follower',
+        masterUrl: 'https://box.example.com:8787',
+      }),
+      '/api/sync/conflicts': { conflicts: [] },
+    });
+    try {
+      const { render, screen, fireEvent, waitFor } = await import('@testing-library/react');
+      const { MemoryRouter } = await import('react-router-dom');
+      const { AuthProvider } = await import('../src/lib/auth');
+      const SyncPage = (await import('../src/pages/SyncPage')).default;
+
+      render(
+        <MemoryRouter>
+          <AuthProvider>
+            <SyncPage />
+          </AuthProvider>
+        </MemoryRouter>,
+      );
+
+      await screen.findByText('双向对等（peer）');
+      fireEvent.click(screen.getByRole('button', { name: /双向对等（peer）/ }));
+
+      await waitFor(() => {
+        expect(
+          requests.some(
+            (item) => item.method === 'PATCH' && item.path === '/api/sync/config',
+          ),
+        ).toBe(true);
+      });
+      // 二次确认必须出现，且文案写清是双向（两台机器都对外暴露）
+      expect(confirmed).toHaveLength(1);
+      expect(confirmed[0]).toContain('双向');
+
+      const patched = requests.find(
+        (item) => item.method === 'PATCH' && item.path === '/api/sync/config',
+      );
+      // 角色与地址一起提交：peer 必须有 masterUrl，分两次提交会被 400 挡回来
+      expect(JSON.parse(patched?.body ?? '{}')).toEqual({
+        role: 'peer',
+        masterUrl: 'https://box.example.com:8787',
+      });
+    } finally {
+      window.confirm = originalConfirm;
+      setOverrides({});
+    }
+  });
+
+  it('拉取失败时给出 SYNC_ALLOW_INSECURE 与 Windows 防火墙排查提示', async () => {
+    setOverrides({
+      '/api/sync/status': syncStatusRoute({
+        role: 'follower',
+        masterUrl: 'http://192.168.1.10:8787',
+      }),
+      '/api/sync/conflicts': { conflicts: [] },
+      '/api/sync/pull': {
+        error: { code: 'sync.pull.failed', message: '拉取失败：无法连接对端' },
+        statusCode: 400,
+      },
+    });
+    const { render, screen, fireEvent, waitFor } = await import('@testing-library/react');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { AuthProvider } = await import('../src/lib/auth');
+    const SyncPage = (await import('../src/pages/SyncPage')).default;
+
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <SyncPage />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    const tokenInput = await screen.findByLabelText('对端的 API 令牌');
+    fireEvent.change(tokenInput, { target: { value: 'api_test' } });
+    fireEvent.click(screen.getByRole('button', { name: '立即同步' }));
+
+    await waitFor(() => expect(screen.getByText('拉取失败：无法连接对端')).toBeTruthy());
+    const body = document.body.textContent ?? '';
+    // 局域网明文 HTTP 与 Windows 防火墙是这类失败最常见的原因，必须给出排查路径
+    expect(body).toContain('SYNC_ALLOW_INSECURE=1');
+    expect(body).toContain('防火墙');
+    expect(body).toContain('TCP 8787');
     setOverrides({});
   });
 
