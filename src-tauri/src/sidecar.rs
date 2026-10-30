@@ -47,9 +47,14 @@ impl Sidecar {
             }
             // A stale setup.json makes the server reuse a token hash and skip
             // printing the token. Remove it and give the server one clean start.
-            fs::remove_file(paths.setup_file()).map_err(|error| {
-                format!("无法清理旧的初始化状态 {}: {error}", paths.setup_file().display())
-            })?;
+            if let Err(error) = fs::remove_file(paths.setup_file()) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(format!(
+                        "无法清理旧的初始化状态 {}: {error}",
+                        paths.setup_file().display()
+                    ));
+                }
+            }
         }
         Err(last_error)
     }
@@ -74,7 +79,6 @@ impl Sidecar {
         fs::create_dir_all(&paths.log)
             .map_err(|error| format!("无法创建日志目录 {}: {error}", paths.log.display()))?;
         let log_path = paths.log.join("desktop-server.log");
-        let log_offset = fs::metadata(&log_path).map(|meta| meta.len()).unwrap_or(0);
         let token = Arc::new(Mutex::new(None::<String>));
         let stderr_tail = Arc::new(Mutex::new(String::new()));
 
@@ -144,17 +148,6 @@ impl Sidecar {
                 }
                 thread::sleep(Duration::from_millis(200));
             }
-            // Belt-and-braces: if the stdout reader thread missed the line but
-            // the log did receive it, recover the token from bytes appended by
-            // this launch only (never from a previous launch's log).
-            if captured.is_none() {
-                if let Ok(bytes) = fs::read(&log_path) {
-                    if bytes.len() as u64 > log_offset {
-                        let text = String::from_utf8_lossy(&bytes[log_offset as usize..]);
-                        captured = text.lines().rev().find_map(parse_setup_token);
-                    }
-                }
-            }
         }
 
         Ok((Self { child, pid, stopped: false }, captured))
@@ -194,12 +187,15 @@ fn read_stream<R: std::io::Read + Send + 'static>(
 ) {
     let reader = BufReader::new(stream);
     for line in reader.lines().map_while(Result::ok) {
-        append_line(log_path, &line);
-        if let Some(token) = token.as_ref() {
-            if let Some(value) = parse_setup_token(&line) {
-                if let Ok(mut guard) = token.lock() {
-                    *guard = Some(value);
-                }
+        let setup_token = parse_setup_token(&line);
+        // Never write the one-time setup token to desktop-server.log. It is a
+        // credential and the log is meant to be readable while troubleshooting.
+        if setup_token.is_none() {
+            append_line(log_path, &line);
+        }
+        if let (Some(token), Some(value)) = (token.as_ref(), setup_token) {
+            if let Ok(mut guard) = token.lock() {
+                *guard = Some(value);
             }
         }
         if let Some(tail) = tail.as_ref() {
