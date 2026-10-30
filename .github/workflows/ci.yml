@@ -114,7 +114,7 @@ jobs:
           path: dist-package
 
       - name: Extract and boot portable package
-        shell: powershell
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
